@@ -75,8 +75,10 @@ CI runs on pull requests and pushes to `main`:
 - Android debug APK build
 - iOS debug build without code signing
 
-Release signing, store packaging, and production credentials are intentionally
-not stored in this repository.
+Release builds run from the `Mobile Release` workflow on `v*` tags. The workflow
+uploads Android APK/AAB artifacts, an iOS no-codesign app zip, release notes, and
+`SHA256SUMS.txt`. Android release signing is driven by repository secrets and
+never falls back to the debug key. See [docs/RELEASE.md](docs/RELEASE.md).
 
 ## License
 

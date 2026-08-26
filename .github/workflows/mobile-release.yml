@@ -1,0 +1,264 @@
+name: Mobile Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build, for example main or v0.1.0."
+        required: true
+        default: "main"
+      release_tag:
+        description: "Release tag/name used in artifact filenames, for example v0.1.0."
+        required: true
+      publish:
+        description: "Create or update the GitHub Release."
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mobile-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: "3.44.0"
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  CHECKOUT_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+jobs:
+  android:
+    name: Build Android release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Configure Android signing
+        id: android_signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          configured=0
+          missing=0
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -n "${!name}" ]; then
+              configured=1
+            else
+              missing=1
+            fi
+          done
+
+          if [ "$configured" -eq 0 ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "Android signing secrets are not configured; unsigned release artifacts will be built."
+            exit 0
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Android signing secrets are partially configured. Set all four Android signing secrets or remove them all."
+            exit 1
+          fi
+
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          chmod 600 android/app/upload-keystore.jks
+          {
+            printf 'storeFile=%s\n' 'upload-keystore.jks'
+            printf 'storePassword=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$ANDROID_KEY_PASSWORD"
+          } > android/key.properties
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build Android release artifacts
+        run: |
+          set -euo pipefail
+          flutter build apk --release
+          flutter build appbundle --release
+
+      - name: Stage Android release artifacts
+        env:
+          ANDROID_SIGNING_STATE: ${{ steps.android_signing.outputs.signed == 'true' && 'signed' || 'unsigned' }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-dist
+
+          apk_source="$(find build/app/outputs/flutter-apk -maxdepth 1 -type f -name 'app-release*.apk' | sort | tail -n 1)"
+          aab_source="$(find build/app/outputs/bundle/release -maxdepth 1 -type f -name 'app-release*.aab' | sort | tail -n 1)"
+
+          if [ -z "$apk_source" ]; then
+            echo "::error::Android release APK was not produced."
+            exit 1
+          fi
+
+          if [ -z "$aab_source" ]; then
+            echo "::error::Android release app bundle was not produced."
+            exit 1
+          fi
+
+          cp "$apk_source" "release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-${ANDROID_SIGNING_STATE}.apk"
+          cp "$aab_source" "release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-${ANDROID_SIGNING_STATE}.aab"
+          ls -lh release-dist
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-release-${{ env.RELEASE_TAG }}
+          path: release-dist/*
+          if-no-files-found: error
+
+  ios:
+    name: Build iOS release without signing
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build iOS release without codesign
+        run: flutter build ios --release --no-codesign
+
+      - name: Stage iOS release artifact
+        run: |
+          set -euo pipefail
+          mkdir -p release-dist
+          app_path="build/ios/iphoneos/Runner.app"
+
+          if [ ! -d "$app_path" ]; then
+            echo "::error::iOS Runner.app was not produced."
+            exit 1
+          fi
+
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" \
+            "release-dist/openaria-echo-mobile-${RELEASE_TAG}-ios-no-codesign.app.zip"
+          ls -lh release-dist
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-release-${{ env.RELEASE_TAG }}
+          path: release-dist/*
+          if-no-files-found: error
+
+  release:
+    name: Assemble release
+    runs-on: ubuntu-latest
+    needs: [android, ios]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+          fetch-depth: 0
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-dist
+          merge-multiple: true
+
+      - name: Generate checksums and notes
+        run: |
+          set -euo pipefail
+
+          cd release-dist
+          sha256sum * > SHA256SUMS.txt
+          cd ..
+
+          {
+            printf 'Open Aria Echo Mobile %s\n\n' "$RELEASE_TAG"
+            printf 'Artifacts\n\n'
+            find release-dist -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '- %f\n' | sort
+            printf '\n'
+            printf 'Android artifacts are signed when the repository Android signing secrets are configured; otherwise they are unsigned build outputs.\n'
+            printf 'The iOS artifact is an unsigned no-codesign app bundle intended for Apple signing outside this workflow.\n'
+          } > RELEASE_NOTES.md
+
+          cat release-dist/SHA256SUMS.txt
+
+      - name: Upload release manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-manifest-${{ env.RELEASE_TAG }}
+          path: |
+            RELEASE_NOTES.md
+            release-dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' || inputs.publish == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if ! git rev-parse "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "::error::Publishing requires ${RELEASE_TAG} to exist as a git tag."
+            exit 1
+          fi
+
+          tag_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+          head_commit="$(git rev-parse HEAD)"
+          if [ "$tag_commit" != "$head_commit" ]; then
+            echo "::error::Publishing requires the checked out commit to match ${RELEASE_TAG}."
+            echo "::error::checked out commit: ${head_commit}"
+            echo "::error::tag commit: ${tag_commit}"
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "Open Aria Echo Mobile ${RELEASE_TAG}" \
+              --notes-file RELEASE_NOTES.md
+            gh release upload "$RELEASE_TAG" release-dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-dist/* \
+              --title "Open Aria Echo Mobile ${RELEASE_TAG}" \
+              --notes-file RELEASE_NOTES.md \
+              --verify-tag
+          fi

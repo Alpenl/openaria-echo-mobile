@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -188,6 +189,27 @@ class DeviceApiClient {
     return SessionList.fromJson(json);
   }
 
+  Future<SessionDetailView> getSession(String sessionId) async {
+    final json = await _requestJson(
+      '/sessions/${Uri.encodeComponent(sessionId)}',
+    );
+    if (json == null) {
+      throw const DeviceApiException(
+        'Session detail was empty',
+        502,
+        'empty_response',
+      );
+    }
+    return SessionDetailView.fromJson(json);
+  }
+
+  Uri artifactUri(String sessionId, String artifactId) {
+    return apiUri(
+      baseUri,
+      '/sessions/${Uri.encodeComponent(sessionId)}/artifacts/${Uri.encodeComponent(artifactId)}',
+    );
+  }
+
   Future<NetworkStatusView?> getNetwork() async {
     final json = await _requestJson('/network');
     if (json == null) {
@@ -334,7 +356,80 @@ class DeviceApiClient {
     );
   }
 
+  Stream<JsonMap> captureEvents() async* {
+    final request = http.Request('GET', apiUri(baseUri, '/capture/events'));
+    request.headers.addAll(_headers('text/event-stream'));
+    final response = await _http.send(request);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final body = await response.stream.bytesToString();
+      throw DeviceApiException(
+        body.isEmpty
+            ? 'Device event stream returned ${response.statusCode}'
+            : body,
+        response.statusCode,
+        'http_${response.statusCode}',
+      );
+    }
+
+    var buffer = '';
+    await for (final chunk in response.stream.transform(utf8.decoder)) {
+      buffer += chunk;
+      var boundary = _eventBoundary(buffer);
+      while (boundary != null) {
+        final block = buffer.substring(0, boundary.start);
+        buffer = buffer.substring(boundary.end);
+        final event = _parseSseBlock(block);
+        if (event != null) {
+          yield event;
+        }
+        boundary = _eventBoundary(buffer);
+      }
+    }
+  }
+
   void close() {
     _http.close();
   }
+}
+
+RegExpMatch? _eventBoundary(String buffer) {
+  return RegExp(r'\r?\n\r?\n').firstMatch(buffer);
+}
+
+JsonMap? _parseSseBlock(String block) {
+  String? id;
+  var eventName = 'message';
+  final data = <String>[];
+  for (final line in block.split(RegExp(r'\r?\n'))) {
+    if (line.isEmpty || line.startsWith(':')) {
+      continue;
+    }
+    final separator = line.indexOf(':');
+    final field = separator == -1 ? line : line.substring(0, separator);
+    final raw = separator == -1 ? '' : line.substring(separator + 1);
+    final value = raw.startsWith(' ') ? raw.substring(1) : raw;
+    switch (field) {
+      case 'id':
+        id = value;
+      case 'event':
+        eventName = value;
+      case 'data':
+        data.add(value);
+    }
+  }
+  if (id == null || data.isEmpty) {
+    return null;
+  }
+  final decoded = jsonDecode(data.join('\n'));
+  final payload = asJsonMap(decoded, 'capture event');
+  if (stringField(payload, 'schema') != 'ylx.capture-event.v4' ||
+      stringField(payload, 'sse_delivery_id') != id ||
+      stringField(payload, 'type') != eventName) {
+    throw const DeviceApiException(
+      'Capture event does not match its SSE envelope.',
+      502,
+      'invalid_sse_envelope',
+    );
+  }
+  return payload;
 }

@@ -548,6 +548,110 @@ class SessionList {
   final String? nextCursor;
 }
 
+class SessionArtifactView {
+  const SessionArtifactView({
+    required this.artifactId,
+    required this.role,
+    required this.mediaType,
+    required this.path,
+    required this.bytes,
+    required this.sha256,
+  });
+
+  factory SessionArtifactView.fromJson(JsonMap json) {
+    return SessionArtifactView(
+      artifactId: stringField(json, 'artifact_id'),
+      role: stringField(json, 'role'),
+      mediaType: stringField(json, 'media_type'),
+      path: stringField(json, 'path'),
+      bytes: numberField(json, 'bytes').toInt(),
+      sha256: stringField(json, 'sha256'),
+    );
+  }
+
+  final String artifactId;
+  final String role;
+  final String mediaType;
+  final String path;
+  final int bytes;
+  final String sha256;
+}
+
+class SessionDetailView {
+  const SessionDetailView({
+    required this.sessionId,
+    required this.manifestId,
+    required this.displayName,
+    required this.captureMode,
+    required this.sealed,
+    required this.durationSeconds,
+    required this.deviceLabel,
+    required this.artifacts,
+  });
+
+  factory SessionDetailView.fromJson(JsonMap json) {
+    return SessionDetailView(
+      sessionId: stringField(json, 'session_id'),
+      manifestId: stringField(json, 'manifest_id'),
+      displayName: stringField(json, 'display_name'),
+      captureMode: stringField(json, 'capture_mode'),
+      sealed: boolField(json, 'sealed'),
+      durationSeconds: numberField(
+        json['time'] is Map
+            ? asJsonMap(json['time'], 'time')
+            : <String, dynamic>{},
+        'duration_seconds',
+      ).toDouble(),
+      deviceLabel: stringField(
+        json['device'] is Map
+            ? asJsonMap(json['device'], 'device')
+            : <String, dynamic>{},
+        'device_label',
+      ),
+      artifacts: collectSessionArtifacts(json),
+    );
+  }
+
+  final String sessionId;
+  final String manifestId;
+  final String displayName;
+  final String captureMode;
+  final bool sealed;
+  final double durationSeconds;
+  final String deviceLabel;
+  final List<SessionArtifactView> artifacts;
+}
+
+List<SessionArtifactView> collectSessionArtifacts(Object? value) {
+  final artifacts = <String, SessionArtifactView>{};
+
+  void visit(Object? node) {
+    if (node is Map) {
+      final map = asJsonMap(node, 'artifact node');
+      if (map.containsKey('artifact_id') &&
+          map.containsKey('path') &&
+          map.containsKey('role') &&
+          map.containsKey('sha256')) {
+        final artifact = SessionArtifactView.fromJson(map);
+        artifacts[artifact.artifactId] = artifact;
+        return;
+      }
+      for (final child in map.values) {
+        visit(child);
+      }
+    } else if (node is List) {
+      for (final child in node) {
+        visit(child);
+      }
+    }
+  }
+
+  visit(value);
+  final result = artifacts.values.toList(growable: false);
+  result.sort((a, b) => a.path.compareTo(b.path));
+  return result;
+}
+
 class NetworkInterfaceView {
   const NetworkInterfaceView({
     required this.name,

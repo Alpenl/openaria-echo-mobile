@@ -19,6 +19,7 @@ class OpenAriaController extends ChangeNotifier {
   Timer? _captureTimer;
   Timer? _previewTimer;
   Timer? _slowTimer;
+  StreamSubscription<JsonMap>? _captureEvents;
 
   bool scanning = false;
   bool connecting = false;
@@ -206,6 +207,18 @@ class OpenAriaController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<SessionDetailView> loadSessionDetail(String sessionId) async {
+    final api = _api;
+    if (api == null) {
+      throw const DeviceApiException('No connected device', 0, 'not_connected');
+    }
+    return api.getSession(sessionId);
+  }
+
+  Uri? artifactUri(String sessionId, String artifactId) {
+    return _api?.artifactUri(sessionId, artifactId);
+  }
+
   Future<void> startCapture(String displayName) async {
     await _runCommand(() async {
       capture = await _api!.startCapture(displayName: displayName);
@@ -325,15 +338,31 @@ class OpenAriaController extends ChangeNotifier {
       const Duration(seconds: 12),
       (_) => refreshAll(),
     );
+    _captureEvents = _api?.captureEvents().listen(
+      (event) {
+        if (stringField(event, 'type') == 'safe_swap') {
+          _api?.getSafeSwap().then((receipt) {
+            safeSwapReceipt = receipt;
+            notifyListeners();
+          });
+        }
+        unawaited(refreshCapture());
+      },
+      onError: (_) {
+        // Polling is the recovery path if the event stream drops or is rejected.
+      },
+    );
   }
 
   void _stopLoops() {
     _captureTimer?.cancel();
     _previewTimer?.cancel();
     _slowTimer?.cancel();
+    _captureEvents?.cancel();
     _captureTimer = null;
     _previewTimer = null;
     _slowTimer = null;
+    _captureEvents = null;
   }
 
   String _tokenKey(String deviceKey) => 'openaria.echo.mobile.token.$deviceKey';

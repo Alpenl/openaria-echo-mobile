@@ -539,6 +539,7 @@ class _EchoHomeState extends State<EchoHome> {
                   '${session.producerOutcome} / ${session.verdict ?? 'unknown'} / ${formatSeconds(session.durationSeconds)} / ${formatBytes(session.totalBytes)}',
                 ),
                 trailing: const Icon(Icons.chevron_right),
+                onTap: () => _showSessionDetail(session),
               ),
             ),
           ),
@@ -740,6 +741,103 @@ class _EchoHomeState extends State<EchoHome> {
           ),
         ),
       ],
+    );
+  }
+
+  void _showSessionDetail(SessionSummary session) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) {
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.75,
+          minChildSize: 0.4,
+          maxChildSize: 0.95,
+          builder: (context, scrollController) {
+            return FutureBuilder<SessionDetailView>(
+              future: controller.loadSessionDetail(session.sessionId),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState != ConnectionState.done) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (snapshot.hasError) {
+                  return ListView(
+                    controller: scrollController,
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      _ErrorBanner(message: snapshot.error.toString()),
+                    ],
+                  );
+                }
+                final detail = snapshot.requireData;
+                return ListView(
+                  controller: scrollController,
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                  children: [
+                    _sectionTitle(detail.displayName),
+                    _InfoRow(label: 'Session', value: detail.sessionId),
+                    _InfoRow(label: 'Manifest', value: detail.manifestId),
+                    _InfoRow(label: 'Device', value: detail.deviceLabel),
+                    _InfoRow(label: 'Mode', value: detail.captureMode),
+                    _InfoRow(
+                      label: 'Duration',
+                      value: formatSeconds(detail.durationSeconds),
+                    ),
+                    _InfoRow(
+                      label: 'Sealed',
+                      value: detail.sealed ? 'yes' : 'no',
+                    ),
+                    const SizedBox(height: 16),
+                    _sectionTitle('Artifacts'),
+                    if (detail.artifacts.isEmpty)
+                      const Text(
+                        'No artifacts are exposed in this session detail.',
+                      )
+                    else
+                      ...detail.artifacts.map(
+                        (artifact) => Card(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          child: ListTile(
+                            leading: const Icon(Icons.description),
+                            title: Text(
+                              artifact.path,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(
+                              '${artifact.role} / ${artifact.mediaType} / ${formatBytes(artifact.bytes)}',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: IconButton(
+                              tooltip: 'Copy range URL',
+                              icon: const Icon(Icons.link),
+                              onPressed: () {
+                                final uri = controller.artifactUri(
+                                  detail.sessionId,
+                                  artifact.artifactId,
+                                );
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      uri?.toString() ?? artifact.artifactId,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            );
+          },
+        );
+      },
     );
   }
 

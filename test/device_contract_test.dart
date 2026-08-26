@@ -77,4 +77,50 @@ void main() {
       90,
     );
   });
+
+  test(
+    'collects artifacts from nested session detail without guessing paths',
+    () {
+      final detail = SessionDetailView.fromJson({
+        'session_id': 'session-1',
+        'manifest_id': 'manifest-1',
+        'display_name': 'Test take',
+        'capture_mode': 'production',
+        'sealed': true,
+        'device': {'device_label': 'YLX-00000001'},
+        'time': {'duration_seconds': 12},
+        'video': {
+          'segments': [
+            {
+              'artifacts': {
+                'left': {
+                  'artifact_id': 'sha256-left',
+                  'role': 'left_video',
+                  'media_type': 'video/mp4',
+                  'path': 'video/left.mp4',
+                  'bytes': 2048,
+                  'sha256': 'left',
+                },
+              },
+            },
+          ],
+        },
+        'imu': {
+          'artifact': {
+            'artifact_id': 'sha256-imu',
+            'role': 'imu',
+            'media_type': 'application/octet-stream',
+            'path': 'imu/raw.bin',
+            'bytes': 128,
+            'sha256': 'imu',
+          },
+        },
+      });
+
+      expect(detail.artifacts.map((artifact) => artifact.path), [
+        'imu/raw.bin',
+        'video/left.mp4',
+      ]);
+    },
+  );
 }

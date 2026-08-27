@@ -11,13 +11,8 @@ on:
         required: true
         default: "main"
       release_tag:
-        description: "Release tag/name used in artifact filenames, for example v0.1.0."
+        description: "Release tag/name to create/update after a successful build, for example v0.1.0."
         required: true
-      publish:
-        description: "Create or update the GitHub Release."
-        required: true
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -35,11 +30,21 @@ jobs:
   android:
     name: Build Android release
     runs-on: ubuntu-latest
+    outputs:
+      signed: ${{ steps.android_signing.outputs.signed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must use the form vX.Y.Z; got '${RELEASE_TAG}'."
+            exit 1
+          fi
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -218,7 +223,7 @@ jobs:
             printf 'Artifacts\n\n'
             find release-dist -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '- %f\n' | sort
             printf '\n'
-            printf 'Android artifacts are signed when the repository Android signing secrets are configured; otherwise they are unsigned build outputs.\n'
+            printf 'Android artifacts are signed with the repository Android signing secrets.\n'
             printf 'android-update.json is the app-consumed update manifest. Routine updates are downloaded from inside the Android app.\n'
             printf 'No iOS artifact is built or published.\n'
           } > RELEASE_NOTES.md
@@ -236,24 +241,28 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release
-        if: github.event_name == 'push' || inputs.publish == true
         env:
           GH_TOKEN: ${{ github.token }}
+          ANDROID_SIGNED: ${{ needs.android.outputs.signed }}
         run: |
           set -euo pipefail
 
-          if ! git rev-parse "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "::error::Publishing requires ${RELEASE_TAG} to exist as a git tag."
+          if [ "${ANDROID_SIGNED}" != "true" ]; then
+            echo "::error::Publishing the Android GitHub Release requires all Android signing secrets. Unsigned APKs cannot be the production in-app update source."
             exit 1
           fi
 
-          tag_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+          git fetch --tags --force
           head_commit="$(git rev-parse HEAD)"
-          if [ "$tag_commit" != "$head_commit" ]; then
-            echo "::error::Publishing requires the checked out commit to match ${RELEASE_TAG}."
-            echo "::error::checked out commit: ${head_commit}"
-            echo "::error::tag commit: ${tag_commit}"
-            exit 1
+          if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+            tag_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+            if [ "$tag_commit" != "$head_commit" ]; then
+              echo "::error::Release tag ${RELEASE_TAG} already exists at ${tag_commit}, but this build checked out ${head_commit}."
+              exit 1
+            fi
+          else
+            git tag "$RELEASE_TAG" "$head_commit"
+            git push origin "refs/tags/${RELEASE_TAG}"
           fi
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then

@@ -5,6 +5,10 @@ plugins {
     id("com.android.application")
 }
 
+dependencies {
+    implementation("androidx.core:core:1.17.0")
+}
+
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("key.properties")
 if (keystorePropertiesFile.exists()) {
@@ -29,7 +33,7 @@ android {
         applicationId = "com.openaria.openaria_echo_mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
+        versionCode = 4
         versionName = "0.1.1"
     }
 

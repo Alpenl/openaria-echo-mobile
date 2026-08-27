@@ -52,6 +52,7 @@ public final class MainActivity extends Activity {
         private final Typeface sansMedium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
         private final Typeface cond = Typeface.create("sans-serif-condensed", Typeface.BOLD);
         private final Typeface mono = Typeface.MONOSPACE;
+        private final AppUpdateManager appUpdates;
 
         private boolean mounted;
         private boolean recording;
@@ -65,6 +66,7 @@ public final class MainActivity extends Activity {
 
         ApertureView(Context context) {
             super(context);
+            appUpdates = new AppUpdateManager(context, ignored -> post(this::invalidate));
             setBackgroundColor(VOID);
             setFocusable(true);
             setClickable(true);
@@ -183,6 +185,12 @@ public final class MainActivity extends Activity {
                     break;
                 case "imu":
                     imuHud = !imuHud;
+                    break;
+                case "update-check":
+                    appUpdates.check();
+                    break;
+                case "update-install":
+                    appUpdates.downloadAndInstall();
                     break;
                 default:
                     break;
@@ -333,16 +341,22 @@ public final class MainActivity extends Activity {
                     {"Volume", "vol_nvme0n1p2"}
             });
 
-            RectF update = rect(m, Math.max(y + dp(110), h - dp(288)), w - m, Math.max(y + dp(110), h - dp(288)) + dp(154));
+            AppUpdateManager.State updateState = appUpdates.state();
+            RectF update = rect(m, Math.max(y + dp(110), h - dp(298)), w - m, Math.max(y + dp(110), h - dp(298)) + dp(164));
             panel(canvas, update, dp(11), GLASS, HAIR_2);
             smallCaps(canvas, "应用升级", update.left + dp(10), update.top + dp(22), INK_3);
-            label(canvas, "0.5.3+147", update.right - dp(10), update.top + dp(22), 10, LIVE, mono, Paint.Align.RIGHT);
-            drawMeter(canvas, rect(update.left + dp(10), update.top + dp(42), update.right - dp(10), update.top + dp(46)), 0.62f, LIVE);
-            label(canvas, "62% · 19.7 / 31.8 MiB · 完成后校验 SHA-256", update.left + dp(10), update.top + dp(66), 9.5f, INK_3, mono, Paint.Align.LEFT);
+            label(canvas, updateVersionLabel(updateState), update.right - dp(10), update.top + dp(22), 10, updateVersionColor(updateState), mono, Paint.Align.RIGHT);
+            drawMeter(canvas, rect(update.left + dp(10), update.top + dp(42), update.right - dp(10), update.top + dp(46)), updateProgress(updateState), updateMeterColor(updateState));
+            labelClip(canvas, updateState.message, update.left + dp(10), update.top + dp(66), 9.5f, updateState.phase == AppUpdateManager.Phase.FAILED ? Color.rgb(255, 185, 179) : INK_3, mono, Paint.Align.LEFT, update.width() - dp(20));
+            labelClip(canvas, updateDetail(updateState), update.left + dp(10), update.top + dp(88), 9.5f, INK_3, mono, Paint.Align.LEFT, update.width() - dp(20));
             RectF check = rect(update.left + dp(10), update.bottom - dp(42), update.centerX() - dp(4), update.bottom - dp(12));
             RectF install = rect(update.centerX() + dp(4), update.bottom - dp(42), update.right - dp(10), update.bottom - dp(12));
-            pill(canvas, check, Color.TRANSPARENT, INK, "Check");
-            pill(canvas, install, INK, VOID, "Install");
+            pill(canvas, check, Color.TRANSPARENT, updateState.canCheck() ? INK : INK_3, "Check");
+            pill(canvas, install, updateState.canInstall() ? INK : Color.TRANSPARENT, updateState.canInstall() ? VOID : INK_3, "Install");
+            addHotspot("update-check", check);
+            if (updateState.canInstall()) {
+                addHotspot("update-install", install);
+            }
 
             drawModeBottom(canvas);
         }
@@ -730,6 +744,69 @@ public final class MainActivity extends Activity {
         private void drawMeter(Canvas canvas, RectF r, float value, int color) {
             fillRound(canvas, r, dp(3), SUNKEN);
             fillRound(canvas, rect(r.left, r.top, r.left + r.width() * Math.max(0, Math.min(1, value)), r.bottom), dp(3), color);
+        }
+
+        private String updateVersionLabel(AppUpdateManager.State state) {
+            if (state.manifest != null) {
+                return state.manifest.version + "+" + state.manifest.versionCode;
+            }
+            return state.currentVersionName + "+" + state.currentBuildNumber;
+        }
+
+        private int updateVersionColor(AppUpdateManager.State state) {
+            if (state.phase == AppUpdateManager.Phase.AVAILABLE || state.phase == AppUpdateManager.Phase.DOWNLOADING || state.phase == AppUpdateManager.Phase.INSTALLING) {
+                return LIVE;
+            }
+            if (state.phase == AppUpdateManager.Phase.FAILED) {
+                return CAUTION;
+            }
+            return INK;
+        }
+
+        private int updateMeterColor(AppUpdateManager.State state) {
+            return state.phase == AppUpdateManager.Phase.FAILED ? CAUTION : LIVE;
+        }
+
+        private float updateProgress(AppUpdateManager.State state) {
+            if (state.totalBytes <= 0) {
+                return state.phase == AppUpdateManager.Phase.CURRENT ? 1f : 0f;
+            }
+            return (float) state.downloadedBytes / (float) state.totalBytes;
+        }
+
+        private String updateDetail(AppUpdateManager.State state) {
+            if (state.phase == AppUpdateManager.Phase.DOWNLOADING || state.phase == AppUpdateManager.Phase.INSTALLING) {
+                return formatBytes(state.downloadedBytes) + " / " + formatBytes(state.totalBytes) + " · 完成后校验 SHA-256";
+            }
+            if (state.phase == AppUpdateManager.Phase.AVAILABLE && state.manifest != null) {
+                return formatBytes(state.manifest.apk.bytes) + " · 下载后校验 SHA-256 · 交系统安装器";
+            }
+            if (state.phase == AppUpdateManager.Phase.CURRENT) {
+                return "当前 build " + state.currentBuildNumber + " · " + state.currentVersionName;
+            }
+            if (state.phase == AppUpdateManager.Phase.CHECKING) {
+                return "读取 releases/latest/download/android-update.json";
+            }
+            if (state.phase == AppUpdateManager.Phase.FAILED) {
+                return "可重新检查；APK 不会在校验失败后保留";
+            }
+            return "GitHub Releases latest manifest · HTTPS only";
+        }
+
+        private String formatBytes(long bytes) {
+            if (bytes <= 0) {
+                return "0 B";
+            }
+            double value = bytes;
+            String[] units = {"B", "KiB", "MiB", "GiB"};
+            int unit = 0;
+            while (value >= 1024 && unit < units.length - 1) {
+                value /= 1024;
+                unit++;
+            }
+            return unit == 0
+                    ? String.format(Locale.US, "%d %s", bytes, units[unit])
+                    : String.format(Locale.US, "%.1f %s", value, units[unit]);
         }
 
         private void railButton(Canvas canvas, RectF r, String caption, int color, Icon icon) {

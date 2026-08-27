@@ -9,22 +9,18 @@ Open Aria Echo / Mobile releases are produced by GitHub Actions in the public
    The `version:` field controls Android `versionName`/`versionCode` and the
    app update manifest `version`/`versionCode`.
 2. Commit the version change and any release fixes.
-3. Create an annotated release tag:
-
-   ```bash
-   git tag -a v0.1.0 -m "Open Aria Echo Mobile v0.1.0"
-   git push origin main
-   git push origin v0.1.0
-   ```
+3. Start the `Mobile Release` workflow from GitHub Actions. Set `ref` to the
+   branch, tag, or commit to build and set `release_tag` to the Release tag to
+   create or update, for example `v1.0.0`.
 
 4. The `Mobile Release` workflow builds Android release artifacts, writes
-   `android-update.json` plus `SHA256SUMS.txt`, and creates or updates the
-   GitHub Release for the tag.
+   `android-update.json` plus `SHA256SUMS.txt`, creates the Git tag if it does
+   not already exist at the checked-out commit, and creates or updates the
+   GitHub Release for that tag.
 
-Manual workflow runs are supported for dry-run validation. Set `ref` to the
-branch, tag, or commit to build, set `release_tag` to the filename tag to use,
-and leave `publish` disabled. Enabling `publish` requires `release_tag` to
-already exist as a Git tag.
+Pushing a `v*` tag also runs the same release build. Manual Release runs are not
+dry-runs; after a successful build they publish the GitHub Release. Use the
+separate `Mobile CI` workflow for validation that should not publish.
 
 ## Android Signing
 
@@ -51,10 +47,11 @@ For GitHub Actions signed builds, configure all four repository secrets:
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEY_PASSWORD`
 
-If no Android signing secrets are configured, the release workflow still builds
-Android release artifacts and marks them as `unsigned`. If only some signing
-secrets are configured, the workflow fails instead of producing a misleading
-artifact.
+If no Android signing secrets are configured, the release workflow can still
+build Android artifacts and mark them as `unsigned`, but it refuses to publish a
+GitHub Release. The app-consumed `android-update.json` must not point at an
+unsigned APK. If only some signing secrets are configured, the workflow fails
+instead of producing a misleading artifact.
 
 ## In-App Updates
 
@@ -78,11 +75,11 @@ support target.
 
 Each release contains:
 
-- `openaria-echo-mobile-<tag>-android-signed.apk` or
-  `openaria-echo-mobile-<tag>-android-unsigned.apk`
-- `openaria-echo-mobile-<tag>-android-signed.aab` or
-  `openaria-echo-mobile-<tag>-android-unsigned.aab`
+- `openaria-echo-mobile-<tag>-android-signed.apk`
+- `openaria-echo-mobile-<tag>-android-signed.aab`
 - `android-update.json`
 - `SHA256SUMS.txt`
 
 The same files are also available as workflow artifacts during the Actions run.
+If signing secrets are absent, unsigned workflow artifacts may be produced for
+inspection, but the GitHub Release is not published.

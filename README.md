@@ -75,11 +75,14 @@ CI runs on pull requests and pushes to `main`:
 - `flutter test`
 - Android debug APK build
 
-Release builds run from the `Mobile Release` workflow on `v*` tags. The workflow
-uploads Android APK/AAB artifacts, `android-update.json`, release notes, and
-`SHA256SUMS.txt`. Android release signing is driven by repository secrets and
-never falls back to the debug key. There is no iOS workflow, artifact, or
-release target. See [docs/RELEASE.md](docs/RELEASE.md).
+Release builds run from the `Mobile Release` workflow on `v*` tags or manual
+workflow dispatch. After the Android build passes, the workflow creates the tag
+when needed, creates or updates the GitHub Release, and uploads APK/AAB
+artifacts, `android-update.json`, release notes, and `SHA256SUMS.txt`. Android
+release signing is driven by repository secrets and never falls back to the
+debug key. Publishing a GitHub Release requires those signing secrets; unsigned
+APK artifacts are not used as the production in-app update source. There is no
+iOS workflow, artifact, or release target. See [docs/RELEASE.md](docs/RELEASE.md).
 
 ## License
 

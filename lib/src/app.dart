@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'app_update.dart';
 import 'app_controller.dart';
 import 'models.dart';
 
@@ -387,20 +388,6 @@ class _EchoHomeState extends State<EchoHome> {
                 overflow: TextOverflow.ellipsis,
               ),
             ],
-            if (controller.safeSwapAuthorized) ...[
-              const Divider(height: 24),
-              Row(
-                children: [
-                  Icon(Icons.check_circle, color: Colors.green.shade700),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      'Safe swap receipt accepted. The removable volume is released.',
-                    ),
-                  ),
-                ],
-              ),
-            ],
           ],
         ),
       ),
@@ -449,15 +436,6 @@ class _EchoHomeState extends State<EchoHome> {
                   ),
                 ),
               ],
-            ),
-            const SizedBox(height: 10),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                icon: const Icon(Icons.eject),
-                label: const Text('Stop and Request Safe Swap'),
-                onPressed: canStop ? controller.requestSafeSwap : null,
-              ),
             ),
             if (active != null &&
                 active.recordingState.diagnostics.isNotEmpty) ...[
@@ -584,6 +562,8 @@ class _EchoHomeState extends State<EchoHome> {
           ),
         ),
         const SizedBox(height: 12),
+        _appUpdateCard(),
+        const SizedBox(height: 12),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(14),
@@ -620,6 +600,118 @@ class _EchoHomeState extends State<EchoHome> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _appUpdateCard() {
+    final update = controller.appUpdate;
+    final manifest = update.manifest;
+    final totalBytes = update.totalBytes;
+    final double? progressValue = totalBytes == null || totalBytes <= 0
+        ? null
+        : (update.downloadedBytes / totalBytes).clamp(0.0, 1.0).toDouble();
+    final progressText = update.downloadedBytes > 0
+        ? totalBytes == null || totalBytes <= 0
+              ? '${formatBytes(update.downloadedBytes)} downloaded'
+              : '${(progressValue! * 100).round()}% · ${formatBytes(update.downloadedBytes)} / ${formatBytes(totalBytes)}'
+        : null;
+    final statusIcon = switch (update.phase) {
+      AppUpdatePhase.current => Icons.verified,
+      AppUpdatePhase.available => Icons.download_for_offline,
+      AppUpdatePhase.downloading ||
+      AppUpdatePhase.installing => Icons.downloading,
+      AppUpdatePhase.failed => Icons.error_outline,
+      _ => Icons.system_update,
+    };
+    final statusColor = switch (update.phase) {
+      AppUpdatePhase.current => Colors.green.shade700,
+      AppUpdatePhase.available => Colors.teal.shade700,
+      AppUpdatePhase.failed => Colors.red.shade700,
+      _ => Colors.blueGrey.shade700,
+    };
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(statusIcon, color: statusColor),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'App update',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                _Metric(
+                  label: 'Current build',
+                  value: update.currentBuildNumber?.toString() ?? '-',
+                ),
+                _Metric(
+                  label: 'Available',
+                  value: manifest == null
+                      ? '-'
+                      : '${manifest.version}+${manifest.versionCode}',
+                ),
+                if (manifest != null)
+                  _Metric(label: 'APK', value: formatBytes(manifest.apk.bytes)),
+              ],
+            ),
+            if (update.message != null) ...[
+              const SizedBox(height: 10),
+              Text(update.message!),
+            ],
+            if (progressText != null) ...[
+              const SizedBox(height: 10),
+              LinearProgressIndicator(value: progressValue),
+              const SizedBox(height: 6),
+              Text(progressText, style: Theme.of(context).textTheme.bodySmall),
+            ],
+            if (manifest?.notes?.trim().isNotEmpty == true) ...[
+              const SizedBox(height: 10),
+              Text(
+                manifest!.notes!,
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.manage_search),
+                    label: const Text('Check'),
+                    onPressed: update.canCheck
+                        ? controller.checkForAppUpdate
+                        : null,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: FilledButton.icon(
+                    icon: const Icon(Icons.download),
+                    label: const Text('Download'),
+                    onPressed: update.canInstall
+                        ? controller.downloadAndInstallAppUpdate
+                        : null,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 

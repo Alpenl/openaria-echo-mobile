@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'app_update.dart';
 import 'device_api.dart';
 import 'discovery.dart';
 import 'models.dart';
@@ -11,10 +12,12 @@ class OpenAriaController extends ChangeNotifier {
   OpenAriaController({
     this._discovery = const DeviceDiscoveryService(),
     this._secureStorage = const FlutterSecureStorage(),
-  });
+    AppUpdateService? appUpdates,
+  }) : _appUpdates = appUpdates ?? AppUpdateService();
 
   final DeviceDiscoveryService _discovery;
   final FlutterSecureStorage _secureStorage;
+  final AppUpdateService _appUpdates;
   DeviceApiClient? _api;
   Timer? _captureTimer;
   Timer? _previewTimer;
@@ -34,9 +37,9 @@ class OpenAriaController extends ChangeNotifier {
   NetworkStatusView? network;
   List<NetworkScanEntry> networkScan = const [];
   CameraFocusStatus? cameraFocus;
-  SafeSwapReceipt? safeSwapReceipt;
   PreviewFrame? previewFrame;
   DateTime? lastRefresh;
+  AppUpdateStatus appUpdate = const AppUpdateStatus.idle();
 
   bool get connected => connectedEndpoint != null && device != null;
   bool get recording => capture?.snapshot.deviceState == 'recording';
@@ -44,24 +47,6 @@ class OpenAriaController extends ChangeNotifier {
   RecordingGeneration? get currentOrRetainedRecording {
     return capture?.snapshot.activeRecording ??
         capture?.snapshot.retainedUnsuccessful;
-  }
-
-  bool get safeSwapAuthorized {
-    final receipt = safeSwapReceipt;
-    final subject = currentOrRetainedRecording;
-    final volumeId = device?.storage.volumeId;
-    if (receipt == null || subject == null || volumeId == null) {
-      return false;
-    }
-    final releaseStateOk =
-        receipt.releaseState == 'unmounted' ||
-        receipt.releaseState == 'device-released';
-    return receipt.openHandleCount == 0 &&
-        releaseStateOk &&
-        receipt.sessionId == subject.recordingState.sessionId &&
-        receipt.generationId == subject.generationId &&
-        receipt.volumeId == subject.recordingState.volumeId &&
-        receipt.volumeId == volumeId;
   }
 
   Future<void> scan() async {
@@ -145,7 +130,6 @@ class OpenAriaController extends ChangeNotifier {
     network = null;
     networkScan = const [];
     cameraFocus = null;
-    safeSwapReceipt = null;
     previewFrame = null;
     notifyListeners();
   }
@@ -162,14 +146,12 @@ class OpenAriaController extends ChangeNotifier {
         api.listSessions(),
         api.getNetwork(),
         api.getCameraFocus(),
-        api.getSafeSwap(),
       ]);
       device = results[0] as DeviceDescriptor;
       capture = results[1] as CaptureStatus;
       sessions = results[2] as SessionList;
       network = results[3] as NetworkStatusView?;
       cameraFocus = results[4] as CameraFocusStatus?;
-      safeSwapReceipt = results[5] as SafeSwapReceipt?;
       lastRefresh = DateTime.now();
       error = null;
     } catch (exception) {
@@ -229,14 +211,6 @@ class OpenAriaController extends ChangeNotifier {
   Future<void> stopCapture() async {
     await _runCommand(() async {
       capture = await _api!.stopCapture(reason: 'user');
-      await refreshAll();
-    });
-  }
-
-  Future<void> requestSafeSwap() async {
-    await _runCommand(() async {
-      capture = await _api!.stopCapture(reason: 'safe_swap');
-      safeSwapReceipt = await _api!.getSafeSwap();
       await refreshAll();
     });
   }
@@ -305,6 +279,86 @@ class OpenAriaController extends ChangeNotifier {
     });
   }
 
+  Future<void> checkForAppUpdate() async {
+    if (!appUpdate.canCheck) {
+      return;
+    }
+    appUpdate = AppUpdateStatus(
+      phase: AppUpdatePhase.checking,
+      currentBuildNumber: appUpdate.currentBuildNumber,
+      manifest: appUpdate.manifest,
+      message: 'Checking for updates',
+    );
+    notifyListeners();
+    try {
+      final result = await _appUpdates.check();
+      appUpdate = AppUpdateStatus(
+        phase: result.manifest == null
+            ? AppUpdatePhase.current
+            : AppUpdatePhase.available,
+        currentBuildNumber: result.currentBuildNumber,
+        manifest: result.manifest,
+        message: result.manifest == null
+            ? 'Open Aria Echo is up to date.'
+            : 'Version ${result.manifest!.version} is available.',
+      );
+    } catch (exception) {
+      appUpdate = AppUpdateStatus(
+        phase: AppUpdatePhase.failed,
+        currentBuildNumber: appUpdate.currentBuildNumber,
+        manifest: appUpdate.manifest,
+        message: formatAppUpdateError(exception),
+      );
+    }
+    notifyListeners();
+  }
+
+  Future<void> downloadAndInstallAppUpdate() async {
+    final manifest = appUpdate.manifest;
+    if (!appUpdate.canInstall || manifest == null) {
+      return;
+    }
+    appUpdate = AppUpdateStatus(
+      phase: AppUpdatePhase.downloading,
+      currentBuildNumber: appUpdate.currentBuildNumber,
+      manifest: manifest,
+      message: 'Downloading update',
+    );
+    notifyListeners();
+    try {
+      await _appUpdates.downloadAndInstall(
+        manifest,
+        onProgress: (progress) {
+          appUpdate = AppUpdateStatus(
+            phase: AppUpdatePhase.downloading,
+            currentBuildNumber: appUpdate.currentBuildNumber,
+            manifest: manifest,
+            downloadedBytes: progress.downloadedBytes,
+            totalBytes: progress.totalBytes,
+            message: 'Downloading update',
+          );
+          notifyListeners();
+        },
+      );
+      appUpdate = AppUpdateStatus(
+        phase: AppUpdatePhase.installing,
+        currentBuildNumber: appUpdate.currentBuildNumber,
+        manifest: manifest,
+        downloadedBytes: manifest.apk.bytes,
+        totalBytes: manifest.apk.bytes,
+        message: 'Opening Android installer',
+      );
+    } catch (exception) {
+      appUpdate = AppUpdateStatus(
+        phase: AppUpdatePhase.failed,
+        currentBuildNumber: appUpdate.currentBuildNumber,
+        manifest: manifest,
+        message: formatAppUpdateError(exception),
+      );
+    }
+    notifyListeners();
+  }
+
   Future<void> _runCommand(Future<void> Function() command) async {
     final api = _api;
     if (api == null) {
@@ -339,17 +393,11 @@ class OpenAriaController extends ChangeNotifier {
       (_) => refreshAll(),
     );
     _captureEvents = _api?.captureEvents().listen(
-      (event) {
-        if (stringField(event, 'type') == 'safe_swap') {
-          _api?.getSafeSwap().then((receipt) {
-            safeSwapReceipt = receipt;
-            notifyListeners();
-          });
-        }
+      (_) {
         unawaited(refreshCapture());
       },
       onError: (_) {
-        // Polling is the recovery path if the event stream drops or is rejected.
+        // Polling keeps the current snapshot fresh if the event stream drops.
       },
     );
   }
@@ -371,6 +419,7 @@ class OpenAriaController extends ChangeNotifier {
   void dispose() {
     _stopLoops();
     _api?.close();
+    _appUpdates.close();
     super.dispose();
   }
 }

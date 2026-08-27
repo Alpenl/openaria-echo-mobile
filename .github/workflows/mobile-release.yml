@@ -1,0 +1,70 @@
+name: Mobile Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build, for example main or v1.0.0."
+        required: true
+        default: "main"
+      release_tag:
+        description: "Release tag/name to create or update after a successful build."
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mobile-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  CHECKOUT_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+jobs:
+  android:
+    name: Build native Android release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must use the form vX.Y.Z; got '${RELEASE_TAG}'."
+            exit 1
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Build Android release APK
+        run: ./gradlew assembleRelease
+
+      - name: Stage release artifact
+        run: |
+          set -euo pipefail
+          mkdir -p release-dist
+          cp app/build/outputs/apk/release/app-release-unsigned.apk "release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-unsigned.apk"
+          sha256sum release-dist/* > release-dist/SHA256SUMS.txt
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-release-${{ env.RELEASE_TAG }}
+          path: release-dist/*
+          if-no-files-found: error

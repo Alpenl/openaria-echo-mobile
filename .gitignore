@@ -1,0 +1,18 @@
+# Gradle / Android
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+
+# IDE
+.idea/
+.vscode/
+
+# OS / editor
+.DS_Store
+*.swp
+*.log
+
+# Local design references and scratch files
+tmp/

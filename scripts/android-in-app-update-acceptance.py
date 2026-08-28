@@ -24,6 +24,8 @@ PACKAGE_NAME = "com.openaria.openaria_echo_mobile"
 MANIFEST_SCHEMA = "openaria.echo.mobile.android-update.v1"
 VERIFIED_RETRY_MIN_VERSION_CODE = 6
 DEVICE_UI_XML = "/sdcard/openaria-update-window.xml"
+UI_DUMP_ATTEMPTS = 3
+UI_DUMP_RETRY_DELAY_SECONDS = 0.5
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 SIGNER_DIGEST = re.compile(
@@ -139,15 +141,38 @@ def screen_size() -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
+def preserve_malformed_ui(evidence_dir: Path, xml: str) -> Path:
+    attempt = 1
+    while True:
+        destination = evidence_dir / f"malformed-ui-attempt-{attempt}.xml"
+        try:
+            with destination.open("x", encoding="utf-8") as output:
+                output.write(xml)
+            return destination
+        except FileExistsError:
+            attempt += 1
+
+
 def dump_ui(evidence_dir: Path) -> list[dict[str, str]]:
-    command(["adb", "shell", "uiautomator", "dump", DEVICE_UI_XML], timeout=30)
-    xml = command(["adb", "exec-out", "cat", DEVICE_UI_XML], timeout=30)
-    (evidence_dir / "last-ui.xml").write_text(xml, encoding="utf-8")
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError as exception:
-        raise AcceptanceError("Android returned malformed UI hierarchy XML") from exception
-    return [dict(node.attrib) for node in root.iter("node")]
+    malformed_evidence: list[str] = []
+    for attempt in range(1, UI_DUMP_ATTEMPTS + 1):
+        command(["adb", "shell", "uiautomator", "dump", DEVICE_UI_XML], timeout=30)
+        xml = command(["adb", "exec-out", "cat", DEVICE_UI_XML], timeout=30)
+        (evidence_dir / "last-ui.xml").write_text(xml, encoding="utf-8")
+        try:
+            root = ET.fromstring(xml)
+        except ET.ParseError as exception:
+            malformed_evidence.append(preserve_malformed_ui(evidence_dir, xml).name)
+            if attempt < UI_DUMP_ATTEMPTS:
+                time.sleep(UI_DUMP_RETRY_DELAY_SECONDS)
+                continue
+            samples = ", ".join(malformed_evidence)
+            raise AcceptanceError(
+                f"Android returned malformed UI hierarchy XML after {UI_DUMP_ATTEMPTS} attempts; "
+                f"last parse error: {exception}; preserved samples: {samples}"
+            ) from exception
+        return [dict(node.attrib) for node in root.iter("node")]
+    raise AssertionError("UI hierarchy retry loop exhausted without a result")
 
 
 def node_center(node: dict[str, str]) -> tuple[int, int]:

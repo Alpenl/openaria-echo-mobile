@@ -56,8 +56,8 @@ class WorkflowGateTest {
         val release = File("../.github/workflows/mobile-release.yml").readText()
         val appBuild = File("build.gradle.kts").readText()
 
-        assertContains(appBuild, "versionCode = 7")
-        assertContains(appBuild, "versionName = \"0.1.4\"")
+        assertContains(appBuild, "versionCode = 8")
+        assertContains(appBuild, "versionName = \"0.1.5\"")
         assertContains(release, "expected_tag=\"v\${version_name}\"")
         assertContains(release, "versionCode must increase")
         assertContains(release, "apksigner verify --verbose --print-certs")
@@ -94,6 +94,7 @@ class WorkflowGateTest {
 
     @Test
     fun `published release upgrades the previous production baseline through its own updater`() {
+        val ci = File("../.github/workflows/mobile-ci.yml").readText()
         val release = File("../.github/workflows/mobile-release.yml").readText()
         val acceptanceScript = File("../scripts/android-in-app-update-acceptance.py")
 
@@ -108,7 +109,9 @@ class WorkflowGateTest {
         assertContains(release, "tag_name != \$candidate")
         assertContains(release, "Run previous production in-app upgrade")
         assertContains(release, "scripts/android-in-app-update-acceptance.py")
-        assertContains(release, "python3 -m py_compile scripts/android-in-app-update-acceptance.py")
+        listOf(ci, release).forEach { workflow ->
+            assertContains(workflow, "python3 -m unittest scripts/test_android_in_app_update_acceptance.py")
+        }
         assertContains(release, "Upload in-app upgrade evidence")
         val upgradeRunnerStep =
             release

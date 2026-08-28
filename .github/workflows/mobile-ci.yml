@@ -40,6 +40,9 @@ jobs:
       - name: Test
         run: ./gradlew testDebugUnitTest
 
+      - name: Test in-app upgrade acceptance script
+        run: python3 -m unittest scripts/test_android_in_app_update_acceptance.py
+
       - name: Build debug APK
         run: ./gradlew assembleDebug
 

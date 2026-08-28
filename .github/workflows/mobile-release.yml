@@ -146,8 +146,8 @@ jobs:
       - name: Test
         run: ./gradlew testDebugUnitTest
 
-      - name: Check in-app upgrade acceptance script
-        run: python3 -m py_compile scripts/android-in-app-update-acceptance.py
+      - name: Test in-app upgrade acceptance script
+        run: python3 -m unittest scripts/test_android_in_app_update_acceptance.py
 
       - name: Compile Android UI tests
         run: ./gradlew assembleDebugAndroidTest

@@ -1,0 +1,63 @@
+{
+  "schema": "ylx.network-status.v1",
+  "authority_epoch": "4fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "source_revision": 3,
+  "observed_at": "2026-08-23T11:35:00+08:00",
+  "saved": false,
+  "verified": false,
+  "desired": {
+    "mode": "hotspot",
+    "wifi_client": null,
+    "ethernet": null
+  },
+  "observed": {
+    "ap": {
+      "state": "active",
+      "interface": "wlan0",
+      "addresses": ["10.42.0.1/24"],
+      "peer_or_ssid": "YLX-30D5872D"
+    },
+    "wifi_client": {
+      "state": "disabled",
+      "interface": "wlan0",
+      "addresses": [],
+      "peer_or_ssid": null
+    },
+    "wired": {
+      "state": "disconnected",
+      "interface": "eth0",
+      "addresses": [],
+      "peer_or_ssid": null
+    },
+    "default_route": "none",
+    "mdns": {
+      "hostname": "rp-ylx.local",
+      "service": "_ylx-capture._tcp",
+      "aliases": ["_http._tcp"],
+      "port": 8080
+    },
+    "devices": [
+      {"interface": "wlan0", "type": "wifi", "state": "connected"},
+      {"interface": "eth0", "type": "ethernet", "state": "disconnected"}
+    ]
+  },
+  "transaction": {
+    "current": null,
+    "latest": null
+  },
+  "mutation_capability": {
+    "enabled": false,
+    "disabled_reason": "controller_unavailable",
+    "operations": ["apply", "retry", "forget"],
+    "idempotency_key_required": true,
+    "secret_handling": "opaque_credential_reference_only",
+    "active_state_policy": "idle_only"
+  },
+  "concurrency_capability": {
+    "rescue_ap_required": true,
+    "same_phy_ap_sta": "unverified",
+    "exclusive_client_failure_timeout_seconds": 10,
+    "max_managed_interfaces": 1,
+    "max_ap_interfaces": 1
+  }
+}

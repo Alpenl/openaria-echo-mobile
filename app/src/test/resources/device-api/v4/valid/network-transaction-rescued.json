@@ -1,0 +1,32 @@
+{
+  "schema": "ylx.network-transaction.v1",
+  "authority_epoch": "4fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "source_revision": 24,
+  "transaction_id": "0198d2a1-41a0-7b7a-a751-0e86a39d4db2",
+  "operation": "apply",
+  "status": "rescued",
+  "stage": "rescued",
+  "desired": {
+    "mode": "wifi-client",
+    "wifi_client": {
+      "ssid": "studio-wifi",
+      "security": "wpa2-personal",
+      "credential_state": "stored"
+    },
+    "ethernet": null
+  },
+  "accepted_at": "2026-08-23T11:41:00+08:00",
+  "updated_at": "2026-08-23T11:41:10+08:00",
+  "deadline": null,
+  "recovery_action": "reconnect_rescue_ap",
+  "rescue": {
+    "ap_validated": true,
+    "fallback_mode": "hotspot",
+    "failure_trigger_seconds": 10
+  },
+  "error": {
+    "code": "dhcp_timeout",
+    "message": "Wi-Fi client did not acquire a DHCP lease before the rescue trigger.",
+    "retryable": true
+  }
+}

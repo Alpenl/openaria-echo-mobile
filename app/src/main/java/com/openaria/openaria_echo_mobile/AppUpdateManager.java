@@ -21,14 +21,14 @@ import java.util.Locale;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-final class AppUpdateManager {
+public final class AppUpdateManager {
     private static final String MANIFEST_URL =
             "https://github.com/Alpenl/openaria-echo-mobile/releases/latest/download/android-update.json";
     private static final String SCHEMA = "openaria.echo.mobile.android-update.v1";
     private static final String APK_MIME_TYPE = "application/vnd.android.package-archive";
     private static final String EXPECTED_PACKAGE = "com.openaria.openaria_echo_mobile";
 
-    interface Listener {
+    public interface Listener {
         void onStateChanged(State state);
     }
 
@@ -37,19 +37,19 @@ final class AppUpdateManager {
     private final Object lock = new Object();
     private State state;
 
-    AppUpdateManager(Context context, Listener listener) {
+    public AppUpdateManager(Context context, Listener listener) {
         this.context = context.getApplicationContext();
         this.listener = listener;
         this.state = State.idle(loadCurrentBuildNumber(), loadCurrentVersionName());
     }
 
-    State state() {
+    public State state() {
         synchronized (lock) {
             return state;
         }
     }
 
-    void check() {
+    public void check() {
         synchronized (lock) {
             if (!state.canCheck()) {
                 return;
@@ -59,7 +59,7 @@ final class AppUpdateManager {
         new Thread(this::runCheck, "openaria-app-update-check").start();
     }
 
-    void downloadAndInstall() {
+    public void downloadAndInstall() {
         final Manifest manifest;
         synchronized (lock) {
             if (!state.canInstall()) {
@@ -275,7 +275,7 @@ final class AppUpdateManager {
         return exception.getMessage() == null ? exception.toString() : exception.getMessage();
     }
 
-    enum Phase {
+    public enum Phase {
         IDLE,
         CHECKING,
         CURRENT,
@@ -285,14 +285,14 @@ final class AppUpdateManager {
         FAILED
     }
 
-    static final class State {
-        final Phase phase;
-        final long currentBuildNumber;
-        final String currentVersionName;
-        final Manifest manifest;
-        final long downloadedBytes;
-        final long totalBytes;
-        final String message;
+    public static final class State {
+        public final Phase phase;
+        public final long currentBuildNumber;
+        public final String currentVersionName;
+        public final Manifest manifest;
+        public final long downloadedBytes;
+        public final long totalBytes;
+        public final String message;
 
         private State(
                 Phase phase,
@@ -360,22 +360,22 @@ final class AppUpdateManager {
             return new State(Phase.FAILED, currentBuildNumber, currentVersionName, manifest, downloadedBytes, totalBytes, failure);
         }
 
-        boolean canCheck() {
+        public boolean canCheck() {
             return phase != Phase.CHECKING && phase != Phase.DOWNLOADING && phase != Phase.INSTALLING;
         }
 
-        boolean canInstall() {
+        public boolean canInstall() {
             return phase == Phase.AVAILABLE && manifest != null;
         }
     }
 
-    static final class Manifest {
-        final String version;
-        final long versionCode;
-        final String packageName;
-        final String pubDate;
-        final String notes;
-        final Artifact apk;
+    public static final class Manifest {
+        public final String version;
+        public final long versionCode;
+        public final String packageName;
+        public final String pubDate;
+        public final String notes;
+        public final Artifact apk;
 
         private Manifest(String version, long versionCode, String packageName, String pubDate, String notes, Artifact apk) {
             this.version = version;
@@ -417,10 +417,10 @@ final class AppUpdateManager {
         }
     }
 
-    static final class Artifact {
-        final URL url;
-        final String sha256;
-        final long bytes;
+    public static final class Artifact {
+        public final URL url;
+        public final String sha256;
+        public final long bytes;
 
         private Artifact(URL url, String sha256, long bytes) {
             this.url = url;

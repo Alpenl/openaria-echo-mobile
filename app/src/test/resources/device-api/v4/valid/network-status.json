@@ -1,0 +1,94 @@
+{
+  "schema": "ylx.network-status.v1",
+  "authority_epoch": "4fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "source_revision": 12,
+  "observed_at": "2026-08-23T11:40:05+08:00",
+  "saved": true,
+  "verified": true,
+  "desired": {
+    "mode": "wifi-client",
+    "wifi_client": {
+      "ssid": "studio-wifi",
+      "security": "wpa2-personal",
+      "credential_state": "stored"
+    },
+    "ethernet": null
+  },
+  "observed": {
+    "ap": {
+      "state": "active",
+      "interface": "wlan0",
+      "addresses": ["10.42.0.1/24"],
+      "peer_or_ssid": "YLX-30D5872D"
+    },
+    "wifi_client": {
+      "state": "connected",
+      "interface": "wlan0",
+      "addresses": ["192.168.110.36/24"],
+      "peer_or_ssid": "studio-wifi"
+    },
+    "wired": {
+      "state": "disconnected",
+      "interface": "eth0",
+      "addresses": [],
+      "peer_or_ssid": null
+    },
+    "default_route": "wifi_client",
+    "mdns": {
+      "hostname": "rp-ylx.local",
+      "service": "_ylx-capture._tcp",
+      "aliases": ["_http._tcp"],
+      "port": 8080
+    },
+    "devices": [
+      {"interface": "wlan0", "type": "wifi", "state": "connected"},
+      {"interface": "eth0", "type": "ethernet", "state": "disconnected"}
+    ]
+  },
+  "transaction": {
+    "current": null,
+    "latest": {
+      "schema": "ylx.network-transaction.v1",
+      "authority_epoch": "4fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "source_revision": 12,
+      "transaction_id": "0198d2a0-41a0-7b7a-a751-0e86a39d4db1",
+      "operation": "apply",
+      "status": "committed",
+      "stage": "committed",
+      "desired": {
+        "mode": "wifi-client",
+        "wifi_client": {
+          "ssid": "studio-wifi",
+          "security": "wpa2-personal",
+          "credential_state": "stored"
+        },
+        "ethernet": null
+      },
+      "accepted_at": "2026-08-23T11:39:52+08:00",
+      "updated_at": "2026-08-23T11:40:04+08:00",
+      "deadline": null,
+      "recovery_action": "reconnect_target_lan",
+      "rescue": {
+        "ap_validated": true,
+        "fallback_mode": "hotspot",
+        "failure_trigger_seconds": 10
+      },
+      "error": null
+    }
+  },
+  "mutation_capability": {
+    "enabled": true,
+    "disabled_reason": null,
+    "operations": ["apply", "retry", "forget"],
+    "idempotency_key_required": true,
+    "secret_handling": "opaque_credential_reference_only",
+    "active_state_policy": "idle_only"
+  },
+  "concurrency_capability": {
+    "rescue_ap_required": true,
+    "same_phy_ap_sta": "supported",
+    "exclusive_client_failure_timeout_seconds": 10,
+    "max_managed_interfaces": 1,
+    "max_ap_interfaces": 1
+  }
+}

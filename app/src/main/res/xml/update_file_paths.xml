@@ -3,4 +3,10 @@
     <cache-path
         name="update_apks"
         path="updates/" />
+    <external-files-path
+        name="session_artifacts"
+        path="Download/" />
+    <files-path
+        name="session_artifacts_private"
+        path="downloads/" />
 </paths>

@@ -1,0 +1,36 @@
+{
+  "schema": "ylx.network-scan.v1",
+  "authority_epoch": "4fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "source_revision": 13,
+  "scanned_at": "2026-08-23T11:40:06+08:00",
+  "networks": [
+    {
+      "ssid": "guest-open",
+      "hidden": false,
+      "security": "open",
+      "signal_dbm": -41,
+      "credential_required": false
+    },
+    {
+      "ssid": "摄影棚-5G",
+      "hidden": false,
+      "security": "wpa2-wpa3-personal",
+      "signal_dbm": -57,
+      "credential_required": true
+    },
+    {
+      "ssid": "12345678901234567890123456789012",
+      "hidden": false,
+      "security": "wpa3-personal",
+      "signal_dbm": -63,
+      "credential_required": true
+    },
+    {
+      "ssid": null,
+      "hidden": true,
+      "security": "wpa2-personal",
+      "signal_dbm": -72,
+      "credential_required": true
+    }
+  ]
+}

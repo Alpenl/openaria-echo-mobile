@@ -1,0 +1,11 @@
+<network-security-config>
+    <!--
+        Android network-security-config cannot express the full EndpointPolicy set
+        of RFC1918, loopback, link-local, unique-local IPv6, and .local body
+        origins. The platform cleartext gate is therefore opened, while all body
+        requests must enter through EndpointPolicy-validated DeviceConnection
+        instances. The release safety task fails if new production networking
+        entry points bypass that policy.
+    -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

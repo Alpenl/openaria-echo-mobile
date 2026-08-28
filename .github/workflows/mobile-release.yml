@@ -55,7 +55,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK packages
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+        run: sdkmanager "platforms;android-36" "platforms;android-35" "build-tools;36.0.0" "emulator" "system-images;android-35;google_apis;x86_64"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v5
@@ -63,8 +63,31 @@ jobs:
       - name: Analyze
         run: ./gradlew lintDebug
 
+      - name: Check test sources and release safety gates
+        run: ./gradlew verifyUnitTestSources verifyReleaseSafety
+
       - name: Test
         run: ./gradlew testDebugUnitTest
+
+      - name: Compile Android UI tests
+        run: ./gradlew assembleDebugAndroidTest
+
+      - name: Enable KVM for Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Compose UI tests on emulator
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: ./gradlew connectedDebugAndroidTest
 
       - name: Configure Android signing
         id: android_signing

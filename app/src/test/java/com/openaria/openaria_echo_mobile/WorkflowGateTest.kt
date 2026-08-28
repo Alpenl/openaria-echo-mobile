@@ -56,8 +56,8 @@ class WorkflowGateTest {
         val release = File("../.github/workflows/mobile-release.yml").readText()
         val appBuild = File("build.gradle.kts").readText()
 
-        assertContains(appBuild, "versionCode = 6")
-        assertContains(appBuild, "versionName = \"0.1.3\"")
+        assertContains(appBuild, "versionCode = 7")
+        assertContains(appBuild, "versionName = \"0.1.4\"")
         assertContains(release, "expected_tag=\"v\${version_name}\"")
         assertContains(release, "versionCode must increase")
         assertContains(release, "apksigner verify --verbose --print-certs")
@@ -110,6 +110,26 @@ class WorkflowGateTest {
         assertContains(release, "scripts/android-in-app-update-acceptance.py")
         assertContains(release, "python3 -m py_compile scripts/android-in-app-update-acceptance.py")
         assertContains(release, "Upload in-app upgrade evidence")
+        val upgradeRunnerStep =
+            release
+                .substringAfter("      - name: Run previous production in-app upgrade")
+                .substringBefore("      - name: Upload in-app upgrade evidence")
+        assertTrue(
+            upgradeRunnerStep.contains("script: >-"),
+            "android-emulator-runner executes literal block lines separately; pass one folded shell command.",
+        )
+        assertFalse(
+            upgradeRunnerStep.contains("script: |"),
+            "A literal multi-line runner script drops the Python acceptance arguments.",
+        )
+        assertFalse(
+            upgradeRunnerStep.contains("\\\n"),
+            "Folded runner commands must not retain shell continuation lines.",
+        )
+        assertFalse(
+            upgradeRunnerStep.contains("\n              --"),
+            "More-indented argument lines remain newlines in a YAML folded scalar.",
+        )
         assertContains(acceptance, "--baseline-tag")
         assertContains(acceptance, "--baseline-version-name")
         assertContains(acceptance, "--baseline-version-code")

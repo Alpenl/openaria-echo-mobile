@@ -625,18 +625,18 @@ jobs:
           profile: pixel_2
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: |
-            export PATH="${ANDROID_SDK_ROOT}/build-tools/36.0.0:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}"
-            python3 scripts/android-in-app-update-acceptance.py \
-              --repository "${GITHUB_REPOSITORY}" \
-              --release-tag "${RELEASE_TAG}" \
-              --expected-version-name "${EXPECTED_VERSION_NAME}" \
-              --expected-version-code "${EXPECTED_VERSION_CODE}" \
-              --baseline-tag "${BASELINE_TAG}" \
-              --baseline-version-name "${BASELINE_VERSION_NAME}" \
-              --baseline-version-code "${BASELINE_VERSION_CODE}" \
-              --baseline-apk-name "${BASELINE_APK_NAME}" \
-              --evidence-dir android-upgrade-evidence
+          script: >-
+            export PATH="${ANDROID_SDK_ROOT}/build-tools/36.0.0:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}" &&
+            python3 scripts/android-in-app-update-acceptance.py
+            --repository "${GITHUB_REPOSITORY}"
+            --release-tag "${RELEASE_TAG}"
+            --expected-version-name "${EXPECTED_VERSION_NAME}"
+            --expected-version-code "${EXPECTED_VERSION_CODE}"
+            --baseline-tag "${BASELINE_TAG}"
+            --baseline-version-name "${BASELINE_VERSION_NAME}"
+            --baseline-version-code "${BASELINE_VERSION_CODE}"
+            --baseline-apk-name "${BASELINE_APK_NAME}"
+            --evidence-dir android-upgrade-evidence
 
       - name: Upload in-app upgrade evidence
         if: always()

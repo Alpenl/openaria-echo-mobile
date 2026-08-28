@@ -56,8 +56,8 @@ class WorkflowGateTest {
         val release = File("../.github/workflows/mobile-release.yml").readText()
         val appBuild = File("build.gradle.kts").readText()
 
-        assertContains(appBuild, "versionCode = 8")
-        assertContains(appBuild, "versionName = \"0.1.5\"")
+        assertContains(appBuild, "versionCode = 9")
+        assertContains(appBuild, "versionName = \"0.1.6\"")
         assertContains(release, "expected_tag=\"v\${version_name}\"")
         assertContains(release, "versionCode must increase")
         assertContains(release, "apksigner verify --verbose --print-certs")

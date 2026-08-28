@@ -21,11 +21,18 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 PACKAGE_NAME = "com.openaria.openaria_echo_mobile"
+SETTINGS_PACKAGE = "com.android.settings"
+UNKNOWN_SOURCES_TITLE = "Install unknown apps"
+UNKNOWN_SOURCES_ALLOW_LABEL = "Allow from this source"
+APPLICATION_LABEL = "Open Aria Echo"
 MANIFEST_SCHEMA = "openaria.echo.mobile.android-update.v1"
 VERIFIED_RETRY_MIN_VERSION_CODE = 6
 DEVICE_UI_XML = "/sdcard/openaria-update-window.xml"
 UI_DUMP_ATTEMPTS = 3
 UI_DUMP_RETRY_DELAY_SECONDS = 0.5
+UNKNOWN_SOURCES_PAGE_TIMEOUT_SECONDS = 90
+UNKNOWN_SOURCES_CONFIRM_TIMEOUT_SECONDS = 10
+UNKNOWN_SOURCES_POLL_INTERVAL_SECONDS = 1
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 SIGNER_DIGEST = re.compile(
@@ -258,13 +265,84 @@ def capture_screen(destination: Path) -> None:
         return
 
 
+def node_has_label(node: dict[str, str], label: str) -> bool:
+    return node.get("text") == label or node.get("content-desc") == label
+
+
+def require_unknown_sources_control(nodes: Iterable[dict[str, str]]) -> dict[str, str]:
+    settings_nodes = [node for node in nodes if node.get("package") == SETTINGS_PACKAGE]
+    required_labels = (
+        UNKNOWN_SOURCES_TITLE,
+        UNKNOWN_SOURCES_ALLOW_LABEL,
+        APPLICATION_LABEL,
+    )
+    if not all(any(node_has_label(node, label) for node in settings_nodes) for label in required_labels):
+        raise AcceptanceError(
+            "Android Settings did not identify the Open Aria Echo Unknown Sources page"
+        )
+
+    checkables = [node for node in settings_nodes if node.get("checkable") == "true"]
+    if not checkables:
+        raise AcceptanceError("Unknown Sources page did not expose a checkable permission control")
+    if len(checkables) != 1:
+        raise AcceptanceError(
+            f"Unknown Sources page is ambiguous: found {len(checkables)} checkable controls"
+        )
+
+    control = checkables[0]
+    classic_switch = "Switch" in control.get("class", "") or control.get(
+        "resource-id",
+        "",
+    ).endswith("switch_widget")
+    compose_switch = (
+        control.get("class") == "android.view.View" and control.get("clickable") == "true"
+    )
+    if not classic_switch and not compose_switch:
+        raise AcceptanceError("Unknown Sources page exposed an unsupported checkable control")
+    return control
+
+
+def unknown_sources_control_identity(control: dict[str, str]) -> tuple[str, ...]:
+    return tuple(
+        control.get(attribute, "")
+        for attribute in ("package", "resource-id", "class", "text", "content-desc", "bounds")
+    )
+
+
+def wait_for_unknown_sources_confirmation(
+    evidence_dir: Path,
+    expected_identity: tuple[str, ...],
+) -> dict[str, str]:
+    deadline = time.monotonic() + UNKNOWN_SOURCES_CONFIRM_TIMEOUT_SECONDS
+    last_error: AcceptanceError | None = None
+    while time.monotonic() < deadline:
+        try:
+            control = require_unknown_sources_control(dump_ui(evidence_dir))
+        except AcceptanceError as exception:
+            last_error = exception
+            time.sleep(UNKNOWN_SOURCES_POLL_INTERVAL_SECONDS)
+            continue
+        if unknown_sources_control_identity(control) != expected_identity:
+            raise AcceptanceError("Unknown Sources permission control identity changed after confirmation")
+        if control.get("checked") == "true":
+            return control
+        last_error = AcceptanceError("Unknown Sources permission control did not become checked")
+        time.sleep(UNKNOWN_SOURCES_POLL_INTERVAL_SECONDS)
+
+    detail = str(last_error) if last_error is not None else "no confirmation hierarchy was available"
+    raise AcceptanceError(
+        f"Timed out waiting for Unknown Sources confirmation; last reason: {detail}"
+    )
+
+
 def enable_unknown_sources_after_app_handoff(evidence_dir: Path) -> str:
     navigation = ""
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + UNKNOWN_SOURCES_PAGE_TIMEOUT_SECONDS
+    last_page_error: AcceptanceError | None = None
     while time.monotonic() < deadline:
         nodes = dump_ui(evidence_dir)
         packages = {node.get("package", "") for node in nodes}
-        if "com.android.settings" not in packages:
+        if SETTINGS_PACKAGE not in packages:
             installer_visible = any("packageinstaller" in package for package in packages)
             if installer_visible:
                 settings_button = next(
@@ -288,29 +366,27 @@ def enable_unknown_sources_after_app_handoff(evidence_dir: Path) -> str:
             time.sleep(1)
             continue
 
-        switches = [
-            node
-            for node in nodes
-            if node.get("checkable") == "true"
-            and ("Switch" in node.get("class", "") or node.get("resource-id", "").endswith("switch_widget"))
-        ]
-        if switches:
-            if not navigation:
-                navigation = "direct_baseline_app_permission_guidance"
-            if switches[0].get("checked") == "true":
-                raise AcceptanceError(
-                    "Unknown Sources was already enabled; the system confirmation was not exercised"
-                )
-            tap_node(switches[0])
-            time.sleep(1)
-            confirmed = any(node.get("checked") == "true" for node in dump_ui(evidence_dir))
-            if confirmed:
-                capture_screen(evidence_dir / "unknown-sources-enabled.png")
-                command(["adb", "shell", "input", "keyevent", "4"])
-                return navigation
-        time.sleep(1)
+        try:
+            control = require_unknown_sources_control(nodes)
+        except AcceptanceError as exception:
+            last_page_error = exception
+            time.sleep(UNKNOWN_SOURCES_POLL_INTERVAL_SECONDS)
+            continue
+        if not navigation:
+            navigation = "direct_baseline_app_permission_guidance"
+        if control.get("checked") == "true":
+            raise AcceptanceError(
+                "Unknown Sources was already enabled; the system confirmation was not exercised"
+            )
+        control_identity = unknown_sources_control_identity(control)
+        tap_node(control)
+        wait_for_unknown_sources_confirmation(evidence_dir, control_identity)
+        capture_screen(evidence_dir / "unknown-sources-enabled.png")
+        command(["adb", "shell", "input", "keyevent", "4"])
+        return navigation
+    detail = str(last_page_error) if last_page_error is not None else "Android Settings was not visible"
     raise AcceptanceError(
-        "The baseline app did not lead to Android's Unknown Sources screen after Install update"
+        f"Timed out waiting for the Open Aria Echo Unknown Sources page; last reason: {detail}"
     )
 
 

@@ -5,6 +5,7 @@ import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DeviceApiSupportManifestTest {
@@ -16,28 +17,33 @@ class DeviceApiSupportManifestTest {
         assertContains(manifest, "\"basePath\": \"/api/v4\"")
         assertContains(manifest, "\"supportedMajors\": [4]")
         assertContains(manifest, "\"unknownMajor\": \"fail_closed\"")
-        assertContains(manifest, "f1185da08f50857d1f231701d14dfc42ab5cf3f6abce65d5d6d5c90510a52210")
-        assertContains(manifest, "\"bytes\": 120760")
+        assertContains(manifest, "b6f3c677c038e55c03581c587973811b0aa2dc91cfb8b602a95128fbac225827")
+        assertContains(manifest, "\"bytes\": 124739")
         assertContains(manifest, "\"status\": \"present\"")
         assertContains(manifest, "\"enabled\": true")
         assertContains(manifest, "\"scope\": \"supported_v4_operations_only\"")
         assertContains(manifest, "verified body identity token indexing")
         assertContains(manifest, "EndpointPolicy-guarded platform cleartext for dynamic local origins")
         assertContains(manifest, "Android NSD discovery for _ylx-capture._tcp")
-        assertContains(manifest, "foreground resume authoritative reconciliation")
+        assertContains(manifest, "foreground lifecycle request cancellation")
+        assertContains(manifest, "connection-generation late response rejection")
+        assertContains(manifest, "healthy SSE reconciliation budget of at most two status reads per minute")
+        assertContains(manifest, "foreground viewfinder-only single-flight preview reads")
         assertContains(manifest, "camera focus read/write")
         assertContains(manifest, "preview 503 camera_not_connected/preview_unavailable mapping")
         assertContains(manifest, "stale preview frame warning overlay")
         assertContains(manifest, "artifact HEAD metadata validation")
-        assertContains(manifest, "artifact Range download resume")
+        assertContains(manifest, "artifact descriptor-bound Range transport")
+        assertContains(manifest, "artifact cancel, failure, and .part cleanup")
         assertContains(manifest, "artifact foreground notification updates")
         assertContains(manifest, "live IMU preview overlay")
         assertContains(manifest, "camera-connected capture admission gating")
-        assertContains(manifest, "recording-safe system back behavior")
+        assertContains(manifest, "layered recording-safe system back confirmation behavior")
         assertContains(manifest, "session ledger local filters all/available/unsuccessful")
-        assertContains(manifest, "safe-swap event authority_epoch/source_revision projection")
-        assertContains(manifest, "safe-swap stop request with reason=safe_swap")
-        assertContains(manifest, "safe-swap stale authority rejection")
+        val implemented = manifest.substringAfter("\"implemented\": [").substringBefore("],")
+        assertFalse(implemented.contains("safe-swap") || implemented.contains("safe_swap"))
+        assertContains(manifest, "safe-swap wire parsing is frozen compatibility code")
+        assertContains(manifest, "no production UI, controller, polling, documentation claim, or acceptance path")
         assertContains(manifest, "calibration capture admission gating")
         assertContains(manifest, "calibration capture start mode")
         assertContains(manifest, "authoritative /network desired/observed/saved/verified status")
@@ -60,9 +66,9 @@ class DeviceApiSupportManifestTest {
         val bytes = openApi.readBytes()
 
         assertTrue(openApi.isFile)
-        assertEquals(120760, bytes.size)
+        assertEquals(124739, bytes.size)
         assertEquals(
-            "f1185da08f50857d1f231701d14dfc42ab5cf3f6abce65d5d6d5c90510a52210",
+            "b6f3c677c038e55c03581c587973811b0aa2dc91cfb8b602a95128fbac225827",
             sha256(bytes),
         )
         assertContains(openApi.readText(), "version: 4.0.0")

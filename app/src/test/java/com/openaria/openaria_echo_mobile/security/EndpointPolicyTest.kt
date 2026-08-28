@@ -98,4 +98,32 @@ class EndpointPolicyTest {
         assertEquals(true, linkLocal.target.cleartext)
         assertEquals(EndpointPolicy.RejectReason.PUBLIC_CLEARTEXT_HTTP, publicIpv6.reason)
     }
+
+    @Test
+    fun `preserves an IPv6 link local interface scope without resolving that interface`() {
+        val scoped = assertIs<EndpointPolicy.Decision.Allowed>(
+            EndpointPolicy.validate("http://[FE80::1%WiFiA]:8080"),
+        )
+
+        assertEquals("http://[fe80::1%WiFiA]:8080", scoped.target.origin.toString())
+        assertEquals("[fe80::1%WiFiA]", scoped.target.origin.toURL().host)
+        assertEquals(true, scoped.target.cleartext)
+    }
+
+    @Test
+    fun `canonicalizes host case IDN and default ports in origin identity`() {
+        val http = assertIs<EndpointPolicy.Decision.Allowed>(
+            EndpointPolicy.validate("http://RP-YLX.LOCAL:80/"),
+        )
+        val https = assertIs<EndpointPolicy.Decision.Allowed>(
+            EndpointPolicy.validate("https://B\u00dcCHER.example:443"),
+        )
+        val nonDefault = assertIs<EndpointPolicy.Decision.Allowed>(
+            EndpointPolicy.validate("https://RP-YLX.LOCAL:8443"),
+        )
+
+        assertEquals("http://rp-ylx.local", http.target.origin.toString())
+        assertEquals("https://xn--bcher-kva.example", https.target.origin.toString())
+        assertEquals("https://rp-ylx.local:8443", nonDefault.target.origin.toString())
+    }
 }

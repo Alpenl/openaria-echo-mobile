@@ -42,6 +42,7 @@
     <string name="probe_invalid_response">The body response is not supported Device API v4: %1$s</string>
     <string name="probe_network_failure">Could not reach the body: %1$s</string>
     <string name="probe_http_failure">Device API request failed: HTTP %1$d.</string>
+    <string name="probe_protocol_redirect">The body returned a disallowed redirect (HTTP %1$d); the connection was stopped.</string>
     <string name="access_token">Access token</string>
     <string name="access_token_session_only">Access token (this session only)</string>
     <string name="access_token_hint">Bearer token. Use it for this session only, or save it as local ciphertext protected by Android Keystore.</string>
@@ -82,9 +83,11 @@
     <string name="capture_command_running_start">Sending the start recording command.</string>
     <string name="capture_command_running_calibration_start">Sending the start calibration capture command.</string>
     <string name="capture_command_running_stop">Sending the stop recording command.</string>
-    <string name="capture_command_running_safe_swap_stop">Requesting safe-swap: the body will stop capture and seal the current session first.</string>
     <string name="capture_command_accepted">The body accepted the capture command, and the UI is using the returned authoritative snapshot.</string>
     <string name="capture_command_recording_continues_on_back">Recording continues on the body. Back will not stop capture; use Stop when you need to stop.</string>
+    <string name="recording_background_confirm_title">Recording continues on the body</string>
+    <string name="recording_background_confirm_body">This only moves the app to the background. It sends no stop or disconnect command, so recording continues until you return and explicitly stop it.</string>
+    <string name="recording_background_confirm_action">Keep recording and background app</string>
     <string name="capture_command_no_active_session">There is no active session; the stop command succeeded as a no-op.</string>
     <string name="capture_command_auth_required">The capture command requires an access token.</string>
     <string name="capture_command_forbidden">The capture command was rejected.</string>
@@ -192,7 +195,7 @@
     <string name="unsuccessful_outcome_state_failed">Failed</string>
     <string name="unsuccessful_outcome_state_abandoned">Abandoned</string>
     <string name="artifact_download_running">Downloading %1$s.</string>
-    <string name="artifact_download_cancelled">Cancelled download for %1$s; the temporary .part file is not shown as a complete artifact and can be resumed later.</string>
+    <string name="artifact_download_cancelled">Cancelled download for %1$s; this attempt\'s temporary .part file was removed, and a new download starts from the beginning.</string>
     <string name="artifact_download_saved">Saved %1$s (%2$d bytes): %3$s</string>
     <string name="artifact_download_auth_required">Downloading %1$s requires an access token.</string>
     <string name="artifact_download_forbidden">Downloading %1$s was rejected.</string>
@@ -211,7 +214,7 @@
     <string name="network_empty">Connect to a body to read network status, scan results, and network mutation transactions.</string>
     <string name="network_no_fake">The network screen only renders real Device API v4 capabilities; unavailable actions explain why instead of acting like fake buttons.</string>
     <string name="network_contract_scope_title">Network mutation state</string>
-    <string name="network_contract_scope_body">Device API v4 provides desired, observed, saved, verified, mDNS, transaction-window, and Rescue AP reconciliation. Scan, credential_ref, apply, retry, and forget are enabled only when the body advertises mutation support.</string>
+    <string name="network_contract_scope_body">Device API v4 supplies read-only desired, observed, saved, verified, mDNS, transaction-window, and body-reported Rescue AP state. Scan, credential_ref, apply, retry, and forget are enabled only when the body advertises mutation support.</string>
     <string name="body_decisions">Capture admission</string>
     <string name="body_not_ready">No connection, so capture readiness, writable storage, and camera state are unknown.</string>
     <string name="body_connected">The body is verified. Capture, preview, and session state will continue to come from authoritative snapshots.</string>
@@ -229,25 +232,6 @@
     <string name="calibration_unavailable_contract">Device API v4 does not expose a separate calibration capability or disabled reason yet; the production UI stays closed and shows no fake button.</string>
     <string name="storage_status">Storage</string>
     <string name="storage_bytes">%1$d of %2$d bytes available</string>
-    <string name="safe_swap_title">Safe-swap receipt</string>
-    <string name="safe_swap_request">Request safe-swap</string>
-    <string name="safe_swap_request_ready">Recording is active; the app can stop with reason=safe_swap and wait for a receipt.</string>
-    <string name="safe_swap_disabled_not_recording">Safe-swap can only be requested when the authoritative state is recording.</string>
-    <string name="safe_swap_confirm_title">Confirm safe-swap request</string>
-    <string name="safe_swap_confirm_body">The app will send a stop capture command with reason=safe_swap. Treat the volume as safe only after the body signs a safe-swap receipt.</string>
-    <string name="safe_swap_confirm_action">Confirm request</string>
-    <string name="safe_swap_waiting_receipt">The safe-swap stop request was submitted. Waiting for the body-signed receipt; do not remove the storage volume before a receipt appears.</string>
-    <string name="safe_swap_ready">The receipt is valid; the body reports the volume released with 0 open handles.</string>
-    <string name="safe_swap_not_found">There is no current valid safe-swap receipt.</string>
-    <string name="safe_swap_auth_required">The safe-swap receipt requires an access token.</string>
-    <string name="safe_swap_forbidden">Safe-swap receipt access was rejected.</string>
-    <string name="safe_swap_invalid_response">Invalid safe-swap receipt response: %1$s</string>
-    <string name="safe_swap_network_failure">Safe-swap receipt disconnected: %1$s</string>
-    <string name="safe_swap_http_failure">Safe-swap receipt request failed: HTTP %1$d.</string>
-    <string name="safe_swap_release_state">Release state: %1$s</string>
-    <string name="safe_swap_open_handles">Open handles: %1$d</string>
-    <string name="safe_swap_authority">authority epoch: %1$s\nsource revision: %2$d</string>
-    <string name="safe_swap_manifest">Manifest: %1$s</string>
     <string name="runtime_status">Runtime</string>
     <string name="runtime_observed">Observed: %1$s · connection: %2$s · temperature: %3$.1f℃</string>
     <string name="network_observed_runtime">Current network status</string>
@@ -300,6 +284,7 @@
     <string name="discovery_failed">Discovery failed: %1$d. Service type: %2$s. Manual address entry still works.</string>
     <string name="discovery_body_origin">Origin: %1$s</string>
     <string name="discovery_body_host">Host: %1$s · port: %2$d</string>
+    <string name="discovery_body_offline">Currently offline</string>
     <string name="network_authority_status">Authoritative network status</string>
     <string name="network_saved_verified">Saved: %1$s · verified: %2$s</string>
     <string name="network_desired_state">Desired network</string>
@@ -332,7 +317,7 @@
     <string name="network_passphrase_hint">8–63 characters; local input is cleared after submission.</string>
     <string name="network_apply_wifi">Switch to this Wi-Fi</string>
     <string name="network_hotspot_target">Hotspot target</string>
-    <string name="network_hotspot_hint">Return the desired network to the body hotspot. Network mutation can briefly break the control link; the result is reconciled through /network or Rescue AP.</string>
+    <string name="network_hotspot_hint">Return the desired network to the body hotspot. Network mutation can break the control link; without an explicit result, this client operation ends in error and is not replayed automatically.</string>
     <string name="network_apply_hotspot">Switch to hotspot</string>
     <string name="network_ethernet_target">Wired network target</string>
     <string name="network_ethernet_dhcp_hint">Set the wired network to DHCP so the upstream network assigns the address.</string>
@@ -344,12 +329,12 @@
     <string name="network_static_dns_label">DNS</string>
     <string name="network_static_dns_hint">Up to 3 IPv4 DNS servers, separated by comma, space, or semicolon.</string>
     <string name="network_apply_ethernet_static">Switch to wired static</string>
-    <string name="network_retry">Retry transaction</string>
+    <string name="network_retry">Start new retry</string>
     <string name="network_forget">Forget Wi-Fi</string>
     <string name="network_forget_confirm_title">Confirm Wi-Fi forget</string>
     <string name="network_forget_confirm_body">The body will delete the saved Wi-Fi client profile and return desired state to hotspot. This does not stop capture on the body.</string>
     <string name="network_forget_confirm_action">Forget and return hotspot</string>
-    <string name="network_retry_disabled">Only the latest failed or rescued transaction can be retried.</string>
+    <string name="network_retry_disabled">Only the latest failed or rescued transaction can be used to start a new retry.</string>
     <string name="network_forget_disabled">There is no saved Wi-Fi client profile.</string>
     <string name="network_disabled_command_running">A network command is already running.</string>
     <string name="network_disabled_status_missing">Waiting for /network status.</string>
@@ -379,7 +364,6 @@
     <string name="network_scan_unavailable">Wi-Fi scan is temporarily unavailable.</string>
     <string name="network_mutation_running">Submitting network transaction.</string>
     <string name="network_mutation_accepted">Network transaction accepted: %1$s</string>
-    <string name="network_mutation_result_pending">Network mutation was submitted, but the control link is disconnected and the result is pending.\nNext step: %1$s\nDisconnect reason: %2$s\nAfter reconnection, /network will reconcile the authoritative result.</string>
     <string name="network_mutation_unavailable">The body does not currently allow network mutation.</string>
     <string name="network_idempotency_conflict">The Idempotency-Key conflicts with different request data.</string>
     <string name="network_invalid_desired_state">The body rejected this desired network state.</string>
@@ -388,7 +372,7 @@
     <string name="network_forbidden">Network API access was rejected.</string>
     <string name="network_invalid_request">Invalid network request: %1$s</string>
     <string name="network_invalid_response">Invalid network response: %1$s</string>
-    <string name="network_network_failure">Network API disconnected: %1$s</string>
+    <string name="network_network_failure">Network API disconnected: %1$s. This client operation has ended; an unknown result will not be recovered or replayed automatically.</string>
     <string name="network_http_failure">Network API request failed: HTTP %1$d.</string>
     <string name="network_desired_hotspot">Hotspot mode</string>
     <string name="network_desired_wifi">Wi-Fi client: %1$s · %2$s · credential: %3$s</string>
@@ -409,7 +393,7 @@
     <string name="network_mutation_reason_network_manager_unavailable">NetworkManager unavailable</string>
     <string name="network_mutation_reason_rescue_ap_not_validated">Rescue AP not validated</string>
     <string name="network_mutation_reason_capture_active">Capture active</string>
-    <string name="network_mutation_reason_recovery_required">Recovery required</string>
+    <string name="network_mutation_reason_recovery_required">Body reports a recovery block</string>
     <string name="network_mutation_reason_maintenance_window_closed">Maintenance window closed</string>
     <string name="network_mutation_reason_unsupported_concurrency">Unsupported concurrency</string>
     <string name="network_concurrency_supported">Supported</string>
@@ -421,7 +405,7 @@
     <string name="network_transaction_status">%1$s · %2$s · stage: %3$s</string>
     <string name="network_transaction_id">Transaction ID: %1$s</string>
     <string name="network_transaction_desired">Desired: %1$s</string>
-    <string name="network_recovery_action">Recovery action: %1$s</string>
+    <string name="network_recovery_action">Device recovery state: %1$s</string>
     <string name="network_rescue_status">Rescue AP validated: %1$s · trigger: %2$d seconds</string>
     <string name="network_deadline">Verification window remaining: %1$.1f seconds</string>
     <string name="network_transaction_error">Error: %1$s · %2$s · retryable: %3$s</string>
@@ -442,8 +426,7 @@
     <string name="network_stage_forgetting">Forgetting</string>
     <string name="network_stage_forgotten">Forgotten</string>
     <string name="network_recovery_await_device">Await body</string>
-    <string name="network_recovery_reconnect_target_lan">Reconnect target LAN</string>
-    <string name="network_recovery_reconnect_rescue_ap">Reconnect Rescue AP</string>
+    <string name="network_recovery_connection_changed">Device reported a connection-state change</string>
     <string name="network_recovery_retry">Retry available</string>
     <string name="network_recovery_service_required">Service required</string>
     <string name="network_recovery_none">None</string>
@@ -482,12 +465,14 @@
     <string name="update_current">This is the current version.</string>
     <string name="update_available">A new version is available.</string>
     <string name="update_downloading">Downloading update.</string>
+    <string name="update_verifying">Verifying the APK identity and signature.</string>
+    <string name="update_ready_to_install">The update is verified and ready to install.</string>
     <string name="update_installing">Opening Android installer.</string>
     <string name="update_failed">Update failed. You can check again.</string>
     <string name="update_failed_diagnostics">Update failed; verify network access, Release manifest, APK hash, and Android install permission before retrying.</string>
     <string name="diagnostics">Diagnostics</string>
     <string name="contract_gate_title">Contract gate</string>
-    <string name="contract_gate_body">The Device API v4 OpenAPI source is pinned in the mobile repo; status, JPEG preview, idempotent start/stop, session ledger, safe-swap receipt reads, artifact HEAD/Range downloads, camera focus, mDNS network status, and network mutation transactions use real endpoints; unavailable capabilities stay gated by body-declared support.</string>
+    <string name="contract_gate_body">The Device API v4 OpenAPI source is pinned in the mobile repo; status, JPEG preview, idempotent start/stop, session ledger, artifact HEAD/Range downloads, camera focus, mDNS network status, and network mutation transactions use real endpoints; unavailable capabilities stay gated by body-declared support.</string>
     <string name="bottom_nav_description">Primary navigation</string>
     <string name="nav_selected">Selected</string>
     <string name="nav_not_selected">Not selected</string>

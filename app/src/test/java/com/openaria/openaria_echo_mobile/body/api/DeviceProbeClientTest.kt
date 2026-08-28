@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.ServerSocket
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -58,6 +59,27 @@ class DeviceProbeClientTest {
         val result = DeviceProbeClient().probe("http://example.com", null)
 
         assertIs<ProbeResult.RejectedEndpoint>(result)
+    }
+
+    @Test
+    fun `multi-address fallback resolves bearer independently for each exact origin`() {
+        var authorization: String? = null
+        val reachableOrigin = startServer { exchange ->
+            authorization = exchange.requestHeaders.getFirst("Authorization")
+            exchange.respond(200, validDescriptorJson())
+        }
+        val closedPort = ServerSocket(0).use { it.localPort }
+        val unreachableOrigin = "http://127.0.0.1:$closedPort"
+        val credentialLookups = mutableListOf<String>()
+
+        val result = DeviceProbeClient().probe(listOf(unreachableOrigin, reachableOrigin)) { origin ->
+            credentialLookups += origin
+            if (origin == reachableOrigin) "reachable-token" else "must-not-migrate"
+        }
+
+        assertIs<ProbeResult.Verified>(result)
+        assertEquals(listOf(unreachableOrigin, reachableOrigin), credentialLookups)
+        assertEquals("Bearer reachable-token", authorization)
     }
 
     private fun startServer(handler: (HttpExchange) -> Unit): String {

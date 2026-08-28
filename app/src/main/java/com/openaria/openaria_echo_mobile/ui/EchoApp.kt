@@ -5,15 +5,15 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
-import android.graphics.BitmapFactory
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.annotation.StringRes
-import androidx.activity.compose.BackHandler
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +34,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -54,8 +56,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -63,7 +67,9 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -77,6 +83,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -97,6 +105,7 @@ import com.openaria.openaria_echo_mobile.body.api.CalibrationCaptureCapability
 import com.openaria.openaria_echo_mobile.body.api.CameraFocusResult
 import com.openaria.openaria_echo_mobile.body.api.CameraFocusStatus
 import com.openaria.openaria_echo_mobile.body.api.DeviceConnection
+import com.openaria.openaria_echo_mobile.body.api.DeviceHttpFailure
 import com.openaria.openaria_echo_mobile.body.api.DeviceHttpClient
 import com.openaria.openaria_echo_mobile.body.api.DeviceSessionManifest
 import com.openaria.openaria_echo_mobile.body.api.DeviceProbeClient
@@ -107,6 +116,7 @@ import com.openaria.openaria_echo_mobile.body.api.NetworkCredentialResult
 import com.openaria.openaria_echo_mobile.body.api.NetworkEventsResult
 import com.openaria.openaria_echo_mobile.body.api.NetworkMutationResult
 import com.openaria.openaria_echo_mobile.body.api.NetworkObservedState
+import com.openaria.openaria_echo_mobile.body.api.NetworkRevisionRelation
 import com.openaria.openaria_echo_mobile.body.api.NetworkScanEntry
 import com.openaria.openaria_echo_mobile.body.api.NetworkScanResult
 import com.openaria.openaria_echo_mobile.body.api.NetworkScanSnapshot
@@ -119,8 +129,6 @@ import com.openaria.openaria_echo_mobile.body.api.PreviewResult
 import com.openaria.openaria_echo_mobile.body.api.ProbeResult
 import com.openaria.openaria_echo_mobile.body.api.RetainedUnsuccessfulOutcome
 import com.openaria.openaria_echo_mobile.body.api.RetainedUnsuccessfulOutcomeResult
-import com.openaria.openaria_echo_mobile.body.api.SafeSwapReceiptSummary
-import com.openaria.openaria_echo_mobile.body.api.SafeSwapResult
 import com.openaria.openaria_echo_mobile.body.api.SessionListPage
 import com.openaria.openaria_echo_mobile.body.api.SessionListResult
 import com.openaria.openaria_echo_mobile.body.api.SessionManifestResult
@@ -135,10 +143,12 @@ import com.openaria.openaria_echo_mobile.security.SecureTokenStore
 import com.openaria.openaria_echo_mobile.ui.theme.EchoColors
 import com.openaria.openaria_echo_mobile.ui.theme.EchoText
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.channels.Channel
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
@@ -158,10 +168,11 @@ fun EchoApp(
     var captureMessage by remember { mutableStateOf<CaptureStatusMessage?>(null) }
     var captureCommandMessage by remember { mutableStateOf<CaptureCommandMessage?>(null) }
     var captureCommandRunning by remember { mutableStateOf(false) }
-    var previewBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    var previewFrame by remember { mutableStateOf<PreviewVisualFrame?>(null) }
     var previewMessage by remember { mutableStateOf<PreviewMessage?>(null) }
     var previewModeName by rememberSaveable { mutableStateOf(PreviewMode.BOTH.name) }
     var showPreviewGrid by rememberSaveable { mutableStateOf(true) }
+    var showFocusPeaking by rememberSaveable { mutableStateOf(false) }
     var showPreviewImuOverlay by rememberSaveable { mutableStateOf(false) }
     var sessionPage by remember { mutableStateOf<SessionListPage?>(null) }
     var sessionMessage by remember { mutableStateOf<SessionMessage?>(null) }
@@ -176,31 +187,65 @@ fun EchoApp(
     var artifactDownloadMessage by remember { mutableStateOf<ArtifactDownloadMessage?>(null) }
     var artifactDownloadingId by remember { mutableStateOf<String?>(null) }
     var cancelArtifactDownload by remember { mutableStateOf<(() -> Unit)?>(null) }
-    var safeSwapReceipt by remember { mutableStateOf<SafeSwapReceiptSummary?>(null) }
-    var safeSwapMessage by remember { mutableStateOf<SafeSwapMessage?>(null) }
     var cameraFocus by remember { mutableStateOf<CameraFocusStatus?>(null) }
     var cameraFocusMessage by remember { mutableStateOf<CameraFocusMessage?>(null) }
     var cameraFocusCommandRunning by remember { mutableStateOf(false) }
+    var connectionGeneration by remember { mutableStateOf(0L) }
+    var captureStreamHealth by remember { mutableStateOf(EventStreamHealth.Starting) }
+    var captureStatusRequestGeneration by remember { mutableStateOf<Long?>(null) }
+    var sessionRequestGeneration by remember { mutableStateOf<Long?>(null) }
+    var focusRequestGeneration by remember { mutableStateOf<Long?>(null) }
+    var sessionDetailGeneration by remember { mutableStateOf(0L) }
+    var sessionOutcomeGeneration by remember { mutableStateOf(0L) }
+    var showRecordingBackgroundConfirmation by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    var appInForeground by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
     val deviceClient = remember { DeviceHttpClient() }
     val artifactStore = remember(context) { ArtifactDownloadStore(context) }
     val scope = rememberCoroutineScope()
+    val previewFrameGate = remember { PreviewFrameGate() }
+    val previewFrameWorkerDispatcher = remember { Dispatchers.Default.limitedParallelism(1) }
     val selectedTab = EchoTab.valueOf(selectedTabName)
     val safeDrawing = WindowInsets.safeDrawing.asPaddingValues()
     val bottomNavigationReserve = safeDrawing.calculateBottomPadding() + 86.dp
-    var foregroundResumeTick by remember { mutableStateOf(0L) }
+    val captureReconciliationGate = remember(connectionGeneration) {
+        ReconciliationGate(ConnectionRequestPolicy.HEALTHY_RECONCILIATION_INTERVAL_MS)
+    }
+
+    fun replaceBodyConnection(nextConnection: DeviceConnection?) {
+        cancelArtifactDownload?.invoke()
+        previewFrameGate.beginGeneration()
+        previewFrame = null
+        connectionGeneration += 1L
+        bodyConnection = nextConnection
+    }
+
+    fun isCurrentConnection(activeConnection: DeviceConnection, generation: Long): Boolean {
+        return generation == connectionGeneration && bodyConnection?.origin == activeConnection.origin
+    }
 
     fun applyCaptureProjectionState(nextState: CaptureProjectionState) {
         captureProjection = nextState
         captureStatus = nextState.snapshot
-        safeSwapReceipt = nextState.safeSwapReceipt
     }
 
-    suspend fun refreshSessionLedger(activeConnection: DeviceConnection) {
-        val result = withContext(Dispatchers.IO) {
-            deviceClient.listSessions(activeConnection, limit = 50)
+    suspend fun refreshSessionLedger(
+        activeConnection: DeviceConnection,
+        generation: Long = connectionGeneration,
+    ) {
+        if (!isCurrentConnection(activeConnection, generation) || sessionRequestGeneration != null) return
+        sessionRequestGeneration = generation
+        val result = try {
+            withContext(Dispatchers.IO) {
+                deviceClient.listSessions(activeConnection, limit = 50)
+            }
+        } finally {
+            if (sessionRequestGeneration == generation) sessionRequestGeneration = null
         }
+        if (!isCurrentConnection(activeConnection, generation)) return
         when (result) {
             is SessionListResult.Page -> {
                 sessionPage = mergeSessionRefresh(sessionPage, result.value)
@@ -215,10 +260,104 @@ fun EchoApp(
         }
     }
 
-    DisposableEffect(lifecycleOwner, bodyConnection?.origin) {
+    suspend fun reconcileCaptureStatus(
+        activeConnection: DeviceConnection,
+        generation: Long,
+        force: Boolean,
+    ): Boolean {
+        if (!isCurrentConnection(activeConnection, generation) || captureStatusRequestGeneration != null) {
+            return false
+        }
+        if (!captureReconciliationGate.tryAcquire(SystemClock.elapsedRealtime(), force)) {
+            return false
+        }
+        val baseline = captureProjection.authorityRevision()
+        captureStatusRequestGeneration = generation
+        val result = try {
+            withContext(Dispatchers.IO) { deviceClient.getCaptureStatus(activeConnection) }
+        } finally {
+            if (captureStatusRequestGeneration == generation) captureStatusRequestGeneration = null
+        }
+        if (!isCurrentConnection(activeConnection, generation) ||
+            !ConnectionRequestPolicy.canApplyResponse(
+                requestGeneration = generation,
+                currentGeneration = connectionGeneration,
+                requestBaseline = baseline,
+                currentRevision = captureProjection.authorityRevision(),
+            )
+        ) {
+            return false
+        }
+        when (result) {
+            is CaptureStatusResult.Snapshot -> {
+                val projected = CaptureProjection.applyHttpSnapshot(captureProjection, result.value)
+                applyCaptureProjectionState(projected.state)
+                captureMessage = null
+            }
+            CaptureStatusResult.AuthenticationRequired -> captureMessage = CaptureStatusMessage.AuthRequired
+            CaptureStatusResult.Forbidden -> captureMessage = CaptureStatusMessage.Forbidden
+            is CaptureStatusResult.HttpFailure -> captureMessage = CaptureStatusMessage.HttpFailure(result.statusCode)
+            is CaptureStatusResult.InvalidResponse -> captureMessage = CaptureStatusMessage.InvalidResponse(result.message)
+            is CaptureStatusResult.NetworkFailure -> captureMessage = CaptureStatusMessage.NetworkFailure(result.message)
+        }
+        return result is CaptureStatusResult.Snapshot
+    }
+
+    suspend fun refreshCameraFocus(activeConnection: DeviceConnection, generation: Long) {
+        if (!isCurrentConnection(activeConnection, generation) || focusRequestGeneration != null) return
+        focusRequestGeneration = generation
+        val result = try {
+            withContext(Dispatchers.IO) { deviceClient.getCameraFocus(activeConnection) }
+        } finally {
+            if (focusRequestGeneration == generation) focusRequestGeneration = null
+        }
+        if (!isCurrentConnection(activeConnection, generation)) return
+        when (result) {
+            is CameraFocusResult.Status -> {
+                cameraFocus = result.value
+                if (cameraFocusMessage !in setOf(CameraFocusMessage.Running, CameraFocusMessage.Updated)) {
+                    cameraFocusMessage = null
+                }
+            }
+            CameraFocusResult.AuthenticationRequired -> cameraFocusMessage = CameraFocusMessage.AuthRequired
+            CameraFocusResult.Conflict -> cameraFocusMessage = CameraFocusMessage.Conflict
+            CameraFocusResult.Forbidden -> cameraFocusMessage = CameraFocusMessage.Forbidden
+            is CameraFocusResult.HttpFailure -> cameraFocusMessage = CameraFocusMessage.HttpFailure(result.statusCode)
+            CameraFocusResult.InvalidFocus -> cameraFocusMessage = CameraFocusMessage.InvalidFocus
+            is CameraFocusResult.InvalidRequest -> cameraFocusMessage = CameraFocusMessage.InvalidRequest(result.message)
+            is CameraFocusResult.InvalidResponse -> cameraFocusMessage = CameraFocusMessage.InvalidResponse(result.message)
+            is CameraFocusResult.NetworkFailure -> cameraFocusMessage = CameraFocusMessage.NetworkFailure(result.message)
+            CameraFocusResult.Unsupported -> cameraFocusMessage = CameraFocusMessage.Unsupported
+        }
+    }
+
+    fun dismissSessionDetail() {
+        sessionDetailGeneration += 1L
+        sessionManifest = null
+        sessionManifestMessage = null
+        sessionManifestLoading = false
+    }
+
+    fun dismissSessionOutcome() {
+        sessionOutcomeGeneration += 1L
+        unsuccessfulOutcome = null
+        unsuccessfulOutcomeSessionId = null
+        unsuccessfulOutcomeMessage = null
+        unsuccessfulOutcomeLoadingId = null
+    }
+
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && bodyConnection != null) {
-                foregroundResumeTick += 1
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> appInForeground = true
+                Lifecycle.Event.ON_PAUSE,
+                Lifecycle.Event.ON_STOP,
+                -> {
+                    previewFrameGate.beginGeneration()
+                    previewFrame = null
+                    appInForeground = false
+                }
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -227,19 +366,40 @@ fun EchoApp(
         }
     }
 
-    BackHandler(enabled = bodyConnection != null) {
-        when {
-            selectedTab != EchoTab.VIEWFINDER -> selectedTabName = EchoTab.VIEWFINDER.name
-            captureStatus?.deviceState == "recording" -> {
-                captureCommandMessage = CaptureCommandMessage.RecordingContinuesOnBack
+    val backNavigationState = BackNavigationState(
+        confirmationVisible = showRecordingBackgroundConfirmation,
+        sessionDetailVisible = sessionManifest != null || sessionManifestMessage != null || sessionManifestLoading,
+        sessionOutcomeVisible = unsuccessfulOutcomeSessionId != null || unsuccessfulOutcomeLoadingId != null,
+        temporaryPanelVisible = artifactDownloadMessage != null && artifactDownloadingId == null,
+        selectedTabIsViewfinder = selectedTab == EchoTab.VIEWFINDER,
+        recording = captureStatus?.deviceState == "recording",
+        connected = bodyConnection != null,
+    )
+    BackNavigationHandler(backNavigationState) { action ->
+        when (action) {
+            BackNavigationAction.DISMISS_CONFIRMATION -> showRecordingBackgroundConfirmation = false
+            BackNavigationAction.CLOSE_SESSION_DETAIL -> dismissSessionDetail()
+            BackNavigationAction.CLOSE_SESSION_OUTCOME -> dismissSessionOutcome()
+            BackNavigationAction.CLOSE_TEMPORARY_PANEL -> artifactDownloadMessage = null
+            BackNavigationAction.RETURN_TO_VIEWFINDER -> selectedTabName = EchoTab.VIEWFINDER.name
+            BackNavigationAction.REQUEST_RECORDING_BACKGROUND_CONFIRMATION -> {
+                showRecordingBackgroundConfirmation = true
             }
-            else -> context.findActivity()?.moveTaskToBack(true)
+            BackNavigationAction.MOVE_TASK_TO_BACKGROUND -> context.findActivity()?.moveTaskToBack(true)
+            BackNavigationAction.DEFAULT_SYSTEM_EXIT -> Unit
+        }
+    }
+
+    LaunchedEffect(captureStatus?.deviceState) {
+        if (captureStatus?.deviceState != "recording") {
+            showRecordingBackgroundConfirmation = false
         }
     }
 
     fun startCaptureWithMode(calibration: Boolean) {
         val activeConnection = bodyConnection
         if (activeConnection != null && !captureCommandRunning) {
+            val generation = connectionGeneration
             captureCommandRunning = true
             captureCommandMessage = if (calibration) {
                 CaptureCommandMessage.RunningCalibrationStart
@@ -262,6 +422,7 @@ fun EchoApp(
                         deviceClient.startCapture(activeConnection, idempotencyKey)
                     }
                 }
+                if (!isCurrentConnection(activeConnection, generation)) return@launch
                 captureCommandRunning = false
                 captureCommandMessage = captureCommandMessageFor(result)
                 if (result is CaptureCommandResult.Accepted) {
@@ -269,7 +430,7 @@ fun EchoApp(
                     applyCaptureProjectionState(projected.state)
                 }
                 if (result is CaptureCommandResult.Accepted || result is CaptureCommandResult.NoActiveSession) {
-                    refreshSessionLedger(activeConnection)
+                    refreshSessionLedger(activeConnection, generation)
                 }
             }
         }
@@ -286,6 +447,7 @@ fun EchoApp(
     val stopCapture: () -> Unit = {
         val activeConnection = bodyConnection
         if (activeConnection != null && !captureCommandRunning) {
+            val generation = connectionGeneration
             captureCommandRunning = true
             captureCommandMessage = CaptureCommandMessage.RunningStop
             val idempotencyKey = UUID.randomUUID().toString()
@@ -300,61 +462,15 @@ fun EchoApp(
                 val result = withContext(Dispatchers.IO) {
                     deviceClient.stopCapture(activeConnection, idempotencyKey)
                 }
+                if (!isCurrentConnection(activeConnection, generation)) return@launch
                 captureCommandRunning = false
                 captureCommandMessage = captureCommandMessageFor(result)
                 if (result is CaptureCommandResult.Accepted) {
                     val projected = CaptureProjection.applyHttpSnapshot(captureProjection, result.value)
                     applyCaptureProjectionState(projected.state)
-                }
-            }
-        }
-    }
-
-    val requestSafeSwap: () -> Unit = {
-        val activeConnection = bodyConnection
-        if (activeConnection != null && !captureCommandRunning && captureStatus?.deviceState == "recording") {
-            captureCommandRunning = true
-            captureCommandMessage = CaptureCommandMessage.RunningSafeSwapStop
-            safeSwapMessage = SafeSwapMessage.WaitingForReceipt
-            val idempotencyKey = UUID.randomUUID().toString()
-            applyCaptureProjectionState(
-                CaptureProjection.markCommandSubmitting(
-                    state = captureProjection,
-                    kind = CaptureCommandKind.STOP,
-                    idempotencyKey = idempotencyKey,
-                ),
-            )
-            scope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    deviceClient.stopCaptureForSafeSwap(activeConnection, idempotencyKey)
-                }
-                captureCommandRunning = false
-                captureCommandMessage = captureCommandMessageFor(result)
-                if (result is CaptureCommandResult.Accepted) {
-                    val projected = CaptureProjection.applyHttpSnapshot(captureProjection, result.value)
-                    applyCaptureProjectionState(projected.state)
-                    when (val safeSwapResult = withContext(Dispatchers.IO) { deviceClient.getSafeSwapReceipt(activeConnection) }) {
-                        is SafeSwapResult.Receipt -> {
-                            applyCaptureProjectionState(
-                                CaptureProjection.applySafeSwapReceipt(projected.state, safeSwapResult.value),
-                            )
-                            safeSwapMessage = null
-                        }
-                        SafeSwapResult.AuthenticationRequired -> safeSwapMessage = SafeSwapMessage.AuthRequired
-                        SafeSwapResult.Forbidden -> safeSwapMessage = SafeSwapMessage.Forbidden
-                        is SafeSwapResult.HttpFailure -> safeSwapMessage = SafeSwapMessage.HttpFailure(safeSwapResult.statusCode)
-                        is SafeSwapResult.InvalidResponse -> safeSwapMessage = SafeSwapMessage.InvalidResponse(safeSwapResult.message)
-                        is SafeSwapResult.NetworkFailure -> safeSwapMessage = SafeSwapMessage.NetworkFailure(safeSwapResult.message)
-                        SafeSwapResult.NotFound -> {
-                            applyCaptureProjectionState(CaptureProjection.clearSafeSwapReceipt(captureProjection))
-                            safeSwapMessage = SafeSwapMessage.WaitingForReceipt
-                        }
-                    }
-                } else {
-                    safeSwapMessage = null
                 }
                 if (result is CaptureCommandResult.Accepted || result is CaptureCommandResult.NoActiveSession) {
-                    refreshSessionLedger(activeConnection)
+                    refreshSessionLedger(activeConnection, generation)
                 }
             }
         }
@@ -363,6 +479,9 @@ fun EchoApp(
     val loadSessionManifest: (SessionSummary) -> Unit = { summary ->
         val activeConnection = bodyConnection
         if (activeConnection != null && !sessionManifestLoading) {
+            val generation = connectionGeneration
+            sessionDetailGeneration += 1L
+            val detailGeneration = sessionDetailGeneration
             sessionManifestLoading = true
             sessionManifest = null
             sessionManifestMessage = SessionManifestMessage.Loading
@@ -370,6 +489,11 @@ fun EchoApp(
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
                     deviceClient.getSessionManifest(activeConnection, summary.sessionId)
+                }
+                if (!isCurrentConnection(activeConnection, generation) ||
+                    detailGeneration != sessionDetailGeneration
+                ) {
+                    return@launch
                 }
                 sessionManifestLoading = false
                 when (result) {
@@ -392,6 +516,9 @@ fun EchoApp(
     val loadUnsuccessfulOutcome: (SessionSummary) -> Unit = { summary ->
         val activeConnection = bodyConnection
         if (activeConnection != null && unsuccessfulOutcomeLoadingId == null) {
+            val generation = connectionGeneration
+            sessionOutcomeGeneration += 1L
+            val outcomeGeneration = sessionOutcomeGeneration
             unsuccessfulOutcomeSessionId = summary.sessionId
             unsuccessfulOutcome = null
             unsuccessfulOutcomeMessage = UnsuccessfulOutcomeMessage.Loading
@@ -399,6 +526,11 @@ fun EchoApp(
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
                     deviceClient.getRetainedUnsuccessfulOutcome(activeConnection, summary.sessionId)
+                }
+                if (!isCurrentConnection(activeConnection, generation) ||
+                    outcomeGeneration != sessionOutcomeGeneration
+                ) {
+                    return@launch
                 }
                 unsuccessfulOutcomeLoadingId = null
                 when (result) {
@@ -437,6 +569,7 @@ fun EchoApp(
         val currentPage = sessionPage
         val cursor = currentPage?.nextCursor
         if (activeConnection != null && currentPage != null && cursor != null && !sessionLoadingMore) {
+            val generation = connectionGeneration
             sessionLoadingMore = true
             sessionMessage = null
             scope.launch {
@@ -447,6 +580,7 @@ fun EchoApp(
                         cursor = cursor,
                     )
                 }
+                if (!isCurrentConnection(activeConnection, generation)) return@launch
                 sessionLoadingMore = false
                 when (result) {
                     is SessionListResult.Page -> {
@@ -463,6 +597,7 @@ fun EchoApp(
         val activeConnection = bodyConnection
         val activeManifest = sessionManifest
         if (activeConnection != null && activeManifest != null && artifactDownloadingId == null) {
+            val generation = connectionGeneration
             val cancelFlag = AtomicBoolean(false)
             artifactDownloadingId = artifact.artifactId
             cancelArtifactDownload = { cancelFlag.set(true) }
@@ -477,6 +612,7 @@ fun EchoApp(
                         shouldCancel = { cancelFlag.get() },
                     )
                 }
+                if (!isCurrentConnection(activeConnection, generation)) return@launch
                 artifactDownloadingId = null
                 cancelArtifactDownload = null
                 artifactDownloadMessage = artifactDownloadMessageFor(artifact.role, result)
@@ -487,6 +623,7 @@ fun EchoApp(
     val setCameraFocus: (Long?, Boolean?) -> Unit = { value, autoEnabled ->
         val activeConnection = bodyConnection
         if (activeConnection != null && !cameraFocusCommandRunning) {
+            val generation = connectionGeneration
             cameraFocusCommandRunning = true
             cameraFocusMessage = CameraFocusMessage.Running
             val idempotencyKey = UUID.randomUUID().toString()
@@ -499,6 +636,7 @@ fun EchoApp(
                         autoEnabled = autoEnabled,
                     )
                 }
+                if (!isCurrentConnection(activeConnection, generation)) return@launch
                 cameraFocusCommandRunning = false
                 when (result) {
                     is CameraFocusResult.Status -> {
@@ -519,135 +657,178 @@ fun EchoApp(
         }
     }
 
-    LaunchedEffect(bodyConnection, foregroundResumeTick) {
-        val activeConnection = bodyConnection ?: return@LaunchedEffect
-        if (foregroundResumeTick == 0L) {
-            return@LaunchedEffect
-        }
-
-        when (val statusResult = withContext(Dispatchers.IO) { deviceClient.getCaptureStatus(activeConnection) }) {
-            is CaptureStatusResult.Snapshot -> {
-                val projected = CaptureProjection.applyHttpSnapshot(captureProjection, statusResult.value)
-                applyCaptureProjectionState(projected.state)
-                captureMessage = null
-            }
-            CaptureStatusResult.AuthenticationRequired -> captureMessage = CaptureStatusMessage.AuthRequired
-            CaptureStatusResult.Forbidden -> captureMessage = CaptureStatusMessage.Forbidden
-            is CaptureStatusResult.HttpFailure -> captureMessage = CaptureStatusMessage.HttpFailure(statusResult.statusCode)
-            is CaptureStatusResult.InvalidResponse -> captureMessage = CaptureStatusMessage.InvalidResponse(statusResult.message)
-            is CaptureStatusResult.NetworkFailure -> captureMessage = CaptureStatusMessage.NetworkFailure(statusResult.message)
-        }
-
-        refreshSessionLedger(activeConnection)
-
-        when (val safeSwapResult = withContext(Dispatchers.IO) { deviceClient.getSafeSwapReceipt(activeConnection) }) {
-            is SafeSwapResult.Receipt -> {
-                applyCaptureProjectionState(
-                    CaptureProjection.applySafeSwapReceipt(captureProjection, safeSwapResult.value),
-                )
-                safeSwapMessage = null
-            }
-            SafeSwapResult.AuthenticationRequired -> safeSwapMessage = SafeSwapMessage.AuthRequired
-            SafeSwapResult.Forbidden -> safeSwapMessage = SafeSwapMessage.Forbidden
-            is SafeSwapResult.HttpFailure -> safeSwapMessage = SafeSwapMessage.HttpFailure(safeSwapResult.statusCode)
-            is SafeSwapResult.InvalidResponse -> safeSwapMessage = SafeSwapMessage.InvalidResponse(safeSwapResult.message)
-            is SafeSwapResult.NetworkFailure -> safeSwapMessage = SafeSwapMessage.NetworkFailure(safeSwapResult.message)
-            SafeSwapResult.NotFound -> {
-                applyCaptureProjectionState(CaptureProjection.clearSafeSwapReceipt(captureProjection))
-                safeSwapMessage = SafeSwapMessage.NotFound
-            }
-        }
-
-        when (val focusResult = withContext(Dispatchers.IO) { deviceClient.getCameraFocus(activeConnection) }) {
-            is CameraFocusResult.Status -> {
-                cameraFocus = focusResult.value
-                if (cameraFocusMessage !in setOf(CameraFocusMessage.Running, CameraFocusMessage.Updated)) {
-                    cameraFocusMessage = null
-                }
-            }
-            CameraFocusResult.AuthenticationRequired -> cameraFocusMessage = CameraFocusMessage.AuthRequired
-            CameraFocusResult.Conflict -> cameraFocusMessage = CameraFocusMessage.Conflict
-            CameraFocusResult.Forbidden -> cameraFocusMessage = CameraFocusMessage.Forbidden
-            is CameraFocusResult.HttpFailure -> cameraFocusMessage = CameraFocusMessage.HttpFailure(focusResult.statusCode)
-            CameraFocusResult.InvalidFocus -> cameraFocusMessage = CameraFocusMessage.InvalidFocus
-            is CameraFocusResult.InvalidRequest -> cameraFocusMessage = CameraFocusMessage.InvalidRequest(focusResult.message)
-            is CameraFocusResult.InvalidResponse -> cameraFocusMessage = CameraFocusMessage.InvalidResponse(focusResult.message)
-            is CameraFocusResult.NetworkFailure -> cameraFocusMessage = CameraFocusMessage.NetworkFailure(focusResult.message)
-            CameraFocusResult.Unsupported -> cameraFocusMessage = CameraFocusMessage.Unsupported
-        }
-    }
-
-    LaunchedEffect(bodyConnection) {
+    LaunchedEffect(bodyConnection, connectionGeneration) {
         val activeConnection = bodyConnection
         captureProjection = CaptureProjectionState()
         captureStatus = null
         captureMessage = null
         captureCommandMessage = null
         captureCommandRunning = false
-        previewBitmap = null
+        previewFrameGate.beginGeneration()
+        previewFrame = null
         previewMessage = if (activeConnection == null) null else PreviewMessage.Waiting
-        if (activeConnection == null) {
-            return@LaunchedEffect
-        }
+        captureStreamHealth = EventStreamHealth.Starting
+        captureStatusRequestGeneration = null
+        sessionRequestGeneration = null
+        focusRequestGeneration = null
+        sessionPage = null
+        sessionMessage = null
+        sessionLoadingMore = false
+        dismissSessionDetail()
+        dismissSessionOutcome()
+        artifactDownloadMessage = null
+        artifactDownloadingId = null
+        cancelArtifactDownload = null
+        cameraFocus = null
+        cameraFocusMessage = null
+        cameraFocusCommandRunning = false
+    }
 
+    LaunchedEffect(bodyConnection, connectionGeneration, appInForeground) {
+        val activeConnection = bodyConnection ?: return@LaunchedEffect
+        val generation = connectionGeneration
+        if (!appInForeground) return@LaunchedEffect
+        reconcileCaptureStatus(activeConnection, generation, force = true)
+        var fallbackDelayMs = ConnectionRequestPolicy.FALLBACK_INITIAL_DELAY_MS
+        var fallbackDueAtMs = SystemClock.elapsedRealtime() + fallbackDelayMs
         while (isActive) {
-            val statusResult = withContext(Dispatchers.IO) {
-                deviceClient.getCaptureStatus(activeConnection)
-            }
-            when (statusResult) {
-                is CaptureStatusResult.Snapshot -> {
-                    val projected = CaptureProjection.applyHttpSnapshot(captureProjection, statusResult.value)
-                    applyCaptureProjectionState(projected.state)
-                    captureMessage = null
-                }
-                CaptureStatusResult.AuthenticationRequired -> captureMessage = CaptureStatusMessage.AuthRequired
-                CaptureStatusResult.Forbidden -> captureMessage = CaptureStatusMessage.Forbidden
-                is CaptureStatusResult.HttpFailure -> captureMessage = CaptureStatusMessage.HttpFailure(statusResult.statusCode)
-                is CaptureStatusResult.InvalidResponse -> captureMessage = CaptureStatusMessage.InvalidResponse(statusResult.message)
-                is CaptureStatusResult.NetworkFailure -> captureMessage = CaptureStatusMessage.NetworkFailure(statusResult.message)
-            }
-
-            if (activeConnection.descriptor.previewCapable) {
-                val previewResult = withContext(Dispatchers.IO) {
-                    deviceClient.getPreviewJpeg(activeConnection, fps = 2)
-                }
-                when (previewResult) {
-                    is PreviewResult.Frame -> {
-                        val decoded = withContext(Dispatchers.IO) {
-                            decodePreviewFrame(previewResult.bytes)
-                        }
-                        previewMessage = if (decoded == null) {
-                            previewBitmap = null
-                            PreviewMessage.DecodeFailed
-                        } else {
-                            previewBitmap = decoded
-                            PreviewMessage.Live
-                        }
-                    }
-                    PreviewResult.AuthenticationRequired -> previewMessage = PreviewMessage.AuthRequired
-                    PreviewResult.Forbidden -> previewMessage = PreviewMessage.Forbidden
-                    PreviewResult.CameraNotConnected -> {
-                        previewBitmap = null
-                        previewMessage = PreviewMessage.CameraNotConnected
-                    }
-                    is PreviewResult.HttpFailure -> previewMessage = PreviewMessage.HttpFailure(previewResult.statusCode)
-                    is PreviewResult.InvalidResponse -> previewMessage = PreviewMessage.InvalidResponse(previewResult.message)
-                    is PreviewResult.NetworkFailure -> previewMessage = PreviewMessage.NetworkFailure(previewResult.message)
-                    PreviewResult.NoFrame -> previewMessage = PreviewMessage.NoFrame
-                    PreviewResult.Unavailable -> previewMessage = PreviewMessage.Unavailable
+            delay(ConnectionRequestPolicy.COORDINATOR_TICK_MS)
+            if (!isCurrentConnection(activeConnection, generation) || !appInForeground) return@LaunchedEffect
+            val nowMs = SystemClock.elapsedRealtime()
+            if (captureStreamHealth == EventStreamHealth.Degraded) {
+                if (nowMs >= fallbackDueAtMs) {
+                    reconcileCaptureStatus(activeConnection, generation, force = true)
+                    fallbackDelayMs = ConnectionRequestPolicy.nextFallbackDelay(fallbackDelayMs)
+                    fallbackDueAtMs = nowMs + fallbackDelayMs
                 }
             } else {
-                previewBitmap = null
-                previewMessage = PreviewMessage.Unavailable
+                reconcileCaptureStatus(activeConnection, generation, force = false)
+                fallbackDelayMs = ConnectionRequestPolicy.FALLBACK_INITIAL_DELAY_MS
+                fallbackDueAtMs = nowMs + fallbackDelayMs
             }
-
-            delay(1_000L)
         }
     }
 
-    LaunchedEffect(bodyConnection) {
-        val activeConnection = bodyConnection ?: return@LaunchedEffect
+    LaunchedEffect(bodyConnection, connectionGeneration, appInForeground, selectedTab, showFocusPeaking) {
+        val activeConnection = bodyConnection
+        val processingGeneration = previewFrameGate.beginGeneration()
+        if (activeConnection == null || !appInForeground || selectedTab != EchoTab.VIEWFINDER) {
+            previewFrame = null
+            previewMessage = if (activeConnection == null) null else PreviewMessage.Waiting
+            return@LaunchedEffect
+        }
+        val generation = connectionGeneration
+        if (!activeConnection.descriptor.previewCapable) {
+            previewFrame = null
+            previewMessage = PreviewMessage.Unavailable
+            return@LaunchedEffect
+        }
+        previewMessage = PreviewMessage.Waiting
+        coroutineScope {
+            val pendingFrames = Channel<PreviewFrameWork>(Channel.CONFLATED)
+            val frameWorker = launch(previewFrameWorkerDispatcher) {
+                for (work in pendingFrames) {
+                    val decoded = decodeAndProcessPreviewFrame(
+                        bytes = work.bytes,
+                        includeFocusMask = work.includeFocusMask,
+                        peakColorArgb = EchoColors.Peak.toArgb(),
+                    )
+                    withContext(Dispatchers.Main.immediate) {
+                        if (!previewFrameGate.shouldPublish(work.ticket) ||
+                            !isCurrentConnection(activeConnection, generation) ||
+                            !appInForeground
+                        ) {
+                            return@withContext
+                        }
+                        previewMessage = if (decoded == null) {
+                            previewFrame = null
+                            PreviewMessage.DecodeFailed
+                        } else {
+                            previewFrame = decoded
+                            PreviewMessage.Live
+                        }
+                    }
+                }
+            }
+            try {
+                while (isActive) {
+                    val previewResult = withContext(Dispatchers.IO) {
+                        deviceClient.getPreviewJpeg(activeConnection, fps = 2)
+                    }
+                    if (!isCurrentConnection(activeConnection, generation) ||
+                        !appInForeground ||
+                        selectedTab != EchoTab.VIEWFINDER
+                    ) {
+                        return@coroutineScope
+                    }
+                    when (previewResult) {
+                        is PreviewResult.Frame -> {
+                            if (previewResult.bytes.size > PREVIEW_JPEG_BYTE_LIMIT) {
+                                previewFrameGate.invalidatePending(processingGeneration)
+                                previewFrame = null
+                                previewMessage = PreviewMessage.DecodeFailed
+                            } else {
+                                previewFrameGate.submit(processingGeneration)?.let { ticket ->
+                                    pendingFrames.trySend(
+                                        PreviewFrameWork(
+                                            bytes = previewResult.bytes,
+                                            ticket = ticket,
+                                            includeFocusMask = showFocusPeaking,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                        PreviewResult.AuthenticationRequired -> {
+                            previewFrameGate.invalidatePending(processingGeneration)
+                            previewMessage = PreviewMessage.AuthRequired
+                        }
+                        PreviewResult.Forbidden -> {
+                            previewFrameGate.invalidatePending(processingGeneration)
+                            previewMessage = PreviewMessage.Forbidden
+                        }
+                        PreviewResult.CameraNotConnected -> {
+                            previewFrameGate.invalidatePending(processingGeneration)
+                            previewFrame = null
+                            previewMessage = PreviewMessage.CameraNotConnected
+                        }
+                        is PreviewResult.HttpFailure -> {
+                            previewFrameGate.invalidatePending(processingGeneration)
+                            previewMessage = PreviewMessage.HttpFailure(previewResult.statusCode)
+                        }
+                        is PreviewResult.InvalidResponse -> {
+                            previewFrameGate.invalidatePending(processingGeneration)
+                            previewMessage = PreviewMessage.InvalidResponse(previewResult.message)
+                        }
+                        is PreviewResult.NetworkFailure -> {
+                            previewFrameGate.invalidatePending(processingGeneration)
+                            previewMessage = PreviewMessage.NetworkFailure(previewResult.message)
+                        }
+                        PreviewResult.NoFrame -> {
+                            previewFrameGate.invalidatePending(processingGeneration)
+                            previewMessage = PreviewMessage.NoFrame
+                        }
+                        PreviewResult.Unavailable -> {
+                            previewFrameGate.invalidatePending(processingGeneration)
+                            previewMessage = PreviewMessage.Unavailable
+                        }
+                    }
+                    delay(ConnectionRequestPolicy.PREVIEW_INTERVAL_MS)
+                }
+            } finally {
+                pendingFrames.close()
+                frameWorker.cancel()
+            }
+        }
+    }
 
+    LaunchedEffect(bodyConnection, connectionGeneration, appInForeground) {
+        val activeConnection = bodyConnection
+        if (activeConnection == null || !appInForeground) {
+            captureStreamHealth = EventStreamHealth.Starting
+            return@LaunchedEffect
+        }
+        val generation = connectionGeneration
         while (isActive) {
             val eventResult = withContext(Dispatchers.IO) {
                 deviceClient.readCaptureEvents(
@@ -658,11 +839,13 @@ fun EchoApp(
                     maxEvents = 8,
                 )
             }
-
+            if (!isCurrentConnection(activeConnection, generation) || !appInForeground) return@LaunchedEffect
             when (eventResult) {
                 is CaptureEventsResult.Batch -> {
+                    captureStreamHealth = EventStreamHealth.Healthy
                     var needsCaptureReconciliation = false
-                    var needsSafeSwapReconciliation = false
+                    var needsImmediateReconciliation = false
+                    var sessionsChanged = false
                     eventResult.events.forEach { event ->
                         val projected = CaptureProjection.applyStreamEvent(captureProjection, event)
                         applyCaptureProjectionState(projected.state)
@@ -670,150 +853,78 @@ fun EchoApp(
                             captureCommandRunning = false
                             captureCommandMessage = null
                         }
-                        if (projected.accepted) {
-                            captureMessage = null
-                            if (event.safeSwapReceipt != null) {
-                                safeSwapMessage = null
-                            }
-                        }
+                        if (projected.accepted) captureMessage = null
                         needsCaptureReconciliation = needsCaptureReconciliation ||
                             projected.requiresCaptureReconciliation
-                        needsSafeSwapReconciliation = needsSafeSwapReconciliation ||
-                            projected.requiresSafeSwapReconciliation
+                        needsImmediateReconciliation = needsImmediateReconciliation ||
+                            event.requiresHttpReconciliation ||
+                            projected.clearedEpochBoundState
+                        sessionsChanged = sessionsChanged || event.sessionId != null
                     }
-
                     if (needsCaptureReconciliation) {
-                        when (val statusResult = withContext(Dispatchers.IO) { deviceClient.getCaptureStatus(activeConnection) }) {
-                            is CaptureStatusResult.Snapshot -> {
-                                val projected = CaptureProjection.applyHttpSnapshot(captureProjection, statusResult.value)
-                                applyCaptureProjectionState(projected.state)
-                                captureMessage = null
-                            }
-                            CaptureStatusResult.AuthenticationRequired -> captureMessage = CaptureStatusMessage.AuthRequired
-                            CaptureStatusResult.Forbidden -> captureMessage = CaptureStatusMessage.Forbidden
-                            is CaptureStatusResult.HttpFailure -> captureMessage = CaptureStatusMessage.HttpFailure(statusResult.statusCode)
-                            is CaptureStatusResult.InvalidResponse -> captureMessage = CaptureStatusMessage.InvalidResponse(statusResult.message)
-                            is CaptureStatusResult.NetworkFailure -> captureMessage = CaptureStatusMessage.NetworkFailure(statusResult.message)
-                        }
+                        reconcileCaptureStatus(
+                            activeConnection,
+                            generation,
+                            force = needsImmediateReconciliation,
+                        )
                     }
-
-                    if (needsSafeSwapReconciliation) {
-                        when (val safeSwapResult = withContext(Dispatchers.IO) { deviceClient.getSafeSwapReceipt(activeConnection) }) {
-                            is SafeSwapResult.Receipt -> {
-                                applyCaptureProjectionState(
-                                    CaptureProjection.applySafeSwapReceipt(captureProjection, safeSwapResult.value),
-                                )
-                                safeSwapMessage = null
-                            }
-                            SafeSwapResult.AuthenticationRequired -> safeSwapMessage = SafeSwapMessage.AuthRequired
-                            SafeSwapResult.Forbidden -> safeSwapMessage = SafeSwapMessage.Forbidden
-                            is SafeSwapResult.HttpFailure -> safeSwapMessage = SafeSwapMessage.HttpFailure(safeSwapResult.statusCode)
-                            is SafeSwapResult.InvalidResponse -> safeSwapMessage = SafeSwapMessage.InvalidResponse(safeSwapResult.message)
-                            is SafeSwapResult.NetworkFailure -> safeSwapMessage = SafeSwapMessage.NetworkFailure(safeSwapResult.message)
-                            SafeSwapResult.NotFound -> {
-                                applyCaptureProjectionState(CaptureProjection.clearSafeSwapReceipt(captureProjection))
-                                safeSwapMessage = SafeSwapMessage.NotFound
-                            }
-                        }
+                    if (sessionsChanged && selectedTab == EchoTab.SESSIONS) {
+                        refreshSessionLedger(activeConnection, generation)
                     }
-
                     delay(if (eventResult.events.isEmpty()) 1_000L else 250L)
                 }
                 CaptureEventsResult.AuthenticationRequired -> {
+                    captureStreamHealth = EventStreamHealth.Degraded
                     captureMessage = CaptureStatusMessage.AuthRequired
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
                 CaptureEventsResult.Forbidden -> {
+                    captureStreamHealth = EventStreamHealth.Degraded
                     captureMessage = CaptureStatusMessage.Forbidden
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
                 is CaptureEventsResult.HttpFailure -> {
+                    captureStreamHealth = EventStreamHealth.Degraded
                     captureMessage = CaptureStatusMessage.HttpFailure(eventResult.statusCode)
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
                 is CaptureEventsResult.InvalidRequest -> {
+                    captureStreamHealth = EventStreamHealth.Degraded
                     captureMessage = CaptureStatusMessage.InvalidResponse(eventResult.message)
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
                 is CaptureEventsResult.InvalidResponse -> {
+                    captureStreamHealth = EventStreamHealth.Degraded
                     captureMessage = CaptureStatusMessage.InvalidResponse(eventResult.message)
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
                 is CaptureEventsResult.NetworkFailure -> {
+                    captureStreamHealth = EventStreamHealth.Degraded
                     captureMessage = CaptureStatusMessage.NetworkFailure(eventResult.message)
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
             }
         }
     }
 
-    LaunchedEffect(bodyConnection) {
-        val activeConnection = bodyConnection
-        sessionPage = null
-        sessionMessage = null
-        sessionLoadingMore = false
-        sessionManifest = null
-        sessionManifestMessage = null
-        sessionManifestLoading = false
-        unsuccessfulOutcome = null
-        unsuccessfulOutcomeSessionId = null
-        unsuccessfulOutcomeMessage = null
-        unsuccessfulOutcomeLoadingId = null
-        artifactDownloadMessage = null
-        artifactDownloadingId = null
-        cancelArtifactDownload = null
-        safeSwapReceipt = null
-        safeSwapMessage = null
-        cameraFocus = null
-        cameraFocusMessage = null
-        cameraFocusCommandRunning = false
-        if (activeConnection == null) {
-            return@LaunchedEffect
-        }
+    LaunchedEffect(bodyConnection, connectionGeneration, appInForeground) {
+        val activeConnection = bodyConnection ?: return@LaunchedEffect
+        if (!appInForeground) return@LaunchedEffect
+        val generation = connectionGeneration
+        refreshSessionLedger(activeConnection, generation)
+        refreshCameraFocus(activeConnection, generation)
+    }
 
-        while (isActive) {
-            refreshSessionLedger(activeConnection)
-            val safeSwapResult = withContext(Dispatchers.IO) {
-                deviceClient.getSafeSwapReceipt(activeConnection)
-            }
-            when (safeSwapResult) {
-                is SafeSwapResult.Receipt -> {
-                    applyCaptureProjectionState(
-                        CaptureProjection.applySafeSwapReceipt(captureProjection, safeSwapResult.value),
-                    )
-                    safeSwapMessage = null
-                }
-                SafeSwapResult.AuthenticationRequired -> safeSwapMessage = SafeSwapMessage.AuthRequired
-                SafeSwapResult.Forbidden -> safeSwapMessage = SafeSwapMessage.Forbidden
-                is SafeSwapResult.HttpFailure -> safeSwapMessage = SafeSwapMessage.HttpFailure(safeSwapResult.statusCode)
-                is SafeSwapResult.InvalidResponse -> safeSwapMessage = SafeSwapMessage.InvalidResponse(safeSwapResult.message)
-                is SafeSwapResult.NetworkFailure -> safeSwapMessage = SafeSwapMessage.NetworkFailure(safeSwapResult.message)
-                SafeSwapResult.NotFound -> {
-                    applyCaptureProjectionState(CaptureProjection.clearSafeSwapReceipt(captureProjection))
-                    safeSwapMessage = SafeSwapMessage.NotFound
-                }
-            }
-            val focusResult = withContext(Dispatchers.IO) {
-                deviceClient.getCameraFocus(activeConnection)
-            }
-            when (focusResult) {
-                is CameraFocusResult.Status -> {
-                    cameraFocus = focusResult.value
-                    if (cameraFocusMessage !in setOf(CameraFocusMessage.Running, CameraFocusMessage.Updated)) {
-                        cameraFocusMessage = null
-                    }
-                }
-                CameraFocusResult.AuthenticationRequired -> cameraFocusMessage = CameraFocusMessage.AuthRequired
-                CameraFocusResult.Conflict -> cameraFocusMessage = CameraFocusMessage.Conflict
-                CameraFocusResult.Forbidden -> cameraFocusMessage = CameraFocusMessage.Forbidden
-                is CameraFocusResult.HttpFailure -> cameraFocusMessage = CameraFocusMessage.HttpFailure(focusResult.statusCode)
-                CameraFocusResult.InvalidFocus -> cameraFocusMessage = CameraFocusMessage.InvalidFocus
-                is CameraFocusResult.InvalidRequest -> cameraFocusMessage = CameraFocusMessage.InvalidRequest(focusResult.message)
-                is CameraFocusResult.InvalidResponse -> cameraFocusMessage = CameraFocusMessage.InvalidResponse(focusResult.message)
-                is CameraFocusResult.NetworkFailure -> cameraFocusMessage = CameraFocusMessage.NetworkFailure(focusResult.message)
-                CameraFocusResult.Unsupported -> cameraFocusMessage = CameraFocusMessage.Unsupported
-            }
-            delay(5_000L)
+    LaunchedEffect(bodyConnection, connectionGeneration, appInForeground, selectedTab) {
+        val activeConnection = bodyConnection ?: return@LaunchedEffect
+        if (!appInForeground) return@LaunchedEffect
+        val generation = connectionGeneration
+        when (selectedTab) {
+            EchoTab.SESSIONS -> refreshSessionLedger(activeConnection, generation)
+            EchoTab.BODY -> refreshCameraFocus(activeConnection, generation)
+            EchoTab.VIEWFINDER,
+            EchoTab.NETWORK,
+            -> Unit
         }
     }
 
@@ -847,17 +958,25 @@ fun EchoApp(
                         captureMessage = captureMessage,
                         captureCommandMessage = captureCommandMessage,
                         captureCommandRunning = captureCommandRunning,
-                        previewBitmap = previewBitmap,
+                        previewFrame = previewFrame,
                         previewMessage = previewMessage,
                         previewMode = PreviewMode.valueOf(previewModeName),
                         showGrid = showPreviewGrid,
+                        showFocusPeaking = showFocusPeaking,
                         showImuOverlay = showPreviewImuOverlay,
                         onStartCapture = startCapture,
                         onStopCapture = stopCapture,
                         onPreviewModeChange = { previewModeName = it.name },
                         onShowGridChange = { showPreviewGrid = it },
+                        onShowFocusPeakingChange = { enabled ->
+                            previewFrameGate.beginGeneration()
+                            showFocusPeaking = enabled
+                            if (!enabled) {
+                                previewFrame = previewFrame?.copy(focusMask = null)
+                            }
+                        },
                         onShowImuOverlayChange = { showPreviewImuOverlay = it },
-                        onConnected = { bodyConnection = it },
+                        onConnected = ::replaceBodyConnection,
                     )
                     EchoTab.SESSIONS -> SessionsScreen(
                         bodyConnection = bodyConnection,
@@ -884,18 +1003,15 @@ fun EchoApp(
                         captureStatus = captureStatus,
                         captureMessage = captureMessage,
                         captureCommandMessage = captureCommandMessage,
-                        safeSwapReceipt = safeSwapReceipt,
-                        safeSwapMessage = safeSwapMessage,
                         cameraFocus = cameraFocus,
                         cameraFocusMessage = cameraFocusMessage,
                         captureCommandRunning = captureCommandRunning,
                         cameraFocusCommandRunning = cameraFocusCommandRunning,
                         onStartCalibrationCapture = startCalibrationCapture,
-                        onRequestSafeSwap = requestSafeSwap,
                         onSetCameraFocus = setCameraFocus,
                         localeTag = localeTag,
                         updateState = updateState,
-                        onDisconnect = { bodyConnection = null },
+                        onDisconnect = { replaceBodyConnection(null) },
                         onLocaleChange = onLocaleChange,
                         onCheckUpdate = onCheckUpdate,
                         onInstallUpdate = onInstallUpdate,
@@ -903,19 +1019,39 @@ fun EchoApp(
                     EchoTab.NETWORK -> NetworkScreen(
                         bodyConnection = bodyConnection,
                         captureStatus = captureStatus,
-                        foregroundResumeTick = foregroundResumeTick,
+                        connectionGeneration = connectionGeneration,
+                        isForeground = appInForeground,
                     )
                 }
             }
         }
         BottomNavigation(
             selectedTab = selectedTab,
-            onSelect = { selectedTabName = it.name },
+            onSelect = { nextTab ->
+                if (nextTab != EchoTab.VIEWFINDER) {
+                    previewFrameGate.beginGeneration()
+                    previewFrame = null
+                }
+                if (nextTab != EchoTab.SESSIONS) {
+                    dismissSessionDetail()
+                    dismissSessionOutcome()
+                }
+                selectedTabName = nextTab.name
+            },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
                 .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
         )
+        if (showRecordingBackgroundConfirmation) {
+            RecordingBackgroundConfirmation(
+                onDismiss = { showRecordingBackgroundConfirmation = false },
+                onMoveToBackground = {
+                    showRecordingBackgroundConfirmation = false
+                    context.findActivity()?.moveTaskToBack(true)
+                },
+            )
+        }
     }
 }
 
@@ -968,15 +1104,17 @@ private fun ViewfinderScreen(
     captureMessage: CaptureStatusMessage?,
     captureCommandMessage: CaptureCommandMessage?,
     captureCommandRunning: Boolean,
-    previewBitmap: ImageBitmap?,
+    previewFrame: PreviewVisualFrame?,
     previewMessage: PreviewMessage?,
     previewMode: PreviewMode,
     showGrid: Boolean,
+    showFocusPeaking: Boolean,
     showImuOverlay: Boolean,
     onStartCapture: () -> Unit,
     onStopCapture: () -> Unit,
     onPreviewModeChange: (PreviewMode) -> Unit,
     onShowGridChange: (Boolean) -> Unit,
+    onShowFocusPeakingChange: (Boolean) -> Unit,
     onShowImuOverlayChange: (Boolean) -> Unit,
     onConnected: (DeviceConnection) -> Unit,
 ) {
@@ -990,15 +1128,17 @@ private fun ViewfinderScreen(
             bodyConnection = bodyConnection,
             captureStatus = captureStatus,
             captureCommandRunning = captureCommandRunning,
-            previewBitmap = previewBitmap,
+            previewFrame = previewFrame,
             previewMessage = previewMessage,
             previewMode = previewMode,
             showGrid = showGrid,
+            showFocusPeaking = showFocusPeaking,
             showImuOverlay = showImuOverlay,
             onStartCapture = onStartCapture,
             onStopCapture = onStopCapture,
             onPreviewModeChange = onPreviewModeChange,
             onShowGridChange = onShowGridChange,
+            onShowFocusPeakingChange = onShowFocusPeakingChange,
             onShowImuOverlayChange = onShowImuOverlayChange,
         )
         CaptureStatusPanel(
@@ -1019,15 +1159,17 @@ private fun PreviewFrame(
     bodyConnection: DeviceConnection?,
     captureStatus: CaptureStatusSnapshot?,
     captureCommandRunning: Boolean,
-    previewBitmap: ImageBitmap?,
+    previewFrame: PreviewVisualFrame?,
     previewMessage: PreviewMessage?,
     previewMode: PreviewMode,
     showGrid: Boolean,
+    showFocusPeaking: Boolean,
     showImuOverlay: Boolean,
     onStartCapture: () -> Unit,
     onStopCapture: () -> Unit,
     onPreviewModeChange: (PreviewMode) -> Unit,
     onShowGridChange: (Boolean) -> Unit,
+    onShowFocusPeakingChange: (Boolean) -> Unit,
     onShowImuOverlayChange: (Boolean) -> Unit,
 ) {
     val canStart = bodyConnection != null &&
@@ -1039,7 +1181,7 @@ private fun PreviewFrame(
     val canStop = bodyConnection != null &&
         !captureCommandRunning &&
         captureStatus?.deviceState == "recording"
-    val showPreviewStatusOverlay = previewBitmap == null || previewMessage != PreviewMessage.Live
+    val showPreviewStatusOverlay = previewFrame == null || previewMessage != PreviewMessage.Live
     val liveImuQuality = captureStatus?.runtime?.liveImuQuality ?: bodyConnection?.descriptor?.runtime?.liveImuQuality
     val canShowImuOverlay = liveImuQuality != null
 
@@ -1056,8 +1198,11 @@ private fun PreviewFrame(
         background = Color.Black.copy(alpha = 0.64f),
     ) {
         Box(Modifier.fillMaxSize()) {
-            if (previewBitmap != null) {
-                PreviewImage(previewBitmap, previewMode)
+            if (previewFrame != null) {
+                PreviewImage(previewFrame.image, previewMode)
+                if (showFocusPeaking && previewFrame.focusMask != null) {
+                    FocusPeakOverlay(previewFrame.focusMask, previewMode)
+                }
             }
             if (showGrid) {
                 PreviewGrid()
@@ -1076,7 +1221,7 @@ private fun PreviewFrame(
                         .align(Alignment.Center)
                         .semantics { liveRegion = LiveRegionMode.Polite }
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color.Black.copy(alpha = if (previewBitmap == null) 0f else 0.58f))
+                        .background(Color.Black.copy(alpha = if (previewFrame == null) 0f else 0.58f))
                         .padding(horizontal = 24.dp, vertical = 14.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1112,7 +1257,8 @@ private fun PreviewFrame(
             Row(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(10.dp),
+                    .padding(10.dp)
+                    .selectableGroup(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 TinyToggle(
@@ -1142,7 +1288,11 @@ private fun PreviewFrame(
                     selected = showGrid,
                     onClick = { onShowGridChange(!showGrid) },
                 )
-                ToolStatus(stringResource(R.string.focus_peaking), false)
+                FrameToolToggle(
+                    label = stringResource(R.string.focus_peaking),
+                    selected = showFocusPeaking,
+                    onClick = { onShowFocusPeakingChange(!showFocusPeaking) },
+                )
                 if (canShowImuOverlay) {
                     FrameToolToggle(
                         label = stringResource(R.string.imu_overlay),
@@ -1262,6 +1412,7 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var bodyOrigin by rememberSaveable { mutableStateOf("") }
+    var bodyOrigins by remember { mutableStateOf(emptyList<String>()) }
     var bearerToken by remember { mutableStateOf("") }
     var endpointMessage by remember { mutableStateOf<EndpointMessage?>(null) }
     var probeMessage by remember { mutableStateOf<ProbeMessage?>(null) }
@@ -1277,8 +1428,24 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
     var historyEntries by remember { mutableStateOf(historyStore.load()) }
     val hasStoredToken = tokenStore.hasTokenFor(bodyOrigin)
 
-    BackHandler(enabled = confirmTokenClear) {
-        confirmTokenClear = false
+    BackNavigationHandler(
+        state = BackNavigationState(
+            confirmationVisible = confirmTokenClear,
+            temporaryPanelVisible = discoveryState is DiscoveryState.Scanning,
+            selectedTabIsViewfinder = true,
+            recording = false,
+            connected = false,
+        ),
+    ) { action ->
+        when (action) {
+            BackNavigationAction.DISMISS_CONFIRMATION -> confirmTokenClear = false
+            BackNavigationAction.CLOSE_TEMPORARY_PANEL -> {
+                val bodies = discoveryState.bodies()
+                discoveryClient.stop()
+                discoveryState = DiscoveryState.Idle(bodies)
+            }
+            else -> Unit
+        }
     }
 
     DisposableEffect(discoveryClient) {
@@ -1306,6 +1473,7 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
                 },
                 onSelect = { body ->
                     bodyOrigin = body.origin
+                    bodyOrigins = body.origins
                     endpointMessage = endpointMessageFor(EndpointPolicy.validate(body.origin))
                     probeMessage = null
                     tokenMessage = null
@@ -1318,6 +1486,7 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
                 entries = historyEntries,
                 onSelect = { entry ->
                     bodyOrigin = entry.origin
+                    bodyOrigins = listOf(entry.origin)
                     endpointMessage = endpointMessageFor(EndpointPolicy.validate(entry.origin))
                     probeMessage = null
                     tokenMessage = null
@@ -1339,6 +1508,7 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
                 value = bodyOrigin,
                 onValueChange = {
                     bodyOrigin = it
+                    bodyOrigins = listOf(it)
                     tokenMessage = null
                     confirmTokenClear = false
                 },
@@ -1367,13 +1537,19 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
                             val cancelFlag = AtomicBoolean(false)
                             cancelProbe = { cancelFlag.set(true) }
                             val origin = bodyOrigin
+                            val origins = bodyOrigins
+                                .takeIf { it.firstOrNull() == bodyOrigin }
+                                ?: listOf(bodyOrigin)
                             val typedToken = bearerToken.trim()
-                            val savedToken = if (typedToken.isBlank()) tokenStore.load(origin).orEmpty() else ""
-                            val token = typedToken.ifBlank { savedToken }
-                            val shouldBindSavedTokenToBody = typedToken.isBlank() && savedToken.isNotBlank()
                             scope.launch {
                                 val result = withContext(Dispatchers.IO) {
-                                    probeClient.probe(origin, token.ifBlank { null })
+                                    probeClient.probe(origins) { candidateOrigin ->
+                                        when {
+                                            typedToken.isNotBlank() && candidateOrigin == origin -> typedToken
+                                            typedToken.isBlank() -> tokenStore.load(candidateOrigin)
+                                            else -> null
+                                        }
+                                    }
                                 }
                                 if (cancelFlag.get()) {
                                     return@launch
@@ -1385,7 +1561,14 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
                                     historyStore.record(
                                         origin = result.connection.origin,
                                         deviceLabel = result.connection.descriptor.deviceLabel,
+                                        deviceId = result.connection.descriptor.deviceId,
                                     )
+                                    val savedToken = if (typedToken.isBlank()) {
+                                        tokenStore.load(result.connection.origin).orEmpty()
+                                    } else {
+                                        ""
+                                    }
+                                    val shouldBindSavedTokenToBody = savedToken.isNotBlank()
                                     if (shouldBindSavedTokenToBody) {
                                         tokenMessage = when (
                                             tokenStore.saveForVerifiedBody(
@@ -1535,7 +1718,11 @@ private fun NearbyBodiesBlock(
             Panel(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(role = Role.Button) { onSelect(body) },
+                    .defaultMinSize(minHeight = 48.dp)
+                    .clickable(
+                        enabled = body.isOnline,
+                        role = Role.Button,
+                    ) { onSelect(body) },
                 background = EchoColors.Glass,
                 border = EchoColors.Hair,
             ) {
@@ -1560,6 +1747,13 @@ private fun NearbyBodiesBlock(
                         color = EchoColors.InkMuted,
                         style = TextStyle(fontSize = 12.sp, lineHeight = 17.sp),
                     )
+                    if (!body.isOnline) {
+                        EchoText(
+                            value = stringResource(R.string.discovery_body_offline),
+                            color = EchoColors.Caution,
+                            style = TextStyle(fontSize = 12.sp, lineHeight = 17.sp),
+                        )
+                    }
                 }
             }
         }
@@ -1769,34 +1963,86 @@ private fun SessionsScreen(
 private fun NetworkScreen(
     bodyConnection: DeviceConnection?,
     captureStatus: CaptureStatusSnapshot?,
-    foregroundResumeTick: Long,
+    connectionGeneration: Long,
+    isForeground: Boolean,
 ) {
     val scope = rememberCoroutineScope()
     val deviceClient = remember { DeviceHttpClient() }
-    var networkStatus by remember(bodyConnection?.origin) { mutableStateOf<NetworkStatus?>(null) }
-    var networkMessage by remember(bodyConnection?.origin) { mutableStateOf<NetworkMessage?>(null) }
-    var lastNetworkEventId by remember(bodyConnection?.origin) { mutableStateOf<String?>(null) }
-    var scanSnapshot by remember(bodyConnection?.origin) { mutableStateOf<NetworkScanSnapshot?>(null) }
-    var selectedNetwork by remember(bodyConnection?.origin) { mutableStateOf<NetworkScanEntry?>(null) }
-    var selectedNetworkMode by rememberSaveable(bodyConnection?.origin) { mutableStateOf("wifi-client") }
-    var manualSsid by rememberSaveable(bodyConnection?.origin) { mutableStateOf("") }
-    var selectedSecurity by rememberSaveable(bodyConnection?.origin) { mutableStateOf("wpa2-personal") }
-    var passphrase by remember(bodyConnection?.origin) { mutableStateOf("") }
-    var staticAddress by rememberSaveable(bodyConnection?.origin) { mutableStateOf("") }
-    var staticPrefixLength by rememberSaveable(bodyConnection?.origin) { mutableStateOf("24") }
-    var staticGateway by rememberSaveable(bodyConnection?.origin) { mutableStateOf("") }
-    var staticDns by rememberSaveable(bodyConnection?.origin) { mutableStateOf("") }
-    var networkCommandRunning by remember(bodyConnection?.origin) { mutableStateOf(false) }
-    var confirmForget by rememberSaveable(bodyConnection?.origin) { mutableStateOf(false) }
+    var networkStatus by remember(connectionGeneration) { mutableStateOf<NetworkStatus?>(null) }
+    var networkMessage by remember(connectionGeneration) { mutableStateOf<NetworkMessage?>(null) }
+    var lastNetworkEventId by remember(connectionGeneration) { mutableStateOf<String?>(null) }
+    var networkStreamHealth by remember(connectionGeneration) { mutableStateOf(EventStreamHealth.Starting) }
+    var networkStatusRequestRunning by remember(connectionGeneration) { mutableStateOf(false) }
+    val networkReconciliationGate = remember(connectionGeneration) {
+        ReconciliationGate(ConnectionRequestPolicy.HEALTHY_RECONCILIATION_INTERVAL_MS)
+    }
+    var scanSnapshot by remember(connectionGeneration) { mutableStateOf<NetworkScanSnapshot?>(null) }
+    var selectedNetwork by remember(connectionGeneration) { mutableStateOf<NetworkScanEntry?>(null) }
+    var selectedNetworkMode by rememberSaveable(bodyConnection?.origin, connectionGeneration) { mutableStateOf("wifi-client") }
+    var manualSsid by rememberSaveable(bodyConnection?.origin, connectionGeneration) { mutableStateOf("") }
+    var selectedSecurity by rememberSaveable(bodyConnection?.origin, connectionGeneration) { mutableStateOf("wpa2-personal") }
+    var passphrase by remember(connectionGeneration) { mutableStateOf("") }
+    var staticAddress by rememberSaveable(bodyConnection?.origin, connectionGeneration) { mutableStateOf("") }
+    var staticPrefixLength by rememberSaveable(bodyConnection?.origin, connectionGeneration) { mutableStateOf("24") }
+    var staticGateway by rememberSaveable(bodyConnection?.origin, connectionGeneration) { mutableStateOf("") }
+    var staticDns by rememberSaveable(bodyConnection?.origin, connectionGeneration) { mutableStateOf("") }
+    var networkCommandRunning by remember(connectionGeneration) { mutableStateOf(false) }
+    var confirmForget by rememberSaveable(bodyConnection?.origin, connectionGeneration) { mutableStateOf(false) }
 
-    suspend fun reconcileNetworkStatus(activeConnection: DeviceConnection) {
-        when (val result = withContext(Dispatchers.IO) { deviceClient.getNetworkStatus(activeConnection) }) {
+    BackNavigationHandler(
+        state = BackNavigationState(
+            confirmationVisible = confirmForget,
+            temporaryPanelVisible = scanSnapshot != null,
+            selectedTabIsViewfinder = true,
+            recording = false,
+            connected = false,
+        ),
+    ) { action ->
+        when (action) {
+            BackNavigationAction.DISMISS_CONFIRMATION -> confirmForget = false
+            BackNavigationAction.CLOSE_TEMPORARY_PANEL -> {
+                scanSnapshot = null
+                selectedNetwork = null
+            }
+            else -> Unit
+        }
+    }
+
+    fun isCurrentConnection(activeConnection: DeviceConnection, generation: Long): Boolean {
+        return generation == connectionGeneration && bodyConnection?.origin == activeConnection.origin
+    }
+
+    suspend fun reconcileNetworkStatus(
+        activeConnection: DeviceConnection,
+        generation: Long = connectionGeneration,
+        force: Boolean = false,
+    ): Boolean {
+        if (!isCurrentConnection(activeConnection, generation) || networkStatusRequestRunning) return false
+        if (!networkReconciliationGate.tryAcquire(SystemClock.elapsedRealtime(), force)) return false
+        val baseline = networkStatus.authorityRevision()
+        networkStatusRequestRunning = true
+        val result = try {
+            withContext(Dispatchers.IO) { deviceClient.getNetworkStatus(activeConnection) }
+        } finally {
+            networkStatusRequestRunning = false
+        }
+        if (!isCurrentConnection(activeConnection, generation) ||
+            !ConnectionRequestPolicy.canApplyResponse(
+                requestGeneration = generation,
+                currentGeneration = connectionGeneration,
+                requestBaseline = baseline,
+                currentRevision = networkStatus.authorityRevision(),
+            )
+        ) {
+            return false
+        }
+        when (result) {
             NetworkStatusResult.AuthenticationRequired -> networkMessage = NetworkMessage.AuthRequired
             NetworkStatusResult.Forbidden -> networkMessage = NetworkMessage.Forbidden
             is NetworkStatusResult.HttpFailure -> networkMessage = NetworkMessage.HttpFailure(result.statusCode)
             is NetworkStatusResult.InvalidResponse -> networkMessage = NetworkMessage.InvalidResponse(result.message)
             is NetworkStatusResult.NetworkFailure -> {
-                networkMessage = pendingNetworkMutationMessage(networkStatus, result.message)
+                networkMessage = NetworkMessage.NetworkFailure(result.message)
             }
             is NetworkStatusResult.Status -> {
                 networkStatus = result.value
@@ -1804,10 +2050,10 @@ private fun NetworkScreen(
             }
             NetworkStatusResult.Unavailable -> networkMessage = NetworkMessage.StatusUnavailable
         }
+        return result is NetworkStatusResult.Status
     }
 
-    LaunchedEffect(bodyConnection) {
-        val activeConnection = bodyConnection
+    LaunchedEffect(bodyConnection, connectionGeneration) {
         networkStatus = null
         networkMessage = null
         lastNetworkEventId = null
@@ -1821,28 +2067,43 @@ private fun NetworkScreen(
         staticDns = ""
         confirmForget = false
         networkCommandRunning = false
-        if (activeConnection == null) {
-            return@LaunchedEffect
-        }
+        networkStreamHealth = EventStreamHealth.Starting
+        networkStatusRequestRunning = false
+    }
 
+    LaunchedEffect(bodyConnection, connectionGeneration, isForeground) {
+        val activeConnection = bodyConnection ?: return@LaunchedEffect
+        val generation = connectionGeneration
+        if (!isForeground) return@LaunchedEffect
         networkMessage = NetworkMessage.StatusLoading
+        reconcileNetworkStatus(activeConnection, generation, force = true)
+        var fallbackDelayMs = ConnectionRequestPolicy.FALLBACK_INITIAL_DELAY_MS
+        var fallbackDueAtMs = SystemClock.elapsedRealtime() + fallbackDelayMs
         while (isActive) {
-            reconcileNetworkStatus(activeConnection)
-            delay(5_000L)
+            delay(ConnectionRequestPolicy.COORDINATOR_TICK_MS)
+            if (!isCurrentConnection(activeConnection, generation) || !isForeground) return@LaunchedEffect
+            val nowMs = SystemClock.elapsedRealtime()
+            if (networkStreamHealth == EventStreamHealth.Degraded) {
+                if (nowMs >= fallbackDueAtMs) {
+                    reconcileNetworkStatus(activeConnection, generation, force = true)
+                    fallbackDelayMs = ConnectionRequestPolicy.nextFallbackDelay(fallbackDelayMs)
+                    fallbackDueAtMs = nowMs + fallbackDelayMs
+                }
+            } else {
+                reconcileNetworkStatus(activeConnection, generation, force = false)
+                fallbackDelayMs = ConnectionRequestPolicy.FALLBACK_INITIAL_DELAY_MS
+                fallbackDueAtMs = nowMs + fallbackDelayMs
+            }
         }
     }
 
-    LaunchedEffect(bodyConnection, foregroundResumeTick) {
-        val activeConnection = bodyConnection ?: return@LaunchedEffect
-        if (foregroundResumeTick == 0L) {
+    LaunchedEffect(bodyConnection, connectionGeneration, isForeground) {
+        val activeConnection = bodyConnection
+        if (activeConnection == null || !isForeground) {
+            networkStreamHealth = EventStreamHealth.Starting
             return@LaunchedEffect
         }
-        networkMessage = NetworkMessage.StatusLoading
-        reconcileNetworkStatus(activeConnection)
-    }
-
-    LaunchedEffect(bodyConnection) {
-        val activeConnection = bodyConnection ?: return@LaunchedEffect
+        val generation = connectionGeneration
         while (isActive) {
             val currentStatus = networkStatus
             val eventResult = withContext(Dispatchers.IO) {
@@ -1854,9 +2115,12 @@ private fun NetworkScreen(
                     maxEvents = 8,
                 )
             }
+            if (!isCurrentConnection(activeConnection, generation) || !isForeground) return@LaunchedEffect
             when (eventResult) {
                 is NetworkEventsResult.Batch -> {
+                    networkStreamHealth = EventStreamHealth.Healthy
                     var needsReconciliation = false
+                    var needsImmediateReconciliation = false
                     eventResult.events.forEach { event ->
                         lastNetworkEventId = event.sseDeliveryId
                         val previousStatus = networkStatus
@@ -1864,37 +2128,53 @@ private fun NetworkScreen(
                         needsReconciliation = needsReconciliation ||
                             event.requiresHttpReconciliation ||
                             (previousStatus == null && event.transaction != null)
+                        needsImmediateReconciliation = needsImmediateReconciliation ||
+                            event.revisionRelation in setOf(
+                                NetworkRevisionRelation.Gap,
+                                NetworkRevisionRelation.NewEpoch,
+                            ) ||
+                            (previousStatus == null && event.transaction != null)
                     }
                     if (needsReconciliation) {
-                        reconcileNetworkStatus(activeConnection)
+                        reconcileNetworkStatus(
+                            activeConnection,
+                            generation,
+                            force = needsImmediateReconciliation,
+                        )
                     } else if (eventResult.events.isNotEmpty()) {
                         networkMessage = null
                     }
                     delay(if (eventResult.events.isEmpty()) 1_000L else 250L)
                 }
                 NetworkEventsResult.AuthenticationRequired -> {
+                    networkStreamHealth = EventStreamHealth.Degraded
                     networkMessage = NetworkMessage.AuthRequired
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
                 NetworkEventsResult.Forbidden -> {
+                    networkStreamHealth = EventStreamHealth.Degraded
                     networkMessage = NetworkMessage.Forbidden
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
                 is NetworkEventsResult.HttpFailure -> {
+                    networkStreamHealth = EventStreamHealth.Degraded
                     networkMessage = NetworkMessage.HttpFailure(eventResult.statusCode)
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
                 is NetworkEventsResult.InvalidRequest -> {
+                    networkStreamHealth = EventStreamHealth.Degraded
                     networkMessage = NetworkMessage.InvalidResponse(eventResult.message)
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
                 is NetworkEventsResult.InvalidResponse -> {
+                    networkStreamHealth = EventStreamHealth.Degraded
                     networkMessage = NetworkMessage.InvalidResponse(eventResult.message)
-                    delay(2_000L)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
                 is NetworkEventsResult.NetworkFailure -> {
-                    networkMessage = pendingNetworkMutationMessage(networkStatus, eventResult.message)
-                    delay(2_000L)
+                    networkStreamHealth = EventStreamHealth.Degraded
+                    networkMessage = NetworkMessage.NetworkFailure(eventResult.message)
+                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
                 }
             }
         }
@@ -1964,7 +2244,7 @@ private fun NetworkScreen(
             networkStatus = applyNetworkTransaction(networkStatus, accepted.value.transaction)
             networkMessage = NetworkMessage.MutationAccepted(accepted.value.transaction.transactionId)
             afterAccepted()
-            reconcileNetworkStatus(activeConnection)
+            reconcileNetworkStatus(activeConnection, force = true)
             if (networkMessage == null) {
                 networkMessage = NetworkMessage.MutationAccepted(accepted.value.transaction.transactionId)
             }
@@ -2648,7 +2928,10 @@ private fun NetworkScanBlock(
         )
         return
     }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        modifier = Modifier.selectableGroup(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         InfoBlock(
             title = stringResource(R.string.network_scan_results),
             body = stringResource(
@@ -2680,7 +2963,12 @@ private fun NetworkScanEntryCard(
     Panel(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(role = Role.Button, onClick = onClick),
+            .defaultMinSize(minHeight = 48.dp)
+            .selectable(
+                selected = selected,
+                role = Role.RadioButton,
+                onClick = onClick,
+            ),
         background = if (selected) EchoColors.Sunken else EchoColors.Glass,
         border = if (selected) EchoColors.Live else EchoColors.Hair,
     ) {
@@ -2979,7 +3267,19 @@ private fun applyNetworkStreamEvent(
     current: NetworkStatus?,
     event: NetworkStreamEvent,
 ): NetworkStatus? {
-    if (event.status != null) return event.status
+    if (event.revisionRelation in setOf(NetworkRevisionRelation.Stale, NetworkRevisionRelation.Gap)) {
+        return current
+    }
+    if (event.status != null) {
+        return if (current == null ||
+            current.authorityEpoch != event.status.authorityEpoch ||
+            event.status.sourceRevision > current.sourceRevision
+        ) {
+            event.status
+        } else {
+            current
+        }
+    }
     val transaction = event.transaction ?: return current
     return applyNetworkTransaction(current, transaction)
 }
@@ -2989,6 +3289,11 @@ private fun applyNetworkTransaction(
     transaction: NetworkTransaction,
 ): NetworkStatus? {
     if (current == null) return null
+    if (current.authorityEpoch == transaction.authorityEpoch &&
+        transaction.sourceRevision <= current.sourceRevision
+    ) {
+        return current
+    }
     val nextWindow = if (transaction.status in setOf("accepted", "running")) {
         current.transaction.copy(current = transaction, latest = transaction)
     } else {
@@ -3001,19 +3306,15 @@ private fun applyNetworkTransaction(
     )
 }
 
-private fun pendingNetworkMutationMessage(
-    current: NetworkStatus?,
-    detail: String,
-): NetworkMessage {
-    val transaction = current?.transaction?.current
-    return if (transaction != null && transaction.status in setOf("accepted", "running")) {
-        NetworkMessage.MutationResultPending(
-            recoveryAction = transaction.recoveryAction,
-            detail = detail,
-        )
-    } else {
-        NetworkMessage.NetworkFailure(detail)
-    }
+private fun CaptureProjectionState.authorityRevision(): AuthorityRevision? {
+    val epoch = lastAuthorityEpoch ?: return null
+    val revision = lastSourceRevision ?: return null
+    return AuthorityRevision(epoch, revision)
+}
+
+private fun NetworkStatus?.authorityRevision(): AuthorityRevision? {
+    this ?: return null
+    return AuthorityRevision(authorityEpoch, sourceRevision)
 }
 
 private fun handleNetworkMutationResult(
@@ -3046,11 +3347,6 @@ private fun networkMessageBody(message: NetworkMessage): String {
         NetworkMessage.ScanUnavailable -> stringResource(R.string.network_scan_unavailable)
         NetworkMessage.MutationRunning -> stringResource(R.string.network_mutation_running)
         is NetworkMessage.MutationAccepted -> stringResource(R.string.network_mutation_accepted, message.transactionId)
-        is NetworkMessage.MutationResultPending -> stringResource(
-            R.string.network_mutation_result_pending,
-            networkRecoveryActionLabel(message.recoveryAction),
-            message.detail,
-        )
         NetworkMessage.MutationUnavailable -> stringResource(R.string.network_mutation_unavailable)
         NetworkMessage.IdempotencyConflict -> stringResource(R.string.network_idempotency_conflict)
         NetworkMessage.InvalidDesiredState -> stringResource(R.string.network_invalid_desired_state)
@@ -3073,7 +3369,6 @@ private fun networkMessageColor(message: NetworkMessage): Color {
         NetworkMessage.ScanRunning,
         NetworkMessage.MutationRunning,
         -> EchoColors.Live
-        is NetworkMessage.MutationResultPending -> EchoColors.Caution
         else -> EchoColors.Caution
     }
 }
@@ -3169,8 +3464,9 @@ private fun networkTransactionStageLabel(value: String): String {
 private fun networkRecoveryActionLabel(value: String): String {
     return when (value) {
         "await_device" -> stringResource(R.string.network_recovery_await_device)
-        "reconnect_target_lan" -> stringResource(R.string.network_recovery_reconnect_target_lan)
-        "reconnect_rescue_ap" -> stringResource(R.string.network_recovery_reconnect_rescue_ap)
+        "reconnect_target_lan",
+        "reconnect_rescue_ap",
+        -> stringResource(R.string.network_recovery_connection_changed)
         "retry" -> stringResource(R.string.network_recovery_retry)
         "service_required" -> stringResource(R.string.network_recovery_service_required)
         "none" -> stringResource(R.string.network_recovery_none)
@@ -3217,14 +3513,11 @@ private fun BodyScreen(
     captureStatus: CaptureStatusSnapshot?,
     captureMessage: CaptureStatusMessage?,
     captureCommandMessage: CaptureCommandMessage?,
-    safeSwapReceipt: SafeSwapReceiptSummary?,
-    safeSwapMessage: SafeSwapMessage?,
     cameraFocus: CameraFocusStatus?,
     cameraFocusMessage: CameraFocusMessage?,
     captureCommandRunning: Boolean,
     cameraFocusCommandRunning: Boolean,
     onStartCalibrationCapture: () -> Unit,
-    onRequestSafeSwap: () -> Unit,
     onSetCameraFocus: (Long?, Boolean?) -> Unit,
     localeTag: String,
     updateState: AppUpdateManager.State,
@@ -3234,11 +3527,18 @@ private fun BodyScreen(
     onInstallUpdate: () -> Unit,
 ) {
     var confirmDisconnect by rememberSaveable { mutableStateOf(false) }
-    var confirmSafeSwap by rememberSaveable { mutableStateOf(false) }
 
-    BackHandler(enabled = confirmDisconnect || confirmSafeSwap) {
-        confirmDisconnect = false
-        confirmSafeSwap = false
+    BackNavigationHandler(
+        state = BackNavigationState(
+            confirmationVisible = confirmDisconnect,
+            selectedTabIsViewfinder = true,
+            recording = false,
+            connected = false,
+        ),
+    ) { action ->
+        if (action == BackNavigationAction.DISMISS_CONFIRMATION) {
+            confirmDisconnect = false
+        }
     }
 
     Column(
@@ -3352,33 +3652,6 @@ private fun BodyScreen(
                         CaptureStatusMessageBlock(captureMessage)
                     }
                     captureCommandMessage?.let { CaptureCommandMessageBlock(it) }
-                    ActionButton(
-                        label = stringResource(R.string.safe_swap_request),
-                        enabled = !captureCommandRunning && captureStatus?.deviceState == "recording",
-                        disabledReason = safeSwapRequestDisabledReason(
-                            bodyConnection = bodyConnection,
-                            captureStatus = captureStatus,
-                            captureCommandRunning = captureCommandRunning,
-                        ),
-                        onClick = { confirmSafeSwap = true },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    if (confirmSafeSwap) {
-                        ConfirmationBlock(
-                            title = stringResource(R.string.safe_swap_confirm_title),
-                            body = stringResource(R.string.safe_swap_confirm_body),
-                            confirmLabel = stringResource(R.string.safe_swap_confirm_action),
-                            onCancel = { confirmSafeSwap = false },
-                            onConfirm = {
-                                confirmSafeSwap = false
-                                onRequestSafeSwap()
-                            },
-                        )
-                    }
-                    SafeSwapBlock(
-                        receipt = safeSwapReceipt,
-                        message = safeSwapMessage,
-                    )
                     CameraFocusCard(
                         focus = cameraFocus,
                         message = cameraFocusMessage,
@@ -3881,50 +4154,6 @@ private fun artifactDownloadMessageFor(role: String, result: ArtifactDownloadRes
 }
 
 @Composable
-private fun SafeSwapBlock(
-    receipt: SafeSwapReceiptSummary?,
-    message: SafeSwapMessage?,
-) {
-    when {
-        receipt != null -> InfoBlock(
-            title = stringResource(R.string.safe_swap_title),
-            body = listOf(
-                stringResource(R.string.safe_swap_ready),
-                stringResource(R.string.safe_swap_release_state, receipt.releaseState),
-                stringResource(R.string.safe_swap_open_handles, receipt.openHandleCount),
-                if (receipt.authorityEpoch != null && receipt.sourceRevision != null) {
-                    stringResource(R.string.safe_swap_authority, receipt.authorityEpoch, receipt.sourceRevision)
-                } else {
-                    null
-                },
-                stringResource(R.string.safe_swap_manifest, receipt.manifestSha256),
-            ).filterNotNull().joinToString("\n"),
-            accent = EchoColors.Permit,
-            liveRegionMode = LiveRegionMode.Polite,
-        )
-        message != null -> InfoBlock(
-            title = stringResource(R.string.safe_swap_title),
-            body = safeSwapMessageBody(message),
-            accent = if (message == SafeSwapMessage.NotFound) EchoColors.InkMuted else EchoColors.Caution,
-            liveRegionMode = LiveRegionMode.Polite,
-        )
-    }
-}
-
-@Composable
-private fun safeSwapMessageBody(message: SafeSwapMessage): String {
-    return when (message) {
-        SafeSwapMessage.WaitingForReceipt -> stringResource(R.string.safe_swap_waiting_receipt)
-        SafeSwapMessage.AuthRequired -> stringResource(R.string.safe_swap_auth_required)
-        SafeSwapMessage.Forbidden -> stringResource(R.string.safe_swap_forbidden)
-        is SafeSwapMessage.HttpFailure -> stringResource(R.string.safe_swap_http_failure, message.statusCode)
-        is SafeSwapMessage.InvalidResponse -> stringResource(R.string.safe_swap_invalid_response, message.detail)
-        is SafeSwapMessage.NetworkFailure -> stringResource(R.string.safe_swap_network_failure, message.detail)
-        SafeSwapMessage.NotFound -> stringResource(R.string.safe_swap_not_found)
-    }
-}
-
-@Composable
 private fun CameraFocusCard(
     focus: CameraFocusStatus?,
     message: CameraFocusMessage?,
@@ -4069,6 +4298,13 @@ private fun UpdateCard(
                 color = updatePhaseColor(state.phase),
                 style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
             )
+            if (state.message.isNotBlank()) {
+                EchoText(
+                    value = state.message,
+                    color = if (state.phase == AppUpdateManager.Phase.FAILED) EchoColors.Caution else EchoColors.InkMuted,
+                    style = TextStyle(fontSize = 11.sp, lineHeight = 16.sp),
+                )
+            }
             if (state.phase == AppUpdateManager.Phase.FAILED) {
                 EchoText(
                     value = stringResource(R.string.update_failed_diagnostics),
@@ -4102,16 +4338,18 @@ private fun BottomNavigation(
     onSelect: (EchoTab) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val navigationDescription = stringResource(R.string.bottom_nav_description)
     Panel(
         modifier = modifier
             .fillMaxWidth()
-            .height(66.dp)
-            .semantics { contentDescription = navigationDescription },
+            .height(66.dp),
         background = EchoColors.GlassStrong,
         radius = 8.dp,
     ) {
-        Row(Modifier.fillMaxSize()) {
+        Row(
+            Modifier
+                .fillMaxSize()
+                .selectableGroup(),
+        ) {
             EchoTab.entries.forEach { tab ->
                 val selected = tab == selectedTab
                 val tabStateDescription = stringResource(
@@ -4224,44 +4462,84 @@ private fun InfoBlock(
 }
 
 @Composable
-private fun ConfirmationBlock(
+internal fun ConfirmationBlock(
     title: String,
     body: String,
     confirmLabel: String,
     onCancel: () -> Unit,
     onConfirm: () -> Unit,
 ) {
-    Panel(
-        modifier = Modifier.fillMaxWidth(),
-        background = EchoColors.Caution.copy(alpha = 0.10f),
-        border = EchoColors.Caution.copy(alpha = 0.48f),
+    val headingFocus = remember { FocusRequester() }
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+            usePlatformDefaultWidth = false,
+        ),
     ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+        Panel(
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .semantics { paneTitle = title },
+            background = EchoColors.Deck,
+            border = EchoColors.Caution.copy(alpha = 0.72f),
         ) {
-            InfoBlock(
-                title = title,
-                body = body,
-                accent = EchoColors.Caution,
-                liveRegionMode = LiveRegionMode.Polite,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ActionButton(
-                    label = stringResource(R.string.confirm_cancel),
-                    enabled = true,
-                    onClick = onCancel,
-                    modifier = Modifier.weight(1f),
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                EchoText(
+                    value = title,
+                    color = EchoColors.Ink,
+                    style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 17.sp),
+                    modifier = Modifier
+                        .focusRequester(headingFocus)
+                        .focusable()
+                        .semantics { heading() },
                 )
-                ActionButton(
-                    label = confirmLabel,
-                    enabled = true,
-                    onClick = onConfirm,
-                    modifier = Modifier.weight(1f),
+                EchoText(
+                    value = body,
+                    color = EchoColors.InkSecondary,
+                    style = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ActionButton(
+                        label = stringResource(R.string.confirm_cancel),
+                        enabled = true,
+                        onClick = onCancel,
+                        modifier = Modifier.weight(1f),
+                    )
+                    ActionButton(
+                        label = confirmLabel,
+                        enabled = true,
+                        onClick = onConfirm,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
         }
     }
+    LaunchedEffect(headingFocus) {
+        headingFocus.requestFocus()
+    }
+}
+
+@Composable
+internal fun RecordingBackgroundConfirmation(
+    onDismiss: () -> Unit,
+    onMoveToBackground: () -> Unit,
+) {
+    ConfirmationBlock(
+        title = stringResource(R.string.recording_background_confirm_title),
+        body = stringResource(R.string.recording_background_confirm_body),
+        confirmLabel = stringResource(R.string.recording_background_confirm_action),
+        onCancel = onDismiss,
+        onConfirm = onMoveToBackground,
+    )
 }
 
 @Composable
@@ -4328,7 +4606,11 @@ private fun ProbeMessageText(message: ProbeMessage) {
         )
         is ProbeMessage.HttpFailure -> Triple(
             stringResource(R.string.manual_connection),
-            stringResource(R.string.probe_http_failure, message.statusCode),
+            if (message.errorCode == DeviceHttpFailure.CODE_PROTOCOL_REDIRECT) {
+                stringResource(R.string.probe_protocol_redirect, message.statusCode)
+            } else {
+                stringResource(R.string.probe_http_failure, message.statusCode)
+            },
             EchoColors.Caution,
         )
         is ProbeMessage.RejectedEndpoint -> Triple(
@@ -4381,9 +4663,6 @@ private fun CaptureCommandMessageBlock(message: CaptureCommandMessage) {
             stringResource(R.string.capture_command_running_calibration_start) to EchoColors.Live
         }
         CaptureCommandMessage.RunningStop -> stringResource(R.string.capture_command_running_stop) to EchoColors.Live
-        CaptureCommandMessage.RunningSafeSwapStop -> {
-            stringResource(R.string.capture_command_running_safe_swap_stop) to EchoColors.Live
-        }
         CaptureCommandMessage.Accepted -> stringResource(R.string.capture_command_accepted) to EchoColors.Permit
         CaptureCommandMessage.RecordingContinuesOnBack -> {
             stringResource(R.string.capture_command_recording_continues_on_back) to EchoColors.Caution
@@ -4470,20 +4749,6 @@ private fun isCameraConnected(
     captureStatus: CaptureStatusSnapshot?,
 ): Boolean {
     return (captureStatus?.runtime?.camera?.state ?: bodyConnection.descriptor.runtime.camera.state) == "connected"
-}
-
-@Composable
-private fun safeSwapRequestDisabledReason(
-    bodyConnection: DeviceConnection?,
-    captureStatus: CaptureStatusSnapshot?,
-    captureCommandRunning: Boolean,
-): String {
-    return when {
-        captureCommandRunning -> stringResource(R.string.capture_disabled_command_running)
-        bodyConnection == null -> stringResource(R.string.capture_disabled_no_connection)
-        captureStatus?.deviceState != "recording" -> stringResource(R.string.safe_swap_disabled_not_recording)
-        else -> stringResource(R.string.safe_swap_request_ready)
-    }
 }
 
 private fun captureCommandMessageFor(result: CaptureCommandResult): CaptureCommandMessage {
@@ -4619,10 +4884,40 @@ private fun calibrationDisabledReasonLabel(value: String): String {
 @Composable
 private fun PreviewImage(image: ImageBitmap, mode: PreviewMode) {
     val previewDescription = stringResource(R.string.preview_frame_content)
+    PreviewBitmapLayer(
+        image = image,
+        mode = mode,
+        alpha = 1f,
+        contentDescription = previewDescription,
+    )
+}
+
+@Composable
+private fun FocusPeakOverlay(mask: ImageBitmap, mode: PreviewMode) {
+    PreviewBitmapLayer(
+        image = mask,
+        mode = mode,
+        alpha = 0.88f,
+        contentDescription = null,
+    )
+}
+
+@Composable
+private fun PreviewBitmapLayer(
+    image: ImageBitmap,
+    mode: PreviewMode,
+    alpha: Float,
+    contentDescription: String?,
+) {
+    val accessibility = if (contentDescription == null) {
+        Modifier
+    } else {
+        Modifier.semantics { this.contentDescription = contentDescription }
+    }
     Canvas(
         modifier = Modifier
             .fillMaxSize()
-            .semantics { contentDescription = previewDescription },
+            .then(accessibility),
     ) {
         val halfWidth = (image.width / 2).coerceAtLeast(1)
         val useHalf = image.width >= 2 && mode != PreviewMode.BOTH
@@ -4641,6 +4936,7 @@ private fun PreviewImage(image: ImageBitmap, mode: PreviewMode) {
                 width = size.width.toInt().coerceAtLeast(1),
                 height = size.height.toInt().coerceAtLeast(1),
             ),
+            alpha = alpha,
         )
     }
 }
@@ -4688,9 +4984,14 @@ private fun ActionButton(
     val background = if (enabled) EchoColors.Ink else Color.Transparent
     val border = if (enabled) EchoColors.Ink else EchoColors.HairStrong
     val semanticModifier = if (enabled) {
-        Modifier.clickable(role = Role.Button, onClick = onClick)
+        Modifier
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                contentDescription = label
+            }
     } else {
-        Modifier.semantics {
+        Modifier.semantics(mergeDescendants = true) {
+            contentDescription = label
             role = Role.Button
             disabled()
             if (!disabledReason.isNullOrBlank()) {
@@ -4719,7 +5020,7 @@ private fun ActionButton(
 }
 
 @Composable
-private fun FrameToolToggle(label: String, selected: Boolean, onClick: () -> Unit) {
+internal fun FrameToolToggle(label: String, selected: Boolean, onClick: () -> Unit) {
     val state = if (selected) stringResource(R.string.tool_on) else stringResource(R.string.tool_off)
     Box(
         modifier = Modifier
@@ -4727,7 +5028,11 @@ private fun FrameToolToggle(label: String, selected: Boolean, onClick: () -> Uni
             .clip(RoundedCornerShape(8.dp))
             .background(if (selected) EchoColors.Sunken else EchoColors.GlassStrong)
             .border(1.dp, if (selected) EchoColors.Live else EchoColors.Hair, RoundedCornerShape(8.dp))
-            .clickable(role = Role.Button, onClick = onClick)
+            .toggleable(
+                value = selected,
+                role = Role.Switch,
+                onValueChange = { onClick() },
+            )
             .semantics {
                 contentDescription = label
                 stateDescription = state
@@ -4816,7 +5121,8 @@ private fun SegmentedControl(
             .fillMaxWidth()
             .height(48.dp)
             .clip(RoundedCornerShape(8.dp))
-            .border(1.dp, EchoColors.Hair, RoundedCornerShape(8.dp)),
+            .border(1.dp, EchoColors.Hair, RoundedCornerShape(8.dp))
+            .selectableGroup(),
     ) {
         options.forEach { (value, label) ->
             val isSelected = selected == value
@@ -4962,7 +5268,10 @@ private fun probeMessageFor(result: ProbeResult): ProbeMessage {
     return when (result) {
         ProbeResult.AuthenticationRequired -> ProbeMessage.AuthRequired
         ProbeResult.Forbidden -> ProbeMessage.Forbidden
-        is ProbeResult.HttpFailure -> ProbeMessage.HttpFailure(result.statusCode)
+        is ProbeResult.HttpFailure -> ProbeMessage.HttpFailure(
+            statusCode = result.statusCode,
+            errorCode = result.errorCode,
+        )
         is ProbeResult.InvalidResponse -> ProbeMessage.InvalidResponse(result.message)
         is ProbeResult.NetworkFailure -> ProbeMessage.NetworkFailure(result.message)
         is ProbeResult.RejectedEndpoint -> ProbeMessage.RejectedEndpoint(result.reason.toStringResource())
@@ -5021,8 +5330,59 @@ private sealed interface ProbeMessage {
     data class RejectedEndpoint(@param:StringRes val reasonString: Int) : ProbeMessage
     data class InvalidResponse(val detail: String) : ProbeMessage
     data class NetworkFailure(val detail: String) : ProbeMessage
-    data class HttpFailure(val statusCode: Int) : ProbeMessage
+    data class HttpFailure(
+        val statusCode: Int,
+        val errorCode: String,
+    ) : ProbeMessage
     data class Verified(val deviceLabel: String) : ProbeMessage
+}
+
+internal data class AuthorityRevision(
+    val authorityEpoch: String,
+    val sourceRevision: Long,
+)
+
+internal class ReconciliationGate(
+    private val minimumIntervalMs: Long,
+) {
+    private var lastRequestAtMs: Long? = null
+
+    fun tryAcquire(nowMs: Long, force: Boolean = false): Boolean {
+        val lastRequest = lastRequestAtMs
+        if (!force && lastRequest != null && nowMs - lastRequest < minimumIntervalMs) {
+            return false
+        }
+        lastRequestAtMs = nowMs
+        return true
+    }
+}
+
+internal object ConnectionRequestPolicy {
+    const val HEALTHY_RECONCILIATION_INTERVAL_MS = 30_000L
+    const val FALLBACK_INITIAL_DELAY_MS = 2_000L
+    const val FALLBACK_MAX_DELAY_MS = 30_000L
+    const val EVENT_RETRY_DELAY_MS = 2_000L
+    const val COORDINATOR_TICK_MS = 1_000L
+    const val PREVIEW_INTERVAL_MS = 1_000L
+
+    fun nextFallbackDelay(currentDelayMs: Long): Long {
+        return (currentDelayMs * 2L).coerceAtMost(FALLBACK_MAX_DELAY_MS)
+    }
+
+    fun canApplyResponse(
+        requestGeneration: Long,
+        currentGeneration: Long,
+        requestBaseline: AuthorityRevision?,
+        currentRevision: AuthorityRevision?,
+    ): Boolean {
+        return requestGeneration == currentGeneration && requestBaseline == currentRevision
+    }
+}
+
+private enum class EventStreamHealth {
+    Starting,
+    Healthy,
+    Degraded,
 }
 
 private sealed interface CaptureStatusMessage {
@@ -5037,7 +5397,6 @@ private sealed interface CaptureCommandMessage {
     data object RunningStart : CaptureCommandMessage
     data object RunningCalibrationStart : CaptureCommandMessage
     data object RunningStop : CaptureCommandMessage
-    data object RunningSafeSwapStop : CaptureCommandMessage
     data object Accepted : CaptureCommandMessage
     data object RecordingContinuesOnBack : CaptureCommandMessage
     data object NoActiveSession : CaptureCommandMessage
@@ -5114,16 +5473,6 @@ private sealed interface ArtifactDownloadMessage {
     data class StoreFailed(val role: String, val detail: String) : ArtifactDownloadMessage
 }
 
-private sealed interface SafeSwapMessage {
-    data object WaitingForReceipt : SafeSwapMessage
-    data object NotFound : SafeSwapMessage
-    data object AuthRequired : SafeSwapMessage
-    data object Forbidden : SafeSwapMessage
-    data class InvalidResponse(val detail: String) : SafeSwapMessage
-    data class NetworkFailure(val detail: String) : SafeSwapMessage
-    data class HttpFailure(val statusCode: Int) : SafeSwapMessage
-}
-
 private sealed interface CameraFocusMessage {
     data object Running : CameraFocusMessage
     data object Updated : CameraFocusMessage
@@ -5146,7 +5495,6 @@ private sealed interface NetworkMessage {
     data object ScanUnavailable : NetworkMessage
     data object MutationRunning : NetworkMessage
     data class MutationAccepted(val transactionId: String) : NetworkMessage
-    data class MutationResultPending(val recoveryAction: String, val detail: String) : NetworkMessage
     data object MutationUnavailable : NetworkMessage
     data object IdempotencyConflict : NetworkMessage
     data object InvalidDesiredState : NetworkMessage
@@ -5157,11 +5505,6 @@ private sealed interface NetworkMessage {
     data class InvalidResponse(val detail: String) : NetworkMessage
     data class NetworkFailure(val detail: String) : NetworkMessage
     data class HttpFailure(val statusCode: Int) : NetworkMessage
-}
-
-private fun decodePreviewFrame(bytes: ByteArray): ImageBitmap? {
-    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-    return bitmap.asImageBitmap()
 }
 
 private tailrec fun Context.findActivity(): Activity? {
@@ -5235,7 +5578,9 @@ private fun updatePhaseString(phase: AppUpdateManager.Phase): Int {
         AppUpdateManager.Phase.CURRENT -> R.string.update_current
         AppUpdateManager.Phase.AVAILABLE -> R.string.update_available
         AppUpdateManager.Phase.DOWNLOADING -> R.string.update_downloading
-        AppUpdateManager.Phase.INSTALLING -> R.string.update_installing
+        AppUpdateManager.Phase.VERIFYING -> R.string.update_verifying
+        AppUpdateManager.Phase.READY_TO_INSTALL -> R.string.update_ready_to_install
+        AppUpdateManager.Phase.INSTALLING_HANDOFF -> R.string.update_installing
         AppUpdateManager.Phase.FAILED -> R.string.update_failed
     }
 }
@@ -5244,7 +5589,9 @@ private fun updatePhaseColor(phase: AppUpdateManager.Phase): Color {
     return when (phase) {
         AppUpdateManager.Phase.AVAILABLE,
         AppUpdateManager.Phase.DOWNLOADING,
-        AppUpdateManager.Phase.INSTALLING,
+        AppUpdateManager.Phase.VERIFYING,
+        AppUpdateManager.Phase.READY_TO_INSTALL,
+        AppUpdateManager.Phase.INSTALLING_HANDOFF,
         -> EchoColors.Live
         AppUpdateManager.Phase.FAILED -> EchoColors.Caution
         else -> EchoColors.InkSecondary
@@ -5252,6 +5599,12 @@ private fun updatePhaseColor(phase: AppUpdateManager.Phase): Color {
 }
 
 private fun updateProgress(state: AppUpdateManager.State): Float {
+    if (
+        state.phase == AppUpdateManager.Phase.READY_TO_INSTALL ||
+        state.phase == AppUpdateManager.Phase.INSTALLING_HANDOFF
+    ) {
+        return 1f
+    }
     if (state.totalBytes <= 0L) {
         return if (state.phase == AppUpdateManager.Phase.CURRENT) 1f else 0f
     }
@@ -5263,7 +5616,8 @@ private fun updateInstallDisabledReason(state: AppUpdateManager.State): String {
     return when (state.phase) {
         AppUpdateManager.Phase.CHECKING,
         AppUpdateManager.Phase.DOWNLOADING,
-        AppUpdateManager.Phase.INSTALLING,
+        AppUpdateManager.Phase.VERIFYING,
+        AppUpdateManager.Phase.INSTALLING_HANDOFF,
         -> stringResource(R.string.update_install_disabled_busy)
         else -> stringResource(R.string.update_install_disabled_no_update)
     }

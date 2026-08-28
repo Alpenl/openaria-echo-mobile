@@ -22,7 +22,7 @@ class ArtifactTransferTest {
     }
 
     @Test
-    fun `resumes valid partial artifact download`() {
+    fun `deletes prior partial and starts a new download attempt`() {
         val artifact = artifact(bytes = 10)
 
         val plan = ArtifactTransfer.planPreparation(
@@ -34,8 +34,7 @@ class ArtifactTransferTest {
         )
 
         val download = assertIs<ArtifactPreparationPlan.Download>(plan)
-        assertEquals(4L, download.resumeFromBytes)
-        assertEquals(false, download.deletePartialBeforeDownload)
+        assertEquals(true, download.deletePartialBeforeDownload)
     }
 
     @Test
@@ -51,12 +50,11 @@ class ArtifactTransferTest {
         )
 
         val download = assertIs<ArtifactPreparationPlan.Download>(plan)
-        assertEquals(0L, download.resumeFromBytes)
         assertEquals(true, download.deletePartialBeforeDownload)
     }
 
     @Test
-    fun `replaces corrupt target while preserving valid partial resume point`() {
+    fun `replaces corrupt target and deletes any prior partial`() {
         val artifact = artifact(bytes = 10)
 
         val plan = ArtifactTransfer.planPreparation(
@@ -69,8 +67,7 @@ class ArtifactTransferTest {
 
         val download = assertIs<ArtifactPreparationPlan.Download>(plan)
         assertEquals(true, download.deleteTargetBeforeDownload)
-        assertEquals(false, download.deletePartialBeforeDownload)
-        assertEquals(6L, download.resumeFromBytes)
+        assertEquals(true, download.deletePartialBeforeDownload)
     }
 
     @Test
@@ -88,7 +85,7 @@ class ArtifactTransferTest {
     }
 
     @Test
-    fun `keeps partial file when user cancels download`() {
+    fun `deletes partial file when user cancels download`() {
         val artifact = artifact(bytes = 10)
 
         val plan = ArtifactTransfer.planCompletion(
@@ -98,12 +95,12 @@ class ArtifactTransferTest {
             downloadResult = ArtifactDownloadResult.Cancelled(4),
         )
 
-        val rejected = assertIs<ArtifactCompletionPlan.KeepPartialAndReject>(plan)
+        val rejected = assertIs<ArtifactCompletionPlan.DeletePartialAndReject>(plan)
         assertIs<ArtifactDownloadResult.Cancelled>(rejected.reason)
     }
 
     @Test
-    fun `keeps partial file after network failure for later resume`() {
+    fun `deletes partial file after network failure`() {
         val artifact = artifact(bytes = 10)
 
         val plan = ArtifactTransfer.planCompletion(
@@ -113,7 +110,7 @@ class ArtifactTransferTest {
             downloadResult = ArtifactDownloadResult.NetworkFailure("timeout"),
         )
 
-        val rejected = assertIs<ArtifactCompletionPlan.KeepPartialAndReject>(plan)
+        val rejected = assertIs<ArtifactCompletionPlan.DeletePartialAndReject>(plan)
         assertIs<ArtifactDownloadResult.NetworkFailure>(rejected.reason)
     }
 
@@ -133,7 +130,7 @@ class ArtifactTransferTest {
     }
 
     @Test
-    fun `deletes partial file when resumed range is not satisfiable`() {
+    fun `deletes partial file when range is not satisfiable`() {
         val artifact = artifact(bytes = 10)
 
         val plan = ArtifactTransfer.planCompletion(

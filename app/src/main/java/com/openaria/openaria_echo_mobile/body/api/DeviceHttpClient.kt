@@ -21,7 +21,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_OK -> parseCaptureStatus(http.inputStream.readBytes().decodeToString())
                 HttpURLConnection.HTTP_UNAUTHORIZED -> CaptureStatusResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> CaptureStatusResult.Forbidden
-                else -> CaptureStatusResult.HttpFailure(status)
+                else -> CaptureStatusResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             CaptureStatusResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -74,7 +74,7 @@ class DeviceHttpClient {
                 }
                 HttpURLConnection.HTTP_UNAUTHORIZED -> CaptureEventsResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> CaptureEventsResult.Forbidden
-                else -> CaptureEventsResult.HttpFailure(status)
+                else -> CaptureEventsResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             CaptureEventsResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -110,7 +110,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_FORBIDDEN -> PreviewResult.Forbidden
                 HttpURLConnection.HTTP_CONFLICT -> PreviewResult.Unavailable
                 HttpURLConnection.HTTP_UNAVAILABLE -> parsePreviewUnavailable(http)
-                else -> PreviewResult.HttpFailure(status)
+                else -> PreviewResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             PreviewResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -198,7 +198,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_BAD_REQUEST -> SessionListResult.InvalidRequest
                 HttpURLConnection.HTTP_UNAUTHORIZED -> SessionListResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> SessionListResult.Forbidden
-                else -> SessionListResult.HttpFailure(status)
+                else -> SessionListResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             SessionListResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -221,7 +221,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_UNAUTHORIZED -> SafeSwapResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> SafeSwapResult.Forbidden
                 HttpURLConnection.HTTP_NOT_FOUND -> SafeSwapResult.NotFound
-                else -> SafeSwapResult.HttpFailure(status)
+                else -> SafeSwapResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             SafeSwapResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -247,7 +247,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_UNAUTHORIZED -> SessionManifestResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> SessionManifestResult.Forbidden
                 HttpURLConnection.HTTP_NOT_FOUND -> SessionManifestResult.NotFound
-                else -> SessionManifestResult.HttpFailure(status)
+                else -> SessionManifestResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             SessionManifestResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -278,7 +278,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_UNAUTHORIZED -> RetainedUnsuccessfulOutcomeResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> RetainedUnsuccessfulOutcomeResult.Forbidden
                 HttpURLConnection.HTTP_NOT_FOUND -> RetainedUnsuccessfulOutcomeResult.NotFound
-                else -> RetainedUnsuccessfulOutcomeResult.HttpFailure(status)
+                else -> RetainedUnsuccessfulOutcomeResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             RetainedUnsuccessfulOutcomeResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -344,7 +344,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_CONFLICT -> ArtifactDownloadResult.SessionNotVerified
                 423 -> ArtifactDownloadResult.CaptureBusy
                 416 -> ArtifactDownloadResult.RangeNotSatisfiable
-                else -> ArtifactDownloadResult.HttpFailure(status)
+                else -> ArtifactDownloadResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             ArtifactDownloadResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -390,7 +390,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_NOT_FOUND -> ArtifactHeadResult.NotFound
                 HttpURLConnection.HTTP_CONFLICT -> ArtifactHeadResult.SessionNotVerified
                 423 -> ArtifactHeadResult.CaptureBusy
-                else -> ArtifactHeadResult.HttpFailure(status)
+                else -> ArtifactHeadResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             ArtifactHeadResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -413,7 +413,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_UNAUTHORIZED -> CameraFocusResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> CameraFocusResult.Forbidden
                 HttpURLConnection.HTTP_NOT_FOUND -> CameraFocusResult.Unsupported
-                else -> CameraFocusResult.HttpFailure(status)
+                else -> CameraFocusResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             CameraFocusResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -455,7 +455,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_NOT_FOUND -> CameraFocusResult.Unsupported
                 HttpURLConnection.HTTP_CONFLICT -> CameraFocusResult.Conflict
                 422 -> CameraFocusResult.InvalidFocus
-                else -> CameraFocusResult.HttpFailure(status)
+                else -> CameraFocusResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             CameraFocusResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -478,7 +478,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_UNAUTHORIZED -> NetworkStatusResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> NetworkStatusResult.Forbidden
                 HttpURLConnection.HTTP_UNAVAILABLE -> NetworkStatusResult.Unavailable
-                else -> NetworkStatusResult.HttpFailure(status)
+                else -> NetworkStatusResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             NetworkStatusResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -501,7 +501,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_UNAUTHORIZED -> NetworkScanResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> NetworkScanResult.Forbidden
                 HttpURLConnection.HTTP_UNAVAILABLE -> NetworkScanResult.Unavailable
-                else -> NetworkScanResult.HttpFailure(status)
+                else -> NetworkScanResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             NetworkScanResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -535,7 +535,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_UNAUTHORIZED -> NetworkCredentialResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> NetworkCredentialResult.Forbidden
                 HttpURLConnection.HTTP_UNAVAILABLE -> NetworkCredentialResult.MutationUnavailable
-                else -> NetworkCredentialResult.HttpFailure(status)
+                else -> NetworkCredentialResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             NetworkCredentialResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -722,7 +722,7 @@ class DeviceHttpClient {
                 }
                 HttpURLConnection.HTTP_UNAUTHORIZED -> NetworkEventsResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> NetworkEventsResult.Forbidden
-                else -> NetworkEventsResult.HttpFailure(status)
+                else -> NetworkEventsResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             NetworkEventsResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -764,7 +764,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_FORBIDDEN -> CaptureCommandResult.Forbidden
                 HttpURLConnection.HTTP_CONFLICT -> CaptureCommandResult.Conflict
                 422 -> CaptureCommandResult.Unprocessable
-                else -> CaptureCommandResult.HttpFailure(status)
+                else -> CaptureCommandResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             CaptureCommandResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -936,7 +936,7 @@ class DeviceHttpClient {
                 HttpURLConnection.HTTP_CONFLICT -> NetworkMutationResult.IdempotencyConflict
                 422 -> NetworkMutationResult.InvalidDesiredState
                 HttpURLConnection.HTTP_UNAVAILABLE -> NetworkMutationResult.MutationUnavailable
-                else -> NetworkMutationResult.HttpFailure(status)
+                else -> NetworkMutationResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             NetworkMutationResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -946,6 +946,7 @@ class DeviceHttpClient {
     }
 
     private fun HttpURLConnection.applyJsonRequest(connection: DeviceConnection): HttpURLConnection {
+        lockToDeviceOrigin()
         connectTimeout = 5_000
         readTimeout = 8_000
         requestMethod = "GET"
@@ -958,6 +959,7 @@ class DeviceHttpClient {
         connection: DeviceConnection,
         idempotencyKey: String?,
     ): HttpURLConnection {
+        lockToDeviceOrigin()
         connectTimeout = 5_000
         readTimeout = 8_000
         requestMethod = "POST"
@@ -975,6 +977,7 @@ class DeviceHttpClient {
         connection: DeviceConnection,
         lastEventId: String?,
     ): HttpURLConnection {
+        lockToDeviceOrigin()
         connectTimeout = 5_000
         readTimeout = 15_000
         requestMethod = "GET"
@@ -988,6 +991,7 @@ class DeviceHttpClient {
     }
 
     private fun HttpURLConnection.applyPreviewRequest(connection: DeviceConnection): HttpURLConnection {
+        lockToDeviceOrigin()
         connectTimeout = 5_000
         readTimeout = 5_000
         requestMethod = "GET"
@@ -1001,6 +1005,7 @@ class DeviceHttpClient {
         connection: DeviceConnection,
         idempotencyKey: String,
     ): HttpURLConnection {
+        lockToDeviceOrigin()
         connectTimeout = 5_000
         readTimeout = 8_000
         requestMethod = "POST"
@@ -1016,6 +1021,7 @@ class DeviceHttpClient {
         connection: DeviceConnection,
         resumeFromBytes: Long? = null,
     ): HttpURLConnection {
+        lockToDeviceOrigin()
         connectTimeout = 5_000
         readTimeout = 30_000
         requestMethod = "GET"
@@ -1029,6 +1035,7 @@ class DeviceHttpClient {
     }
 
     private fun HttpURLConnection.applyArtifactHeadRequest(connection: DeviceConnection): HttpURLConnection {
+        lockToDeviceOrigin()
         connectTimeout = 5_000
         readTimeout = 8_000
         requestMethod = "HEAD"
@@ -1518,7 +1525,9 @@ sealed interface CaptureStatusResult {
     data object Forbidden : CaptureStatusResult
     data class InvalidResponse(val message: String) : CaptureStatusResult
     data class NetworkFailure(val message: String) : CaptureStatusResult
-    data class HttpFailure(val statusCode: Int) : CaptureStatusResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : CaptureStatusResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface CaptureEventsResult {
@@ -1528,7 +1537,9 @@ sealed interface CaptureEventsResult {
     data class InvalidRequest(val message: String) : CaptureEventsResult
     data class InvalidResponse(val message: String) : CaptureEventsResult
     data class NetworkFailure(val message: String) : CaptureEventsResult
-    data class HttpFailure(val statusCode: Int) : CaptureEventsResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : CaptureEventsResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 data class CaptureStreamEvent(
@@ -1567,7 +1578,9 @@ sealed interface PreviewResult {
     data object NoFrame : PreviewResult
     data class InvalidResponse(val message: String) : PreviewResult
     data class NetworkFailure(val message: String) : PreviewResult
-    data class HttpFailure(val statusCode: Int) : PreviewResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : PreviewResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface CaptureCommandResult {
@@ -1580,7 +1593,9 @@ sealed interface CaptureCommandResult {
     data class InvalidRequest(val message: String) : CaptureCommandResult
     data class InvalidResponse(val message: String) : CaptureCommandResult
     data class NetworkFailure(val message: String) : CaptureCommandResult
-    data class HttpFailure(val statusCode: Int) : CaptureCommandResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : CaptureCommandResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface SessionListResult {
@@ -1590,7 +1605,9 @@ sealed interface SessionListResult {
     data object Forbidden : SessionListResult
     data class InvalidResponse(val message: String) : SessionListResult
     data class NetworkFailure(val message: String) : SessionListResult
-    data class HttpFailure(val statusCode: Int) : SessionListResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : SessionListResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface SafeSwapResult {
@@ -1600,7 +1617,9 @@ sealed interface SafeSwapResult {
     data object Forbidden : SafeSwapResult
     data class InvalidResponse(val message: String) : SafeSwapResult
     data class NetworkFailure(val message: String) : SafeSwapResult
-    data class HttpFailure(val statusCode: Int) : SafeSwapResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : SafeSwapResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface SessionManifestResult {
@@ -1611,7 +1630,9 @@ sealed interface SessionManifestResult {
     data class InvalidRequest(val message: String) : SessionManifestResult
     data class InvalidResponse(val message: String) : SessionManifestResult
     data class NetworkFailure(val message: String) : SessionManifestResult
-    data class HttpFailure(val statusCode: Int) : SessionManifestResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : SessionManifestResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface RetainedUnsuccessfulOutcomeResult {
@@ -1622,7 +1643,9 @@ sealed interface RetainedUnsuccessfulOutcomeResult {
     data class InvalidRequest(val message: String) : RetainedUnsuccessfulOutcomeResult
     data class InvalidResponse(val message: String) : RetainedUnsuccessfulOutcomeResult
     data class NetworkFailure(val message: String) : RetainedUnsuccessfulOutcomeResult
-    data class HttpFailure(val statusCode: Int) : RetainedUnsuccessfulOutcomeResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : RetainedUnsuccessfulOutcomeResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface ArtifactDownloadResult {
@@ -1638,7 +1661,9 @@ sealed interface ArtifactDownloadResult {
     data class InvalidResponse(val message: String) : ArtifactDownloadResult
     data class IntegrityFailure(val actualSha256: String) : ArtifactDownloadResult
     data class NetworkFailure(val message: String) : ArtifactDownloadResult
-    data class HttpFailure(val statusCode: Int) : ArtifactDownloadResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : ArtifactDownloadResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface ArtifactHeadResult {
@@ -1651,7 +1676,9 @@ sealed interface ArtifactHeadResult {
     data class InvalidRequest(val message: String) : ArtifactHeadResult
     data class InvalidResponse(val message: String) : ArtifactHeadResult
     data class NetworkFailure(val message: String) : ArtifactHeadResult
-    data class HttpFailure(val statusCode: Int) : ArtifactHeadResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : ArtifactHeadResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface CameraFocusResult {
@@ -1664,7 +1691,9 @@ sealed interface CameraFocusResult {
     data class InvalidRequest(val message: String) : CameraFocusResult
     data class InvalidResponse(val message: String) : CameraFocusResult
     data class NetworkFailure(val message: String) : CameraFocusResult
-    data class HttpFailure(val statusCode: Int) : CameraFocusResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : CameraFocusResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface NetworkStatusResult {
@@ -1674,7 +1703,9 @@ sealed interface NetworkStatusResult {
     data object Unavailable : NetworkStatusResult
     data class InvalidResponse(val message: String) : NetworkStatusResult
     data class NetworkFailure(val message: String) : NetworkStatusResult
-    data class HttpFailure(val statusCode: Int) : NetworkStatusResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : NetworkStatusResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface NetworkScanResult {
@@ -1684,7 +1715,9 @@ sealed interface NetworkScanResult {
     data object Unavailable : NetworkScanResult
     data class InvalidResponse(val message: String) : NetworkScanResult
     data class NetworkFailure(val message: String) : NetworkScanResult
-    data class HttpFailure(val statusCode: Int) : NetworkScanResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : NetworkScanResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface NetworkCredentialResult {
@@ -1695,7 +1728,9 @@ sealed interface NetworkCredentialResult {
     data class InvalidRequest(val message: String) : NetworkCredentialResult
     data class InvalidResponse(val message: String) : NetworkCredentialResult
     data class NetworkFailure(val message: String) : NetworkCredentialResult
-    data class HttpFailure(val statusCode: Int) : NetworkCredentialResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : NetworkCredentialResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface NetworkMutationResult {
@@ -1709,7 +1744,9 @@ sealed interface NetworkMutationResult {
     data class InvalidRequest(val message: String) : NetworkMutationResult
     data class InvalidResponse(val message: String) : NetworkMutationResult
     data class NetworkFailure(val message: String) : NetworkMutationResult
-    data class HttpFailure(val statusCode: Int) : NetworkMutationResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : NetworkMutationResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 sealed interface NetworkEventsResult {
@@ -1719,7 +1756,9 @@ sealed interface NetworkEventsResult {
     data class InvalidRequest(val message: String) : NetworkEventsResult
     data class InvalidResponse(val message: String) : NetworkEventsResult
     data class NetworkFailure(val message: String) : NetworkEventsResult
-    data class HttpFailure(val statusCode: Int) : NetworkEventsResult
+    data class HttpFailure(override val failure: DeviceHttpFailure) : NetworkEventsResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }
 
 data class NetworkStreamEvent(

@@ -5,6 +5,36 @@ import java.io.IOException
 import java.net.HttpURLConnection
 
 class DeviceProbeClient {
+    fun probe(origins: List<String>, bearerToken: String?): ProbeResult {
+        val primaryOrigin = origins.firstOrNull()?.trim()
+        return probe(origins) { origin -> bearerToken.takeIf { origin == primaryOrigin } }
+    }
+
+    /**
+     * Tries one NSD service's candidate origins in order while resolving
+     * credentials independently for each exact origin. A token saved for an
+     * IPv4 origin must never be copied to a hostname or IPv6 candidate merely
+     * because mDNS advertised them in the same response.
+     */
+    fun probe(origins: List<String>, bearerTokenForOrigin: (String) -> String?): ProbeResult {
+        val candidates = origins
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+        if (candidates.isEmpty()) {
+            return probe("", bearerTokenForOrigin(""))
+        }
+
+        var lastNetworkFailure: ProbeResult.NetworkFailure? = null
+        for (origin in candidates) {
+            when (val result = probe(origin, bearerTokenForOrigin(origin))) {
+                is ProbeResult.NetworkFailure -> lastNetworkFailure = result
+                else -> return result
+            }
+        }
+        return requireNotNull(lastNetworkFailure)
+    }
+
     fun probe(origin: String, bearerToken: String?): ProbeResult {
         val endpointDecision = EndpointPolicy.validate(origin)
         if (endpointDecision is EndpointPolicy.Decision.Rejected) {
@@ -14,7 +44,7 @@ class DeviceProbeClient {
         val url = target.origin.resolve("/api/v4/device").toURL()
 
         val connection = try {
-            (url.openConnection() as HttpURLConnection).apply {
+            (url.openConnection() as HttpURLConnection).lockToDeviceOrigin().apply {
                 connectTimeout = 5_000
                 readTimeout = 8_000
                 requestMethod = "GET"
@@ -37,7 +67,7 @@ class DeviceProbeClient {
                 )
                 HttpURLConnection.HTTP_UNAUTHORIZED -> ProbeResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> ProbeResult.Forbidden
-                else -> ProbeResult.HttpFailure(status)
+                else -> ProbeResult.HttpFailure(connection.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             ProbeResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
@@ -75,5 +105,9 @@ sealed interface ProbeResult {
     data class RejectedEndpoint(val reason: EndpointPolicy.RejectReason) : ProbeResult
     data class InvalidResponse(val message: String) : ProbeResult
     data class NetworkFailure(val message: String) : ProbeResult
-    data class HttpFailure(val statusCode: Int) : ProbeResult
+    data class HttpFailure(
+        override val failure: DeviceHttpFailure,
+    ) : ProbeResult, DeviceHttpFailureResult {
+        constructor(statusCode: Int) : this(DeviceHttpFailure(statusCode))
+    }
 }

@@ -4,6 +4,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class UiShellSourceTest {
     @Test
@@ -74,8 +75,10 @@ class UiShellSourceTest {
         assertContains(source, "token_clear_confirm_title")
         assertContains(source, "token_clear_confirm_action")
         assertContains(source, "var confirmDisconnect by rememberSaveable")
-        assertContains(source, "BackHandler(enabled = confirmTokenClear)")
-        assertContains(source, "BackHandler(enabled = confirmDisconnect || confirmSafeSwap)")
+        assertContains(source, "confirmationVisible = confirmTokenClear")
+        assertContains(source, "confirmationVisible = confirmDisconnect")
+        assertContains(source, "Dialog(")
+        assertContains(source, "onDismissRequest = onCancel")
         assertContains(source, "disconnect_confirm_title")
         assertContains(source, "disconnect_confirm_action")
         assertFalse(
@@ -118,7 +121,7 @@ class UiShellSourceTest {
             source,
             "result is CaptureCommandResult.Accepted || result is CaptureCommandResult.NoActiveSession",
         )
-        assertContains(source, "refreshSessionLedger(activeConnection)")
+        assertContains(source, "refreshSessionLedger(activeConnection, generation)")
     }
 
     @Test
@@ -137,9 +140,18 @@ class UiShellSourceTest {
         assertContains(uiSource, "network_static_address_label")
         assertContains(uiSource, "val captureIdle = captureState == \"idle\"")
         assertContains(uiSource, "network_disabled_capture_status_missing")
-        assertContains(uiSource, "MutationResultPending")
-        assertContains(uiSource, "pendingNetworkMutationMessage")
-        assertContains(uiSource, "var passphrase by remember(bodyConnection?.origin)")
+        assertFalse(
+            uiSource.contains("MutationResultPending") || uiSource.contains("pendingNetworkMutationMessage"),
+            "A disconnected request must be a terminal client error, not a pending mutation state.",
+        )
+        assertFalse(
+            uiSource.contains("network_recovery_reconnect_target_lan") ||
+                uiSource.contains("network_recovery_reconnect_rescue_ap"),
+            "Wire recovery values must not become reconnect instructions in the product UI.",
+        )
+        assertContains(uiSource, "NetworkMessage.NetworkFailure(result.message)")
+        assertContains(uiSource, "NetworkMessage.NetworkFailure(eventResult.message)")
+        assertContains(uiSource, "var passphrase by remember(connectionGeneration)")
         assertFalse(
             uiSource.contains("var passphrase by rememberSaveable"),
             "Wi-Fi passphrase must not be stored in saved instance state.",
@@ -177,33 +189,35 @@ class UiShellSourceTest {
     }
 
     @Test
-    fun `safe swap request uses signed receipt flow instead of local inference`() {
+    fun `current product surface excludes retired removable storage workflow`() {
         val uiSource = echoAppSource()
-        val clientSource = File("src/main/java/com/openaria/openaria_echo_mobile/body/api/DeviceHttpClient.kt").readText()
+        val resources = listOf(
+            File("src/main/res/values/strings.xml"),
+            File("src/main/res/values-en/strings.xml"),
+        ).joinToString("\n") { it.readText() }
 
-        assertContains(clientSource, "stopCaptureForSafeSwap")
-        assertContains(clientSource, "buildCaptureStopBody(reason)")
-        assertContains(clientSource, "reason = \"safe_swap\"")
-        assertContains(uiSource, "confirmSafeSwap")
-        assertContains(uiSource, "safe_swap_confirm_title")
-        assertContains(uiSource, "SafeSwapMessage.WaitingForReceipt")
-        assertContains(uiSource, "captureStatus?.deviceState == \"recording\"")
-        assertContains(uiSource, "deviceClient.getSafeSwapReceipt(activeConnection)")
+        assertFalse(uiSource.contains("SafeSwap") || uiSource.contains("safeSwap") || uiSource.contains("safe_swap"))
+        assertFalse(resources.contains("safe_swap") || resources.contains("safe-swap") || resources.contains("安全换盘"))
+        assertContains(uiSource, "deviceClient.stopCapture(activeConnection, idempotencyKey)")
+        assertContains(uiSource, "refreshSessionLedger(activeConnection, generation)")
     }
 
     @Test
-    fun `foreground resume triggers authoritative status reconciliation`() {
+    fun `connection coordinator budgets requests and stops hidden preview`() {
         val uiSource = echoAppSource()
 
         assertContains(uiSource, "LifecycleEventObserver")
         assertContains(uiSource, "Lifecycle.Event.ON_RESUME")
-        assertContains(uiSource, "foregroundResumeTick")
-        assertContains(uiSource, "deviceClient.getCaptureStatus(activeConnection)")
-        assertContains(uiSource, "refreshSessionLedger(activeConnection)")
-        assertContains(uiSource, "deviceClient.getSafeSwapReceipt(activeConnection)")
-        assertContains(uiSource, "deviceClient.getCameraFocus(activeConnection)")
-        assertContains(uiSource, "foregroundResumeTick = foregroundResumeTick")
-        assertContains(uiSource, "reconcileNetworkStatus(activeConnection)")
+        assertContains(uiSource, "Lifecycle.Event.ON_PAUSE")
+        assertContains(uiSource, "appInForeground")
+        assertContains(uiSource, "connectionGeneration")
+        assertContains(uiSource, "captureStatusRequestGeneration")
+        assertContains(uiSource, "ReconciliationGate(ConnectionRequestPolicy.HEALTHY_RECONCILIATION_INTERVAL_MS)")
+        assertContains(uiSource, "selectedTab != EchoTab.VIEWFINDER")
+        assertContains(uiSource, "ConnectionRequestPolicy.PREVIEW_INTERVAL_MS")
+        assertContains(uiSource, "ConnectionRequestPolicy.canApplyResponse")
+        assertFalse(uiSource.contains("foregroundResumeTick"))
+        assertFalse(uiSource.contains("delay(5_000L)"))
     }
 
     @Test
@@ -215,8 +229,8 @@ class UiShellSourceTest {
         assertContains(clientSource, "validateErrorResponse")
         assertContains(clientSource, "PreviewResult.CameraNotConnected")
         assertContains(uiSource, "PreviewMessage.CameraNotConnected")
-        assertContains(uiSource, "previewBitmap = null")
-        assertContains(uiSource, "showPreviewStatusOverlay = previewBitmap == null || previewMessage != PreviewMessage.Live")
+        assertContains(uiSource, "previewFrame = null")
+        assertContains(uiSource, "showPreviewStatusOverlay = previewFrame == null || previewMessage != PreviewMessage.Live")
         assertContains(uiSource, "preview_camera_not_connected_body")
     }
 
@@ -234,7 +248,56 @@ class UiShellSourceTest {
         assertContains(uiSource, "onShowImuOverlayChange(false)")
         assertContains(uiSource, "label = stringResource(R.string.imu_overlay)")
         assertContains(uiSource, "selected = showImuOverlay")
-        assertContains(uiSource, "ToolStatus(stringResource(R.string.focus_peaking), false)")
+        assertContains(uiSource, "label = stringResource(R.string.focus_peaking)")
+        assertContains(uiSource, "selected = showFocusPeaking")
+    }
+
+    @Test
+    fun `focus peaking uses a bounded conflated generation fenced pipeline`() {
+        val uiSource = echoAppSource()
+        val focusSource = File("src/main/java/com/openaria/openaria_echo_mobile/ui/FocusPeaking.kt").readText()
+
+        assertContains(uiSource, "Channel<PreviewFrameWork>(Channel.CONFLATED)")
+        assertContains(uiSource, "Dispatchers.Default.limitedParallelism(1)")
+        assertContains(uiSource, "previewFrameGate.shouldPublish(work.ticket)")
+        assertContains(uiSource, "EchoColors.Peak.toArgb()")
+        assertContains(uiSource, "previewFrame = previewFrame?.copy(focusMask = null)")
+        assertContains(focusSource, "FOCUS_PROCESSING_PIXEL_BUDGET = 512 * 1024")
+        assertContains(focusSource, "PREVIEW_JPEG_BYTE_LIMIT = 8 * 1024 * 1024")
+        assertContains(focusSource, "inJustDecodeBounds = true")
+        assertContains(focusSource, "horizontal + vertical >= threshold")
+        assertTrue(
+            uiSource.indexOf("PreviewImage(previewFrame.image, previewMode)") <
+                uiSource.indexOf("FocusPeakOverlay(previewFrame.focusMask, previewMode)"),
+        )
+        assertTrue(
+            uiSource.indexOf("FocusPeakOverlay(previewFrame.focusMask, previewMode)") <
+                uiSource.indexOf("if (showGrid)"),
+        )
+        assertFalse(uiSource.contains("ToolStatus(stringResource(R.string.focus_peaking), false)"))
+    }
+
+    @Test
+    fun `back and accessibility semantics use ordered policy and native roles`() {
+        val uiSource = echoAppSource()
+        val backSource = File("src/main/java/com/openaria/openaria_echo_mobile/ui/BackNavigationPolicy.kt").readText()
+
+        assertContains(backSource, "state.confirmationVisible -> BackNavigationAction.DISMISS_CONFIRMATION")
+        assertContains(backSource, "state.sessionDetailVisible -> BackNavigationAction.CLOSE_SESSION_DETAIL")
+        assertContains(backSource, "state.sessionOutcomeVisible -> BackNavigationAction.CLOSE_SESSION_OUTCOME")
+        assertContains(backSource, "state.temporaryPanelVisible -> BackNavigationAction.CLOSE_TEMPORARY_PANEL")
+        assertContains(backSource, "!state.selectedTabIsViewfinder -> BackNavigationAction.RETURN_TO_VIEWFINDER")
+        assertContains(backSource, "state.recording -> BackNavigationAction.REQUEST_RECORDING_BACKGROUND_CONFIRMATION")
+        assertContains(backSource, "else -> BackNavigationAction.DEFAULT_SYSTEM_EXIT")
+        assertContains(uiSource, "detailGeneration != sessionDetailGeneration")
+        assertContains(uiSource, "outcomeGeneration != sessionOutcomeGeneration")
+        assertContains(uiSource, "role = Role.Switch")
+        assertContains(uiSource, ".selectableGroup()")
+        assertContains(uiSource, "role = Role.RadioButton")
+        assertContains(uiSource, "paneTitle = title")
+        assertContains(uiSource, ".semantics { heading() }")
+        assertContains(uiSource, "contentDescription = label")
+        assertContains(uiSource, "context.findActivity()?.moveTaskToBack(true)")
     }
 
     @Test

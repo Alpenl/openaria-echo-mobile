@@ -39,13 +39,13 @@ class ArtifactDownloadStore(context: Context) {
         }
         val downloadPlan = preparation as ArtifactPreparationPlan.Download
 
-        if (downloadPlan.deleteTargetBeforeDownload && target.exists() && !target.delete()) {
-            notifier.failed(artifact)
-            return ArtifactFileResult.Failed("could not replace existing artifact")
-        }
         if (downloadPlan.deletePartialBeforeDownload && partial.exists() && !partial.delete()) {
             notifier.failed(artifact)
             return ArtifactFileResult.Failed("could not remove stale partial download")
+        }
+        if (downloadPlan.deleteTargetBeforeDownload && target.exists() && !target.delete()) {
+            notifier.failed(artifact)
+            return ArtifactFileResult.Failed("could not replace existing artifact")
         }
 
         when (val head = client.headSessionArtifact(connection, sessionId, artifact)) {
@@ -56,15 +56,15 @@ class ArtifactDownloadStore(context: Context) {
             }
         }
 
-        notifier.running(artifact, downloadPlan.resumeFromBytes)
+        notifier.running(artifact, 0L)
         val result = try {
-            FileOutputStream(partial, downloadPlan.resumeFromBytes > 0L).use { output ->
+            FileOutputStream(partial, false).use { output ->
                 client.downloadSessionArtifact(
                     connection = connection,
                     sessionId = sessionId,
                     artifact = artifact,
                     output = output,
-                    resumeFromBytes = downloadPlan.resumeFromBytes,
+                    resumeFromBytes = 0L,
                     shouldCancel = shouldCancel,
                     onBytesWritten = { bytes -> notifier.running(artifact, bytes) },
                 )
@@ -83,33 +83,47 @@ class ArtifactDownloadStore(context: Context) {
         ) {
             ArtifactCompletionPlan.Publish -> {
                 if (target.exists() && !target.delete()) {
-                    partial.delete()
+                    val partialRemoved = partial.discard()
                     notifier.failed(artifact)
-                    return ArtifactFileResult.Failed("could not replace existing artifact")
+                    return ArtifactFileResult.Failed(
+                        if (partialRemoved) {
+                            "could not replace existing artifact"
+                        } else {
+                            "could not replace existing artifact or remove partial download"
+                        },
+                    )
                 }
                 if (!partial.renameTo(target)) {
-                    partial.delete()
+                    val partialRemoved = partial.discard()
                     notifier.failed(artifact)
-                    return ArtifactFileResult.Failed("could not finalize artifact")
+                    return ArtifactFileResult.Failed(
+                        if (partialRemoved) {
+                            "could not finalize artifact"
+                        } else {
+                            "could not finalize artifact or remove partial download"
+                        },
+                    )
                 }
                 notifier.saved(artifact, target.absolutePath)
                 ArtifactFileResult.Saved(target.absolutePath, artifact.bytes, artifact.mediaType)
             }
-            is ArtifactCompletionPlan.KeepPartialAndReject -> {
-                if (completion.reason is ArtifactDownloadResult.Cancelled) {
-                    notifier.cancelled(artifact)
-                } else {
-                    notifier.failed(artifact)
-                }
-                ArtifactFileResult.DownloadRejected(completion.reason)
-            }
             is ArtifactCompletionPlan.DeletePartialAndReject -> {
-                partial.delete()
-                notifier.failed(artifact)
-                ArtifactFileResult.DownloadRejected(completion.reason)
+                if (!partial.discard()) {
+                    notifier.failed(artifact)
+                    ArtifactFileResult.Failed("could not remove partial download")
+                } else {
+                    if (completion.reason is ArtifactDownloadResult.Cancelled) {
+                        notifier.cancelled(artifact)
+                    } else {
+                        notifier.failed(artifact)
+                    }
+                    ArtifactFileResult.DownloadRejected(completion.reason)
+                }
             }
         }
     }
+
+    private fun File.discard(): Boolean = !exists() || delete()
 
     private fun File.sha256(): String {
         val digest = MessageDigest.getInstance("SHA-256")

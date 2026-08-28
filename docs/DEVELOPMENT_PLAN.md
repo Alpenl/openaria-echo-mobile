@@ -3,7 +3,7 @@
 > 状态：执行基线；实施时随权威契约变更更新
 > 日期：2026-08-28
 > 范围：Android 客户端从高保真 Canvas 原型升级为可真实控制 OpenAria 机身的生产应用
-> 不可变约束：保留现有配色；默认简体中文；第一阶段只支持简体中文和英文；Device API v4 是唯一设备契约
+> 不可变约束：保留现有配色；默认简体中文；第一阶段只支持简体中文和英文；Device API v4 是唯一设备契约；遵循 Score D-049，不实现可移除介质、换盘或意外中断恢复
 
 ## 1. 目标与工程判断
 
@@ -12,11 +12,11 @@
 本计划的最终目标是交付一个具备以下属性的 Android 应用：
 
 - 所有设备、录制、存储和网络事实都来自 Device API v4，不再展示伪造状态或固定指标。
-- 能发现、手动添加、鉴权并连接真实机身，断线后能够明确提示和自动对账。
+- 能发现、手动添加、鉴权并连接真实机身；断线后明确提示，由用户发起普通重连，不承诺恢复中断操作。
 - 能稳定显示真实双目预览，支持双目、左眼、右眼、网格、对焦峰值和 IMU 叠加层。
-- 能开始和停止普通录制及能力允许的标定录制，并正确呈现封存、校验、失败和安全换盘状态。
+- 能开始和停止普通录制及能力允许的标定录制，并正确呈现封存、校验和失败状态。
 - 能查看会话、区分生产方结果与独立可用性判定、下载和校验制品。
-- 能查看和变更网络，正确处理切换过程中控制链路断开、结果未知和救援热点恢复。
+- 能查看和变更网络，呈现设备明确返回的事务结果和正常的有界回退。
 - 顶部、底部、弹层、横竖屏和大字体布局稳定，不与状态栏、摄像头开孔、手势区重叠。
 - 中文是首次安装默认语言，英文可在应用内切换；普通界面不再中英混排。
 - TalkBack、键盘/开关控制、动态字体和颜色对比达到可用标准。
@@ -28,7 +28,7 @@
 
 ### 2.1 设备事实优先
 
-- 移动端只投影机身权威快照，不创建本地“正在录制”“已经安全换盘”等乐观事实。
+- 移动端只投影机身权威快照，不创建本地“正在录制”“已经封存”等乐观事实。
 - 点击快门后可以显示“正在发送命令”，但只有设备返回的快照进入 `recording` 后，界面才能显示“正在录制”。
 - SSE 事件只负责加速更新，不是唯一真相来源。缺事件、修订号跳跃、恢复前台或重新联网时必须重新读取 HTTP 权威快照。
 - 同一 `authority_epoch` 内只接受不倒退的 `source_revision`；切换 epoch 时清理所有与旧权威绑定的暂态回执和推断。
@@ -39,18 +39,16 @@
 - 预览是可丢帧、可短暂不可用的最新 JPEG 画面，不是录制成功的证据。
 - 预览断流时不改变权威录制状态；录制仍在进行时要同时显示“设备仍在录制”和“预览不可用”。
 - 预览客户端采用单槽覆盖策略：始终只保留最新一帧，旧帧丢弃，绝不向机身采集链路施加背压。
-- 相机未接入、暂时无帧、网络中断和鉴权失败是四种不同状态，文案和恢复动作不能混为一谈。
+- 相机未接入、暂时无帧、网络中断和鉴权失败是四种不同状态，文案和普通重试动作不能混为一谈。
 
-### 2.3 危险操作必须可证明
+### 2.3 危险操作必须有明确结果
 
-- 安全换盘只由合法回执驱动，不能从“已经停止”“设备待机”或“会话出现在列表”推断。
-- 回执至少校验 schema、authority epoch、source revision、volume、generation、session、release state 和 `open_handle_count = 0`。
-- 网络切换可能主动断开当前链路；回执前断线时，结果必须显示为“待重新连接后确认”，不能显示成功或失败。
+- 网络命令只展示设备明确返回的结果；响应丢失或链路断开时显示 disconnected/error，不推断结果或恢复中断事务。
 - 应用退出、切后台、旋转屏幕和进程被杀都不能隐式发送停止录制命令。
 
 ### 2.4 完成度优先于控件数量
 
-- 任何看起来可点击的控件都必须有真实行为、禁用原因、进行中状态、成功结果和错误恢复路径。
+- 任何看起来可点击的控件都必须有真实行为、禁用原因、进行中状态、成功结果和普通重试路径。
 - 尚未接入的功能在生产构建中不显示，不保留当前这种无响应的 `Retry`、`Probe`、`Edit` 或 `Join` 胶囊。
 - 原始错误码可以作为诊断详情保留，但主文案必须是可理解的中文或英文，不直接把 `connection refused` 混进中文界面。
 
@@ -67,7 +65,7 @@
 | `inkMuted` | `#7D878C` | 辅助信息 |
 | `record` | `#FF3B2D` | 录制与危险停止 |
 | `caution` | `#E0A020` | 警告、过热、待确认 |
-| `permit` | `#46C98A` | 可写、已验证、可安全移除 |
+| `permit` | `#46C98A` | 可写、已验证、操作成功 |
 | `live` | `#7FE3F5` | 实时连接、选中态、同步良好 |
 | `peak` | `#E858FF` | 对焦峰值 |
 
@@ -89,7 +87,7 @@
 - API 根路径是 `/api/v4`。
 - 只支持 major 4；未知 major 和未知关键 schema 必须 fail closed，不能静默降级到 v3。
 - 已确认的能力包括 `capture`、`preview`、`range_download`、`network_mutation` 和 `calibration_capture`。
-- 已确认的资源包括设备描述、采集状态、采集 SSE、安全换盘、JPEG 预览、相机对焦、网络状态/扫描/凭据/事务/SSE、会话列表/详情/未成功结果和 Range 制品。
+- 已确认的当前产品资源包括设备描述、采集状态、采集 SSE、JPEG 预览、相机对焦、网络状态/扫描/凭据/事务/SSE、会话列表/详情/未成功结果和 Range 制品。
 - start、stop 和网络变更命令要求幂等键；重试同一用户意图时必须复用同一键，不能重复创建会话或事务。
 - Bearer token 只能放在请求头，不进入 URL、日志、全局 UI 状态或崩溃报告。
 
@@ -124,7 +122,7 @@
 | 取景 | Viewfinder | 实时预览、录制命令、画面辅助 |
 | 会话 | Sessions | 台账、筛选、详情、制品 |
 | 机身 | Body | 身份、相机、存储、能力、更新与应用设置 |
-| 网络 | Network | 当前链路、扫描、切换事务与恢复 |
+| 网络 | Network | 当前链路、扫描与正常切换事务 |
 
 底栏高度为稳定的内容高度加 `navigationBars`/`mandatorySystemGestures` 底部 inset。切换页面时，四个入口的中心点和文字基线必须保持 0dp 位移。
 
@@ -192,7 +190,6 @@
 - 录制中显示会话名称、时长、帧数、写入量；本地只允许对权威 elapsed 做单调插值，不能编造其他指标。
 - finalizing、encoding（若 v4 契约仍保留）、verifying 各有明确中文状态，快门保持禁用。
 - recoverable、failed、abandoned 显示诊断和下一步动作，不自动把历史失败反复弹成新告警。
-- “安全换盘”是独立危险操作，触发 stop reason `safe_swap`，之后持续等待合法回执。
 - 标定录制只在 `calibration_capture.enabled = true` 时显示为可用；禁用时显示设备给出的具体原因。
 
 视觉标准：
@@ -214,9 +211,9 @@
 - 未成功会话读取只读 outcome，不把查询动作解释为恢复。
 - 详情展示 capture mode、设备、take 关系、相机/视频/音频/帧/IMU、完整性和诊断。
 - 制品按 `artifact_id` 操作，不从 path 或文件名猜角色。
-- 下载支持 HEAD/Range、暂停后续传、进度通知、取消和 SHA-256 校验；大文件通过前台 WorkManager 类任务执行。
+- 下载支持 HEAD/Range 响应校验、进度通知、取消和 SHA-256 校验；每次用户下载从 byte 0 开始，大文件通过前台 WorkManager 类任务执行。
 - 已下载的受支持媒体可以用系统播放器或应用内 Media3 播放；不支持的媒体提供“打开方式”和“分享”。
-- 下载失败保留临时进度和明确重试；哈希不一致时删除不可用结果并显示完整性错误。
+- 下载失败或取消时清理本次临时文件，普通重试重新完整下载；哈希不一致时删除不可用结果并显示完整性错误。
 
 界面标准：
 
@@ -232,7 +229,7 @@
 - 设备 ID、标签、hardware fingerprint、package version、commit、build ID、security profile。
 - capability 列表及不可用原因。
 - 相机连接、对焦状态、温度、连接方式和 IMU 同步质量。
-- 存储卷 ID、总量、剩余量、可写状态和安全换盘许可。
+- 固定存储的总量、剩余量和可写状态。
 - 手动刷新、断开机身、删除已保存令牌和清除连接历史。
 - 保留现有签名 Android release manifest 更新能力：检查更新、版本说明、下载、SHA-256/签名校验、调用系统安装确认。
 - 应用语言设置只提供“中文”和 `English` 两项；首次安装明确写入中文默认值。
@@ -254,7 +251,7 @@
 - 支持热点、Wi-Fi client、有线 DHCP 和有线静态 IPv4 四种期望状态。
 - 支持 apply、retry、forget，严格遵循 `mutation_capability`、idle-only 和单事务并发限制。
 - 展示 accepted、prepared、ap ready、activating、verifying、committed、falling back、rescued、failed 等事务阶段的中文解释。
-- 若提交后链路断开，进入“结果待确认”，按照 recovery action 引导重新连接目标 LAN 或 Rescue AP，连接恢复后从权威网络状态对账。
+- 若提交后链路断开或没有明确响应，显示 disconnected/error 并结束本次客户端意图；不自动恢复或重放事务。
 - 录制中或 rescue AP 未验证时禁用变更，并展示设备提供的 disabled reason。
 
 界面标准：
@@ -274,9 +271,8 @@
 | `probing` | 正在验证 v4 identity/capability | 取消 |
 | `credentialsRequired` | 机身要求令牌 | 输入、仅本次使用、保存、取消 |
 | `connected` | 初始快照有效且控制链路已建立 | 全部按 capability 开放的操作 |
-| `reconnecting` | 曾连接成功，事件或 HTTP 暂时断开 | 查看最后权威状态，封锁新命令，手动重试 |
 | `incompatible` | major/schema/capability 不受支持 | 查看诊断、返回候选列表 |
-| `disconnected` | 无法恢复或用户主动断开 | 重连、忘记机身、返回列表 |
+| `disconnected` | 链路中断或用户主动断开 | 手动重连、忘记机身、返回列表 |
 
 `connected` 不能仅凭 socket 建立或收到一张预览帧判定；必须有通过校验的设备描述和采集快照。
 
@@ -302,11 +298,11 @@ UI 必须按 v4 snapshot 原值映射，不能因为 Web 类型当前允许某�
 | finalizing | 正在封存 | 禁止重复停止和开始 |
 | encoding | 正在编码 | 仅在 v4 正式枚举存在时显示 |
 | verifying | 正在校验 | 禁止开始，显示步骤进度 |
-| recoverable | 可恢复 | 展示诊断和契约允许的恢复动作 |
+| recoverable | 设备报告可恢复 | 只展示诊断，不由移动端执行恢复 |
 | failed | 录制失败 | 保留结果，禁止伪装成待机成功 |
 | abandoned | 已放弃 | 保留结果并进入会话台账 |
 
-“会话已经 sealed 并进入台账”与“设备回到 idle”是相关但不同的事实。停止后要分别对账采集状态、设备/存储、安全换盘回执和会话列表。
+“会话已经 sealed 并进入台账”与“设备回到 idle”是相关但不同的事实。停止后要分别对账采集状态、固定存储和会话列表。
 
 ### 6.4 命令暂态
 
@@ -315,7 +311,7 @@ UI 必须按 v4 snapshot 原值映射，不能因为 Web 类型当前允许某�
 - `ready`：可以提交。
 - `submitting`：请求尚未得到响应，禁用重复点击。
 - `accepted`：收到了命令响应，等待权威快照收敛。
-- `indeterminate`：提交可能已经到达设备，但响应前断线；保留幂等键并在重连后对账。
+- `transportFailed`：请求没有得到明确响应；显示失败并结束客户端意图，不承诺恢复。
 - `settled`：权威状态已经确认结果。
 - `failed`：设备明确拒绝或请求确认未提交。
 
@@ -348,7 +344,7 @@ start、stop、network apply/retry/forget 各自维护用户意图和幂等键�
 | `BodySession` | 连接、断开、权威 `StateFlow`、采集/对焦/网络命令 | v4 校验、鉴权头、SSE、修订号、重连、幂等、HTTP 对账 |
 | `PreviewFeed` | `StateFlow<PreviewState>` 与最新帧流 | JPEG 请求循环、取消、限速、单槽丢帧、解码、内存回收 |
 | `SessionCatalog` | 分页列表、详情、未成功结果 | 游标、封存后重试、artifact identity、错误映射 |
-| `ArtifactTransfer` | 下载、取消、恢复、校验、打开 | Range、临时文件、前台任务、SHA-256、MediaStore/SAF |
+| `ArtifactTransfer` | 下载、取消、临时清理、校验、打开 | Range 响应约束、临时文件、前台任务、SHA-256、MediaStore/SAF |
 | `BodyDiscovery` | 候选流、手动目标校验、历史 | Android NSD、去重、TTL、地址规范化、持久化 |
 | `CredentialVault` | 读取、保存、删除机身令牌 | Android Keystore、密文存储、迁移、日志脱敏 |
 | `AppUpdate` | 检查、下载、验证、安装状态 | 现有 release manifest、签名、FileProvider、系统安装器 |
@@ -426,12 +422,12 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 
 1. `GET /device`，严格校验 v4 major、schema 和 capability 形状。
 2. `GET /capture/status`，建立 `authority_epoch + source_revision` 基线。
-3. 并行读取可选的 focus、network、safe-swap 和首屏 sessions。
+3. 并行读取可选的 focus、network 和首屏 sessions；同一 endpoint 保持 single-flight。
 4. 建立 capture/network SSE，并使用 `Last-Event-ID` 续接传输。
-5. 启动 preview latest-frame loop。
+5. 仅在应用前台且取景页可见时启动串行 preview latest-frame loop。
 6. SSE snapshot 只有 revision 严格 `current + 1` 时可以快路径投影；gap、epoch 变化、非法 envelope 一律 HTTP refetch。
-7. 前台每 2 秒对账 capture，打开的次级页每 5 秒对账；实际频率在真机功耗测试后可调整。
-8. 应用回到前台、网络恢复、SSE 重连和命令完成后立即对账。
+7. 健康 SSE 下 HTTP aggregate reconciliation 固定为每 30 秒一次，即一分钟内最多两次；SSE 明确不可用时使用 2/4/8/16/30 秒有界退避。
+8. 应用回到前台执行一次 bootstrap；会话和对焦只在进入对应页面或相关事件后刷新，页面隐藏或连接代次结束时取消请求并拒绝晚响应。
 
 ### 7.5 预览实现细节
 
@@ -467,7 +463,6 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 | 结束录制 | Stop recording | 不暗示已经封存 |
 | 正在封存 | Finalizing | 与停止请求分离 |
 | 正在校验 | Verifying | 显示真实进度 |
-| 安全换盘 | Safe swap | 专用操作 |
 | 双目 / 左眼 / 右眼 | Both / Left / Right | 检视模式 |
 | 对焦峰值 | Focus peaking | 摄影术语本地化 |
 | 访问令牌 | Access token | token 不直接写中文音译 |
@@ -533,10 +528,10 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 - 每个按钮、分段项、开关、滑杆、列表项和状态有独立语义节点。
 - 图标按钮有 content description；装饰图形不进入语义树。
 - 快门读作“开始录制 / 结束录制 / 正在发送”，并暴露 disabled 状态。
-- 连接、录制、错误和安全换盘状态通过适度 live region 播报；每帧预览和每 50ms 计时绝不播报。
+- 连接、录制和错误状态通过适度 live region 播报；每帧预览和每 50ms 计时绝不播报。
 - 触控目标至少 48dp；快门和危险操作更大。
 - 焦点顺序遵循顶部状态 -> 页面内容 -> 主要命令 -> 底部导航。
-- 不能只靠颜色表达录制、警告、可写或可移除。
+- 不能只靠颜色表达录制、警告、可写或可用状态。
 - 2.0 字体缩放下允许换行和纵向滚动，文字不被按钮遮挡、不被截断。
 
 ### 10.3 视觉细节
@@ -556,9 +551,10 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 
 - 同 epoch 旧 revision 被丢弃；新 epoch 清除旧 receipt 和暂态。
 - SSE 严格 `+1` 快路径、gap HTTP refetch、非法 envelope 拒绝。
-- 断线期间 start/stop 不产生本地 recording；命令结果未知后的对账。
+- 断线期间 start/stop 不产生本地 recording；没有明确响应时不得推断结果。
 - start/stop 幂等键在一次用户意图内稳定，不跨意图复用。
-- safe-swap 全部身份和 release 条件校验。
+- connection generation 和请求前 revision baseline 阻止旧 poll 覆盖较新 SSE。
+- 模拟时钟验证健康 SSE 下每分钟至多两次 HTTP 状态读取，并验证 fallback 退避上限。
 - retained unsuccessful 只在本页观察到新终态时播报，不重放历史告警。
 - 网络 snapshot 修订号、credential receipt、transaction receipt 和跨字段约束。
 - preview 单槽、取消、503 分类、Content-Type 校验和资源释放。
@@ -572,7 +568,7 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 - 从 Web fixture server 等价场景移植行为，不复制 Preact UI 细节。
 - 测试未知 major、未知关键字段、401、403、429、5xx、慢响应、半包 SSE、重复事件、断流和 epoch 切换。
 - 预览测试验证最大 in-flight 为 1、慢客户端不积压、旧 bitmap 被释放。
-- 制品测试覆盖 Range 续传、服务端忽略 Range、长度变化、哈希错误、取消和恢复。
+- 制品测试覆盖 Range 响应约束、服务端忽略 Range、长度变化、哈希错误、取消/失败后清理 partial，以及普通重试从 byte 0 开始。
 
 ### 11.3 UI 与截图测试
 
@@ -584,9 +580,9 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 
 ### 11.4 真机与性能测试
 
-- 至少一台 RDK X5/OpenAria 机身完成 30 分钟普通录制、标定录制、停止、校验、会话下载和安全换盘闭环。
+- 至少一台 RDK X5/OpenAria 机身完成 30 分钟普通录制、标定录制、停止、校验和会话下载闭环。
 - 热插拔相机：控制面保持可用，预览清空，录制准入锁定；重新接入后自动恢复。
-- Wi-Fi 切换导致控制链路断开：应用进入结果待确认，能通过目标 LAN 或 Rescue AP 恢复并对账。
+- Wi-Fi 切换若导致控制链路断开：应用显示 disconnected/error，不自动重放或恢复事务。
 - 预览健康网络首帧目标不超过 3 秒；等待期间始终有明确状态。
 - 连续预览 30 分钟堆内存无持续增长，最多一个请求、一个待解码帧、一个显示帧。
 - 主线程不做网络、JPEG 解码、SHA-256 或峰值处理；无 ANR。
@@ -653,7 +649,7 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 - `M2-003` 实现历史记录与手动连接 UI。
 - `M2-004` 实现 v4 `/device` probe、major/schema/capability fail-closed validators。
 - `M2-005` 实现 credential prompt、Android Keystore Adapter、401 重新鉴权和删除令牌。
-- `M2-006` 实现初始 capture/network/focus/safe-swap 加载、连接状态机和取消。
+- `M2-006` 实现初始 capture/network/focus/sessions 加载、连接状态机和取消。
 - `M2-007` 接入 capture/network SSE，完成 Last-Event-ID、重连和 HTTP reconciliation。
 - `M2-008` 覆盖超时、TLS、无网络、未知 major、schema 错误和 token 失效测试。
 
@@ -662,7 +658,7 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 - 能从附近、历史和手动地址连接真机。
 - 未完成验证前绝不进入工作台或显示 ready。
 - token 重启后可恢复、删除后不可恢复，日志和全局状态无明文。
-- 断线时新命令全部封锁，重连后权威状态收敛。
+- 断线时新命令全部封锁；用户普通重连后重新执行 bootstrap，不恢复旧操作。
 
 ### Phase 3：真实预览与画面工具（6 至 9 天）
 
@@ -684,7 +680,7 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 - 最大 in-flight 请求为 1，堆内存无持续增长，UI 无明显卡顿。
 - 眼位、网格、峰值、IMU 和对焦控件都有真实行为及无障碍语义。
 
-### Phase 4：录制、状态对账和安全换盘（5 至 8 天）
+### Phase 4：录制与状态对账（5 至 8 天）
 
 任务：
 
@@ -693,16 +689,14 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 - `M4-003` 实现录制准入矩阵与全部禁用原因。
 - `M4-004` 呈现权威时长、帧数、写入、编码/校验步骤和诊断。
 - `M4-005` 实现停止后的快速/退避对账和封存会话刷新。
-- `M4-006` 实现 safe-swap 请求、typed receipt 全项校验和“可移除”许可。
-- `M4-007` 实现 capability-gated calibration capture。
-- `M4-008` 覆盖重复点击、超时、请求后断线、SSE gap、epoch restart、failed/recoverable/abandoned。
+- `M4-006` 实现 capability-gated calibration capture。
+- `M4-007` 覆盖重复点击、超时、SSE gap、epoch restart、failed/recoverable/abandoned。
 
 退出标准：
 
 - 无机身或命令失败时不会出现 recording、固定帧数或固定写入量。
-- 设备已经开始但响应丢失时，应用最终通过对账显示真实状态且不重复创建 session。
-- 停止、封存、校验、失败和安全换盘每一步均可区分。
-- 只有合法回执能显示“可以安全移除”。
+- 设备响应明确时应用显示权威状态；响应丢失时显示失败且不自动重放命令。
+- 停止、封存、校验和失败每一步均可区分。
 
 ### Phase 5：会话、制品与下载（5 至 8 天）
 
@@ -711,10 +705,10 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 - `M5-001` 实现 cursor paging、refresh、local query/filter 和列表诊断。
 - `M5-002` 实现 session detail、unsuccessful outcome 和 producer/usability 双结果。
 - `M5-003` 实现 sealed session 最终可见的退避刷新。
-- `M5-004` 实现 artifact identity、HEAD/Range 下载、取消、续传和 SHA-256。
+- `M5-004` 实现 artifact identity、HEAD/Range 响应约束、取消/失败清理、普通重试从 byte 0 开始和 SHA-256。
 - `M5-005` 实现前台下载通知、MediaStore/SAF 发布、打开和分享。
 - `M5-006` 对支持格式接入 Media3 本地播放；不支持格式交给系统应用。
-- `M5-007` 覆盖分页重复项、详情竞态、Range 被忽略、哈希错误、空间不足和进程重建。
+- `M5-007` 覆盖分页重复项、详情竞态、Range 被忽略和哈希错误。
 
 退出标准：
 
@@ -730,7 +724,7 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 - `M6-002` 完成网络 observed/desired/current transaction 投影和 revision 规则。
 - `M6-003` 完成扫描、Wi-Fi secret -> credential ref、hotspot、Ethernet DHCP/static 表单。
 - `M6-004` 完成 apply/retry/forget、disabled reason 和单事务封锁。
-- `M6-005` 完成 outcome indeterminate、recovery action、目标 LAN/Rescue AP 重连引导和对账。
+- `M6-005` 完成明确事务结果、正常回退状态和断链错误呈现，不实现中断事务恢复。
 - `M6-006` 把现有 AppUpdateManager 接入真实 Compose UI，覆盖检查、下载、验证、安装和错误。
 - `M6-007` 完成断开、忘记令牌、清理历史、语言与应用信息设置。
 - `M6-008` 真机执行网络切换、失败回退、录制中禁用和更新 smoke test。
@@ -739,7 +733,7 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 
 - 当前所有可见网络控件均有真实行为，没有 dead Join/Retry/Edit。
 - Wi-Fi 密码不进入全局状态或日志。
-- 网络切换断链不会被误报为失败或成功，恢复后能对账。
+- 网络切换断链显示明确错误，不误报成功，也不自动恢复事务。
 - App update 从检查到系统安装确认形成闭环。
 
 ### Phase 7：可访问性、响应式与视觉精修（4 至 7 天）
@@ -765,8 +759,8 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 
 任务：
 
-- `M8-001` 完成真机 30 分钟采集、异常断电/断网、恢复、下载和安全换盘验收。
-- `M8-002` 完成性能 profile、内存泄漏、StrictMode、ANR、后台恢复和冷启动检查。
+- `M8-001` 完成真机 30 分钟正常采集、停止、校验和下载验收。
+- `M8-002` 完成性能 profile、内存泄漏、StrictMode、ANR、后台请求取消、前台 bootstrap 和冷启动检查。
 - `M8-003` 完成 release network/security/signing/update 审核。
 - `M8-004` 完成升级迁移：旧版本首次启动默认中文、无假历史/假 token、设置不崩溃。
 - `M8-005` 运行完整 dogfood，所有 critical/high issue 必须关闭并保留新证据。
@@ -802,17 +796,16 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 17. `ui: add grid focus peaking IMU and focus controls`
 18. `capture: add idempotent start stop and admission rules`
 19. `capture: add terminal reconciliation and diagnostics`
-20. `capture: add typed safe-swap receipt validation`
-21. `capture: add calibration recording capability flow`
-22. `sessions: add paging filters detail and outcomes`
-23. `sessions: add resumable verified artifact downloads`
-24. `network: add status scan and credential submission`
-25. `network: add transition recovery and authoritative reconciliation`
-26. `body: add device storage capability and app update screens`
-27. `accessibility: complete semantics back behavior and large text`
-28. `test: add full emulator real-body and release acceptance gates`
-29. `refactor: remove legacy Canvas prototype after parity`
-30. `release: prepare first production-capable mobile candidate`
+20. `capture: add calibration recording capability flow`
+21. `sessions: add paging filters detail and outcomes`
+22. `sessions: add resumable verified artifact downloads`
+23. `network: add status scan and credential submission`
+24. `network: add transition recovery and authoritative reconciliation`
+25. `body: add device storage capability and app update screens`
+26. `accessibility: complete semantics back behavior and large text`
+27. `test: add full emulator real-body and release acceptance gates`
+28. `refactor: remove legacy Canvas prototype after parity`
+29. `release: prepare first production-capable mobile candidate`
 
 不得在实现完成前先删除 `AppUpdateManager` 的可用发布路径；Legacy Canvas 应在新工作台达到功能和视觉 parity 后一次性移除，避免两套 UI 长期并存。
 
@@ -858,11 +851,10 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 | 真机 preview FPS/分辨率未知 | JPEG 解码可能过热或卡顿 | Phase 0 测量；单槽丢帧；Phase 3 设 CPU/内存预算 |
 | focus peaking CPU 开销过高 | 预览掉帧和耗电 | 有界 512K 像素、降低处理频率；必要时替换为 GPU Adapter |
 | HTTP 本地设备与安全要求冲突 | token 在局域网明文传输 | HTTPS 优先；HTTP 限本地并警示；推动设备 TLS 是独立后续工作 |
-| 网络切换主动断开控制链路 | 用户误判结果、重复提交 | 幂等键、indeterminate 状态、Rescue AP 和重连后权威对账 |
+| 网络切换主动断开控制链路 | 用户误判结果、重复提交 | 显示 disconnected/error，结束本次客户端意图，不自动恢复或重放 |
 | 设备端状态枚举继续演进 | 客户端错误显示或错误降级 | v4 consumer manifest + fail closed + contract fixture CI |
 | Android 26 到 36 行为跨度大 | insets、后台和通知差异 | 双端 API 测试；平台 Adapter 集中兼容逻辑 |
 | Compose 重建与旧更新模块并存 | 迁移期间重复入口 | 更新功能只保留一个 Adapter；parity 后删除 Canvas |
-| 大文件下载和手机空间不足 | 半文件被误当完成 | 临时文件、Range、空间预检、SHA-256、原子发布 |
 | 没有稳定 RDK X5 测试机 | 真功能只能用 fixture 推断 | Phase 0 就把真机可用性设为阻断条件，不拖到发布前 |
 
 ## 16. Definition of Done
@@ -872,12 +864,11 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 - 冷启动没有真实机身时，不出现 ready、recording、固定温度、固定容量或固定 IMU。
 - 能通过附近、历史或手动地址连接 Device API v4；未知 major/schema 明确失败关闭。
 - token 安全存储，Wi-Fi 密码不持久化，不在 URL、日志、状态或测试截图中泄漏。
-- 预览显示真实 JPEG 帧；等待、暂不可用、相机断开、鉴权失败和网络断开均可区分和恢复。
+- 预览显示真实 JPEG 帧；等待、暂不可用、相机断开、鉴权失败和网络断开均可区分并支持普通重试。
 - 普通录制和能力允许的标定录制形成开始、进行、停止、封存、校验、会话可见的真实闭环。
 - 命令、SSE、HTTP snapshot、revision、epoch、重连和幂等规则均有自动测试。
-- 安全换盘只由完全匹配的回执开放。
-- 会话列表、详情、未成功结果、制品下载、续传和 SHA-256 校验可用。
-- 网络扫描、加入、热点、以太网、重试、忘记和恢复路径可用，录制中按 capability 禁用。
+- 会话列表、详情、未成功结果、制品下载、取消/失败清理、从头重试和 SHA-256 校验可用。
+- 网络扫描、加入、热点、以太网、普通重试、忘记和设备正常回退可用，录制中按 capability 禁用。
 - App 更新能力保留并通过签名/哈希验证。
 - 顶部避让状态栏和所有 cutout，底部避让系统导航，四个 tab 切换位移为 0dp。
 - 中文首次安装默认；切换英文后所有普通 UI、通知、错误和无障碍文案切换完整。
@@ -895,6 +886,7 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 - 不在手机上复制设备录制状态机或把本地状态作为恢复依据。
 - 不为了形式上的 Clean Architecture 创建大量一行转发的 repository/use-case/module。
 - 不改变现有配色，不引入默认 Material 蓝紫主题、装饰渐变或营销式首页。
-- 不把预览当成录制，不把停止当成封存，不把封存当成可安全移除。
+- 不把预览当成录制，不把停止请求当成已经封存。
+- 不实现真实 TF p3、可移除介质、ENOSPC、安全换盘、掉电或操作中断恢复；冻结 wire 类型不构成产品能力。
 - 不在 release 构建保留 demo body、假指标、假成功或无行为按钮。
 - 不在没有 Device API 契约支持的情况下发明云账户、远程控制或设备固件升级接口。

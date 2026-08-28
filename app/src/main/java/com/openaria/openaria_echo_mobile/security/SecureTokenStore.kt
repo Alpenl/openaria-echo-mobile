@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import java.net.URI
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -25,7 +26,13 @@ class SecureTokenStore(context: Context) {
             return StoreResult.Failed("empty token")
         }
 
-        return saveEncrypted(prefix = originTokenPrefix(normalizedOrigin), token = normalizedToken)
+        return saveEncrypted(prefix = originTokenPrefix(normalizedOrigin), token = normalizedToken).also { result ->
+            if (result == StoreResult.Saved) {
+                legacyExplicitDefaultPortOrigin(normalizedOrigin)?.let { legacyOrigin ->
+                    clearEncrypted(originTokenPrefix(legacyOrigin))
+                }
+            }
+        }
     }
 
     fun saveForVerifiedBody(origin: String, deviceId: String, token: String): StoreResult {
@@ -40,9 +47,12 @@ class SecureTokenStore(context: Context) {
 
         return when (val result = saveEncrypted(prefix = bodyTokenPrefix(normalizedDeviceId), token = normalizedToken)) {
             StoreResult.Saved -> {
-                preferences.edit()
-                    .putString(originIndexKey(normalizedOrigin), normalizedDeviceId)
-                    .apply()
+                preferences.edit().apply {
+                    putString(originIndexKey(normalizedOrigin), normalizedDeviceId)
+                    legacyExplicitDefaultPortOrigin(normalizedOrigin)?.let { legacyOrigin ->
+                        remove(originIndexKey(legacyOrigin))
+                    }
+                }.apply()
                 StoreResult.Saved
             }
             is StoreResult.Failed -> result
@@ -51,33 +61,67 @@ class SecureTokenStore(context: Context) {
 
     fun load(origin: String): String? {
         val normalizedOrigin = normalizeOrigin(origin) ?: return null
-        val indexedDeviceId = preferences.getString(originIndexKey(normalizedOrigin), null)
-        if (!indexedDeviceId.isNullOrBlank()) {
-            loadEncrypted(bodyTokenPrefix(indexedDeviceId))?.let { return it }
+        val aliases = originAliases(normalizedOrigin)
+        for (alias in aliases) {
+            val indexedDeviceId = preferences.getString(originIndexKey(alias), null)
+            if (!indexedDeviceId.isNullOrBlank()) {
+                if (alias != normalizedOrigin) {
+                    preferences.edit()
+                        .putString(originIndexKey(normalizedOrigin), indexedDeviceId)
+                        .remove(originIndexKey(alias))
+                        .apply()
+                }
+                loadEncrypted(bodyTokenPrefix(indexedDeviceId))?.let { return it }
+            }
         }
-        loadEncrypted(originTokenPrefix(normalizedOrigin))?.let { return it }
-        return loadLegacySingleOrigin(normalizedOrigin)
+        for (alias in aliases) {
+            loadEncrypted(originTokenPrefix(alias))?.let { token ->
+                if (alias != normalizedOrigin) {
+                    if (saveEncrypted(originTokenPrefix(normalizedOrigin), token) == StoreResult.Saved) {
+                        clearEncrypted(originTokenPrefix(alias))
+                    }
+                }
+                return token
+            }
+        }
+        for (alias in aliases) {
+            loadLegacySingleOrigin(alias)?.let { token ->
+                if (alias != normalizedOrigin) {
+                    if (saveEncrypted(originTokenPrefix(normalizedOrigin), token) == StoreResult.Saved) {
+                        clearLegacySingleOrigin()
+                    }
+                }
+                return token
+            }
+        }
+        return null
     }
 
     fun hasTokenFor(origin: String): Boolean {
         val normalizedOrigin = normalizeOrigin(origin) ?: return false
-        val indexedDeviceId = preferences.getString(originIndexKey(normalizedOrigin), null)
-        return (!indexedDeviceId.isNullOrBlank() && hasEncryptedToken(bodyTokenPrefix(indexedDeviceId))) ||
-            hasEncryptedToken(originTokenPrefix(normalizedOrigin)) ||
-            hasLegacySingleOriginToken(normalizedOrigin)
+        return originAliases(normalizedOrigin).any { alias ->
+            val indexedDeviceId = preferences.getString(originIndexKey(alias), null)
+            (!indexedDeviceId.isNullOrBlank() && hasEncryptedToken(bodyTokenPrefix(indexedDeviceId))) ||
+                hasEncryptedToken(originTokenPrefix(alias)) ||
+                hasLegacySingleOriginToken(alias)
+        }
     }
 
     fun clear(origin: String) {
         val normalizedOrigin = normalizeOrigin(origin) ?: return
-        val indexedDeviceId = preferences.getString(originIndexKey(normalizedOrigin), null)
-        preferences.edit()
-            .remove(originIndexKey(normalizedOrigin))
-            .apply()
-        if (!indexedDeviceId.isNullOrBlank()) {
-            clearEncrypted(bodyTokenPrefix(indexedDeviceId))
+        val aliases = originAliases(normalizedOrigin)
+        val indexedDeviceIds = aliases
+            .mapNotNull { alias -> preferences.getString(originIndexKey(alias), null) }
+            .filter(String::isNotBlank)
+            .distinct()
+        preferences.edit().apply {
+            aliases.forEach { alias -> remove(originIndexKey(alias)) }
+        }.apply()
+        indexedDeviceIds.forEach { deviceId ->
+            clearEncrypted(bodyTokenPrefix(deviceId))
         }
-        clearEncrypted(originTokenPrefix(normalizedOrigin))
-        if (preferences.getString(KEY_ORIGIN, null) == normalizedOrigin) {
+        aliases.forEach { alias -> clearEncrypted(originTokenPrefix(alias)) }
+        if (preferences.getString(KEY_ORIGIN, null)?.let(aliases::contains) == true) {
             clearLegacySingleOrigin()
         }
     }
@@ -169,6 +213,11 @@ class SecureTokenStore(context: Context) {
         }
     }
 
+    private fun originAliases(normalizedOrigin: String): List<String> = buildList {
+        add(normalizedOrigin)
+        legacyExplicitDefaultPortOrigin(normalizedOrigin)?.let(::add)
+    }
+
     private fun normalizeDeviceId(deviceId: String): String? {
         val normalized = deviceId.trim()
         return normalized.takeIf {
@@ -221,5 +270,21 @@ class SecureTokenStore(context: Context) {
         private const val KEY_ORIGIN_INDEX_PREFIX = "origin_index:"
         private const val KEY_ORIGIN_TOKEN_PREFIX = "origin_token:"
         private const val KEY_BODY_TOKEN_PREFIX = "body_token:"
+    }
+}
+
+internal fun legacyExplicitDefaultPortOrigin(normalizedOrigin: String): String? {
+    return try {
+        val uri = URI(normalizedOrigin)
+        if (uri.port != -1 || uri.host.isNullOrBlank()) return null
+        val scheme = uri.scheme?.lowercase() ?: return null
+        val port = when (scheme) {
+            "http" -> 80
+            "https" -> 443
+            else -> return null
+        }
+        URI(scheme, null, uri.host, port, null, null, null).toString()
+    } catch (_: Exception) {
+        null
     }
 }

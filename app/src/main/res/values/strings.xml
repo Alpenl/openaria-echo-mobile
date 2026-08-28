@@ -42,6 +42,7 @@
     <string name="probe_invalid_response">机身响应不是受支持的 Device API v4：%1$s</string>
     <string name="probe_network_failure">无法访问机身：%1$s</string>
     <string name="probe_http_failure">Device API 请求失败：HTTP %1$d。</string>
+    <string name="probe_protocol_redirect">机身返回了不允许的重定向（HTTP %1$d）；连接已停止。</string>
     <string name="access_token">访问令牌</string>
     <string name="access_token_session_only">访问令牌（仅本次）</string>
     <string name="access_token_hint">Bearer token。可仅本次使用，也可保存到 Android Keystore 保护的本地密文。</string>
@@ -82,9 +83,11 @@
     <string name="capture_command_running_start">正在发送开始录制命令。</string>
     <string name="capture_command_running_calibration_start">正在发送开始标定采集命令。</string>
     <string name="capture_command_running_stop">正在发送停止录制命令。</string>
-    <string name="capture_command_running_safe_swap_stop">正在请求安全换盘：机身会先停止采集并封存当前会话。</string>
     <string name="capture_command_accepted">机身已接受采集命令，界面使用返回的权威快照更新。</string>
     <string name="capture_command_recording_continues_on_back">录制仍在机身继续。返回键不会停止采集；需要停止时请使用“停止”。</string>
+    <string name="recording_background_confirm_title">录制正在机身继续</string>
+    <string name="recording_background_confirm_body">这只会将 App 置于后台，不会向机身发送停止或断开命令。录制将继续，直到您返回并明确停止。</string>
+    <string name="recording_background_confirm_action">保持录制并退到后台</string>
     <string name="capture_command_no_active_session">当前没有活动会话；停止命令是成功的空操作。</string>
     <string name="capture_command_auth_required">采集命令需要访问令牌。</string>
     <string name="capture_command_forbidden">采集命令访问被拒绝。</string>
@@ -192,7 +195,7 @@
     <string name="unsuccessful_outcome_state_failed">失败</string>
     <string name="unsuccessful_outcome_state_abandoned">已放弃</string>
     <string name="artifact_download_running">正在下载 %1$s。</string>
-    <string name="artifact_download_cancelled">已取消下载 %1$s；临时 .part 文件不会显示为完整制品，后续可继续续传。</string>
+    <string name="artifact_download_cancelled">已取消下载 %1$s；本次临时 .part 文件已清理，重新下载会从头开始。</string>
     <string name="artifact_download_saved">已保存 %1$s（%2$d 字节）：%3$s</string>
     <string name="artifact_download_auth_required">下载 %1$s 需要访问令牌。</string>
     <string name="artifact_download_forbidden">下载 %1$s 被拒绝。</string>
@@ -211,7 +214,7 @@
     <string name="network_empty">连接机身后显示网络状态、扫描结果和网络切换事务。</string>
     <string name="network_no_fake">网络页只显示真实 Device API v4 能力；不可用操作会给出原因，不显示假按钮。</string>
     <string name="network_contract_scope_title">网络变更状态</string>
-    <string name="network_contract_scope_body">通过 Device API v4 读取 desired、observed、saved、verified、mDNS、事务窗口和 Rescue AP 对账；扫描、credential_ref、apply、retry、forget 均按设备声明的 mutation 能力启用。</string>
+    <string name="network_contract_scope_body">通过 Device API v4 只读展示 desired、observed、saved、verified、mDNS、事务窗口和设备报告的 Rescue AP 状态；扫描、credential_ref、apply、retry、forget 均按设备声明的 mutation 能力启用。</string>
     <string name="body_decisions">采集准入</string>
     <string name="body_not_ready">未连接，无法判断是否可拍、是否可写或相机是否接入。</string>
     <string name="body_connected">机身已验证。采集、预览和会话状态将继续由权威快照接管。</string>
@@ -229,25 +232,6 @@
     <string name="calibration_unavailable_contract">当前 Device API v4 未提供独立标定 capability 和禁用原因；生产界面保持关闭，不显示假按钮。</string>
     <string name="storage_status">存储</string>
     <string name="storage_bytes">可用 %1$d / 共 %2$d 字节</string>
-    <string name="safe_swap_title">安全换盘回执</string>
-    <string name="safe_swap_request">请求安全换盘</string>
-    <string name="safe_swap_request_ready">正在录制，可请求机身以 safe_swap reason 停止并等待回执。</string>
-    <string name="safe_swap_disabled_not_recording">只有权威状态为正在录制时才能请求安全换盘。</string>
-    <string name="safe_swap_confirm_title">确认请求安全换盘</string>
-    <string name="safe_swap_confirm_body">应用将向机身发送 reason=safe_swap 的停止采集命令。只有收到机身签发的 safe-swap 回执，才能认为卷已安全释放。</string>
-    <string name="safe_swap_confirm_action">确认请求</string>
-    <string name="safe_swap_waiting_receipt">safe-swap 停止请求已提交，正在等待机身签发回执。没有回执前不要移除存储卷。</string>
-    <string name="safe_swap_ready">回执有效，机身报告已释放卷且打开句柄为 0。</string>
-    <string name="safe_swap_not_found">当前没有有效 safe-swap 回执。</string>
-    <string name="safe_swap_auth_required">safe-swap 回执需要访问令牌。</string>
-    <string name="safe_swap_forbidden">safe-swap 回执访问被拒绝。</string>
-    <string name="safe_swap_invalid_response">safe-swap 回执响应无效：%1$s</string>
-    <string name="safe_swap_network_failure">safe-swap 回执断开：%1$s</string>
-    <string name="safe_swap_http_failure">safe-swap 回执请求失败：HTTP %1$d。</string>
-    <string name="safe_swap_release_state">释放状态：%1$s</string>
-    <string name="safe_swap_open_handles">打开句柄：%1$d</string>
-    <string name="safe_swap_authority">authority epoch：%1$s\nsource revision：%2$d</string>
-    <string name="safe_swap_manifest">清单：%1$s</string>
     <string name="runtime_status">运行时</string>
     <string name="runtime_observed">观测时间：%1$s · 连接：%2$s · 温度：%3$.1f℃</string>
     <string name="network_observed_runtime">当前网络状态</string>
@@ -300,6 +284,7 @@
     <string name="discovery_failed">发现失败：%1$d。服务类型：%2$s；仍可手动输入地址。</string>
     <string name="discovery_body_origin">地址：%1$s</string>
     <string name="discovery_body_host">主机：%1$s · 端口：%2$d</string>
+    <string name="discovery_body_offline">当前离线</string>
     <string name="network_authority_status">权威网络状态</string>
     <string name="network_saved_verified">已保存：%1$s · 已验证：%2$s</string>
     <string name="network_desired_state">期望网络</string>
@@ -332,7 +317,7 @@
     <string name="network_passphrase_hint">8–63 个字符；提交后立即清空本地输入。</string>
     <string name="network_apply_wifi">切换到该 Wi-Fi</string>
     <string name="network_hotspot_target">热点目标</string>
-    <string name="network_hotspot_hint">将期望网络切回机身热点。网络切换可能短暂断开控制链路，后续通过 /network 或 Rescue AP 对账结果。</string>
+    <string name="network_hotspot_hint">将期望网络切回机身热点。网络切换可能断开控制链路；请求没有明确结果时，本次客户端操作会以错误结束且不会自动重放。</string>
     <string name="network_apply_hotspot">切换到热点</string>
     <string name="network_ethernet_target">有线网络目标</string>
     <string name="network_ethernet_dhcp_hint">将有线网络设置为 DHCP，由上游网络分配地址。</string>
@@ -344,12 +329,12 @@
     <string name="network_static_dns_label">DNS</string>
     <string name="network_static_dns_hint">最多 3 个 IPv4 DNS，用逗号、空格或分号分隔。</string>
     <string name="network_apply_ethernet_static">切换到有线静态</string>
-    <string name="network_retry">重试事务</string>
+    <string name="network_retry">发起新重试</string>
     <string name="network_forget">忘记 Wi-Fi</string>
     <string name="network_forget_confirm_title">确认忘记 Wi-Fi</string>
     <string name="network_forget_confirm_body">机身会删除已保存的 Wi-Fi 客户端资料并回到热点期望状态；这不会停止机身上的采集。</string>
     <string name="network_forget_confirm_action">忘记并切回热点</string>
-    <string name="network_retry_disabled">只有最近失败或已救援的事务可以重试。</string>
+    <string name="network_retry_disabled">只有最近失败或已救援的事务可以用于发起一次新重试。</string>
     <string name="network_forget_disabled">没有已保存的 Wi-Fi 客户端资料。</string>
     <string name="network_disabled_command_running">已有网络命令正在执行。</string>
     <string name="network_disabled_status_missing">等待 /network 状态。</string>
@@ -379,7 +364,6 @@
     <string name="network_scan_unavailable">Wi-Fi 扫描暂不可用。</string>
     <string name="network_mutation_running">正在提交网络事务。</string>
     <string name="network_mutation_accepted">网络事务已接受：%1$s</string>
-    <string name="network_mutation_result_pending">网络切换已提交，但控制链路已断开，结果待确认。\n下一步：%1$s\n断开原因：%2$s\n恢复连接后会从 /network 重新对账。</string>
     <string name="network_mutation_unavailable">机身当前不允许网络切换。</string>
     <string name="network_idempotency_conflict">Idempotency-Key 与不同请求冲突。</string>
     <string name="network_invalid_desired_state">机身拒绝该网络期望状态。</string>
@@ -388,7 +372,7 @@
     <string name="network_forbidden">网络接口访问被拒绝。</string>
     <string name="network_invalid_request">网络请求无效：%1$s</string>
     <string name="network_invalid_response">网络响应无效：%1$s</string>
-    <string name="network_network_failure">网络接口断开：%1$s</string>
+    <string name="network_network_failure">网络接口断开：%1$s。本次客户端操作已结束；结果未知时不会自动恢复或重放。</string>
     <string name="network_http_failure">网络接口请求失败：HTTP %1$d。</string>
     <string name="network_desired_hotspot">热点模式</string>
     <string name="network_desired_wifi">Wi-Fi 客户端：%1$s · %2$s · 凭证：%3$s</string>
@@ -409,7 +393,7 @@
     <string name="network_mutation_reason_network_manager_unavailable">NetworkManager 不可用</string>
     <string name="network_mutation_reason_rescue_ap_not_validated">Rescue AP 未验证</string>
     <string name="network_mutation_reason_capture_active">正在采集</string>
-    <string name="network_mutation_reason_recovery_required">需要恢复</string>
+    <string name="network_mutation_reason_recovery_required">设备报告恢复阻塞</string>
     <string name="network_mutation_reason_maintenance_window_closed">维护窗口已关闭</string>
     <string name="network_mutation_reason_unsupported_concurrency">并发能力不支持</string>
     <string name="network_concurrency_supported">支持</string>
@@ -421,7 +405,7 @@
     <string name="network_transaction_status">%1$s · %2$s · 阶段：%3$s</string>
     <string name="network_transaction_id">事务 ID：%1$s</string>
     <string name="network_transaction_desired">期望：%1$s</string>
-    <string name="network_recovery_action">恢复动作：%1$s</string>
+    <string name="network_recovery_action">设备恢复状态：%1$s</string>
     <string name="network_rescue_status">Rescue AP 已验证：%1$s · 触发：%2$d 秒</string>
     <string name="network_deadline">剩余验证窗口：%1$.1f 秒</string>
     <string name="network_transaction_error">错误：%1$s · %2$s · 可重试：%3$s</string>
@@ -442,8 +426,7 @@
     <string name="network_stage_forgetting">正在忘记</string>
     <string name="network_stage_forgotten">已忘记</string>
     <string name="network_recovery_await_device">等待机身</string>
-    <string name="network_recovery_reconnect_target_lan">重新连接目标局域网</string>
-    <string name="network_recovery_reconnect_rescue_ap">重新连接 Rescue AP</string>
+    <string name="network_recovery_connection_changed">设备报告连接状态已变化</string>
     <string name="network_recovery_retry">可重试</string>
     <string name="network_recovery_service_required">需要维护</string>
     <string name="network_recovery_none">无</string>
@@ -482,12 +465,14 @@
     <string name="update_current">当前已是最新版本。</string>
     <string name="update_available">发现新版本。</string>
     <string name="update_downloading">正在下载更新。</string>
+    <string name="update_verifying">正在验证 APK 身份与签名。</string>
+    <string name="update_ready_to_install">更新已验证，可以安装。</string>
     <string name="update_installing">正在打开系统安装器。</string>
     <string name="update_failed">更新失败，可重新检查。</string>
     <string name="update_failed_diagnostics">更新失败；请确认网络、Release manifest、APK 哈希和系统安装权限后重试。</string>
     <string name="diagnostics">诊断详情</string>
     <string name="contract_gate_title">契约门禁</string>
-    <string name="contract_gate_body">Device API v4 OpenAPI 已锁定到移动端；状态、JPEG 预览、幂等 start/stop、会话台账、safe-swap 回执、制品 HEAD/Range 下载、相机对焦、mDNS 网络状态和网络切换事务均走真实接口；不可用能力按设备声明门禁。</string>
+    <string name="contract_gate_body">Device API v4 OpenAPI 已锁定到移动端；状态、JPEG 预览、幂等 start/stop、会话台账、制品 HEAD/Range 下载、相机对焦、mDNS 网络状态和网络切换事务均走真实接口；不可用能力按设备声明门禁。</string>
     <string name="bottom_nav_description">主导航</string>
     <string name="nav_selected">已选择</string>
     <string name="nav_not_selected">未选择</string>

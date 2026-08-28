@@ -31,19 +31,96 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       signed: ${{ steps.android_signing.outputs.signed }}
+      version_name: ${{ steps.release_metadata.outputs.version_name }}
+      version_code: ${{ steps.release_metadata.outputs.version_code }}
+      previous_tag: ${{ steps.release_metadata.outputs.previous_tag }}
+      previous_version_name: ${{ steps.release_metadata.outputs.previous_version_name }}
+      previous_version_code: ${{ steps.release_metadata.outputs.previous_version_code }}
+      previous_apk_name: ${{ steps.release_metadata.outputs.previous_apk_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           ref: ${{ env.CHECKOUT_REF }}
 
-      - name: Validate release tag
+      - name: Validate release metadata
+        id: release_metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Release tag must use the form vX.Y.Z; got '${RELEASE_TAG}'."
             exit 1
           fi
+
+          version_name="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+          version_code="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -n 1)"
+          if [ -z "$version_name" ] || [ -z "$version_code" ]; then
+            echo "::error::Could not read versionName/versionCode from app/build.gradle.kts."
+            exit 1
+          fi
+
+          expected_tag="v${version_name}"
+          if [ "$RELEASE_TAG" != "$expected_tag" ]; then
+            echo "::error::Release tag must equal versionName: expected '${expected_tag}', got '${RELEASE_TAG}'."
+            exit 1
+          fi
+
+          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [ -n "$latest_tag" ]; then
+            latest_dir="$(mktemp -d)"
+            gh release download "$latest_tag" --pattern android-update.json --dir "$latest_dir"
+            latest_version_code="$(jq -er '.versionCode | numbers' "$latest_dir/android-update.json")"
+            if [ "$latest_tag" = "$RELEASE_TAG" ]; then
+              if [ "$version_code" -ne "$latest_version_code" ]; then
+                echo "::error::Existing release ${latest_tag} uses versionCode ${latest_version_code}, not ${version_code}."
+                exit 1
+              fi
+            elif [ "$version_code" -le "$latest_version_code" ]; then
+              echo "::error::versionCode must increase beyond ${latest_version_code}; got ${version_code}."
+              exit 1
+            fi
+          fi
+
+          previous_tag="$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq -sr --arg candidate "$RELEASE_TAG" '
+                  [.[][] | select(
+                    .draft == false and
+                    .prerelease == false and
+                    .tag_name != $candidate
+                  )]
+                  | sort_by(.published_at)
+                  | reverse
+                  | .[0].tag_name // empty
+                '
+          )"
+          if [ -z "$previous_tag" ]; then
+            echo "::error::A previous production Android Release is required for in-app upgrade acceptance."
+            exit 1
+          fi
+          baseline_dir="$(mktemp -d)"
+          gh release download "$previous_tag" --pattern android-update.json --dir "$baseline_dir"
+          previous_version_name="$(jq -er '.version | strings' "$baseline_dir/android-update.json")"
+          previous_version_code="$(jq -er '.versionCode | numbers' "$baseline_dir/android-update.json")"
+          previous_apk_url="$(jq -er '.android.apk.url | strings' "$baseline_dir/android-update.json")"
+          previous_apk_name="$(basename "$previous_apk_url")"
+          if [ "$previous_tag" != "v${previous_version_name}" ]; then
+            echo "::error::Previous production tag and manifest version disagree."
+            exit 1
+          fi
+          if [ "$previous_version_code" -le 0 ] || [[ ! "$previous_apk_name" =~ \.apk$ ]]; then
+            echo "::error::Previous production manifest has an invalid Android APK identity."
+            exit 1
+          fi
+
+          echo "version_name=$version_name" >> "$GITHUB_OUTPUT"
+          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+          echo "previous_version_name=$previous_version_name" >> "$GITHUB_OUTPUT"
+          echo "previous_version_code=$previous_version_code" >> "$GITHUB_OUTPUT"
+          echo "previous_apk_name=$previous_apk_name" >> "$GITHUB_OUTPUT"
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -68,6 +145,9 @@ jobs:
 
       - name: Test
         run: ./gradlew testDebugUnitTest
+
+      - name: Check in-app upgrade acceptance script
+        run: python3 -m py_compile scripts/android-in-app-update-acceptance.py
 
       - name: Compile Android UI tests
         run: ./gradlew assembleDebugAndroidTest
@@ -96,6 +176,7 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}
         run: |
           set -euo pipefail
 
@@ -109,14 +190,12 @@ jobs:
             fi
           done
 
-          if [ "$configured" -eq 0 ]; then
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-            echo "Android signing secrets are not configured; unsigned release artifacts will be built."
-            exit 0
+          if [ "$configured" -eq 0 ] || [ "$missing" -ne 0 ]; then
+            echo "::error::Android Releases require ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD."
+            exit 1
           fi
-
-          if [ "$missing" -ne 0 ]; then
-            echo "::error::Android signing secrets are partially configured. Set all four Android signing secrets or remove them all."
+          if [[ ! "$ANDROID_RELEASE_CERT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "::error::ANDROID_RELEASE_CERT_SHA256 must contain the protected release certificate SHA-256 digest."
             exit 1
           fi
 
@@ -134,28 +213,143 @@ jobs:
         run: ./gradlew assembleRelease bundleRelease
 
       - name: Stage release artifact
-        env:
-          ANDROID_SIGNING_STATE: ${{ steps.android_signing.outputs.signed == 'true' && 'signed' || 'unsigned' }}
         run: |
           set -euo pipefail
           mkdir -p release-dist
 
-          apk_source="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | sort | tail -n 1)"
-          aab_source="$(find app/build/outputs/bundle/release -maxdepth 1 -type f -name '*.aab' | sort | tail -n 1)"
-
-          if [ -z "$apk_source" ]; then
-            echo "::error::Android release APK was not produced."
+          mapfile -t apk_sources < <(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | sort)
+          mapfile -t aab_sources < <(find app/build/outputs/bundle/release -maxdepth 1 -type f -name '*.aab' | sort)
+          if [ "${#apk_sources[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one Android release APK; found ${#apk_sources[@]}."
+            exit 1
+          fi
+          if [ "${#aab_sources[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one Android release app bundle; found ${#aab_sources[@]}."
             exit 1
           fi
 
-          if [ -z "$aab_source" ]; then
-            echo "::error::Android release app bundle was not produced."
-            exit 1
-          fi
-
-          cp "$apk_source" "release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-${ANDROID_SIGNING_STATE}.apk"
-          cp "$aab_source" "release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-${ANDROID_SIGNING_STATE}.aab"
+          cp "${apk_sources[0]}" "release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-signed.apk"
+          cp "${aab_sources[0]}" "release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-signed.aab"
           ls -lh release-dist
+
+      - name: Verify APK identity and generate update manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ steps.release_metadata.outputs.previous_tag }}
+          VERSION_NAME: ${{ steps.release_metadata.outputs.version_name }}
+          VERSION_CODE: ${{ steps.release_metadata.outputs.version_code }}
+          ANDROID_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          export PATH="${ANDROID_SDK_ROOT}/build-tools/36.0.0:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}"
+
+          apk_file="release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-signed.apk"
+          apksigner verify --verbose --print-certs "$apk_file" > app/build/apksigner-release.txt
+          mapfile -t signer_digests < <(
+            sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' app/build/apksigner-release.txt \
+              | tr '[:upper:]' '[:lower:]'
+          )
+          if [ "${#signer_digests[@]}" -ne 1 ]; then
+            echo "::error::Release APK must have exactly one signer; found ${#signer_digests[@]}."
+            exit 1
+          fi
+          signing_certificate_sha256="${signer_digests[0]}"
+          expected_release_certificate="$(printf '%s' "$ANDROID_RELEASE_CERT_SHA256" | tr '[:upper:]' '[:lower:]')"
+          if [ "$signing_certificate_sha256" != "$expected_release_certificate" ]; then
+            echo "::error::APK signer does not match the protected release certificate configuration."
+            exit 1
+          fi
+
+          actual_package="$(apkanalyzer manifest application-id "$apk_file")"
+          actual_version_name="$(apkanalyzer manifest version-name "$apk_file")"
+          actual_version_code="$(apkanalyzer manifest version-code "$apk_file")"
+          if [ "$actual_package" != "com.openaria.openaria_echo_mobile" ]; then
+            echo "::error::APK package mismatch: ${actual_package}."
+            exit 1
+          fi
+          if [ "$actual_version_name" != "$VERSION_NAME" ]; then
+            echo "::error::APK versionName mismatch: expected ${VERSION_NAME}, got ${actual_version_name}."
+            exit 1
+          fi
+          if [ "$actual_version_code" != "$VERSION_CODE" ]; then
+            echo "::error::APK versionCode mismatch: expected ${VERSION_CODE}, got ${actual_version_code}."
+            exit 1
+          fi
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            previous_dir="$(mktemp -d)"
+            gh release download "$PREVIOUS_TAG" --pattern '*.apk' --dir "$previous_dir"
+            mapfile -t previous_apks < <(find "$previous_dir" -maxdepth 1 -type f -name '*.apk' | sort)
+            if [ "${#previous_apks[@]}" -ne 1 ]; then
+              echo "::error::Expected exactly one APK in previous release ${PREVIOUS_TAG}; found ${#previous_apks[@]}."
+              exit 1
+            fi
+            apksigner verify --verbose --print-certs "${previous_apks[0]}" > app/build/apksigner-previous.txt
+            mapfile -t previous_digests < <(
+              sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' app/build/apksigner-previous.txt \
+                | tr '[:upper:]' '[:lower:]'
+            )
+            if [ "${#previous_digests[@]}" -ne 1 ] || [ "${previous_digests[0]}" != "$signing_certificate_sha256" ]; then
+              echo "::error::Previous release signing certificate does not match the candidate APK."
+              exit 1
+            fi
+          fi
+
+          apk_name="$(basename "$apk_file")"
+          apk_sha256="$(sha256sum "$apk_file" | cut -d ' ' -f 1)"
+          apk_bytes="$(wc -c < "$apk_file" | tr -d ' ')"
+          apk_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${apk_name}"
+          aab_file="release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-signed.aab"
+          LC_ALL=C jarsigner -verify -verbose -certs "$aab_file" > app/build/jarsigner-release.txt 2>&1
+          grep -Fx 'jar verified.' app/build/jarsigner-release.txt >/dev/null
+          LC_ALL=C keytool -printcert -jarfile "$aab_file" > app/build/aab-certificate.txt
+          mapfile -t aab_digests < <(
+            sed -n 's/^[[:space:]]*SHA256: //p' app/build/aab-certificate.txt \
+              | tr -d ':' \
+              | tr '[:upper:]' '[:lower:]'
+          )
+          if [ "${#aab_digests[@]}" -ne 1 ] || [ "${aab_digests[0]}" != "$expected_release_certificate" ]; then
+            echo "::error::AAB signer does not match the protected release certificate configuration."
+            exit 1
+          fi
+          aab_name="$(basename "$aab_file")"
+          aab_sha256="$(sha256sum "$aab_file" | cut -d ' ' -f 1)"
+          aab_bytes="$(wc -c < "$aab_file" | tr -d ' ')"
+          aab_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${aab_name}"
+          pub_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          jq -n \
+            --arg version "$actual_version_name" \
+            --argjson versionCode "$actual_version_code" \
+            --arg signingCertificateSha256 "$signing_certificate_sha256" \
+            --arg pubDate "$pub_date" \
+            --arg notes "Open Aria Echo Mobile ${RELEASE_TAG}" \
+            --arg apkUrl "$apk_url" \
+            --arg apkSha256 "$apk_sha256" \
+            --argjson apkBytes "$apk_bytes" \
+            --arg aabUrl "$aab_url" \
+            --arg aabSha256 "$aab_sha256" \
+            --argjson aabBytes "$aab_bytes" \
+            '{
+              schema: "openaria.echo.mobile.android-update.v1",
+              version: $version,
+              versionCode: $versionCode,
+              packageName: "com.openaria.openaria_echo_mobile",
+              signingCertificateSha256: $signingCertificateSha256,
+              pubDate: $pubDate,
+              notes: $notes,
+              android: {
+                apk: {
+                  url: $apkUrl,
+                  sha256: $apkSha256,
+                  bytes: $apkBytes
+                },
+                aab: {
+                  url: $aabUrl,
+                  sha256: $aabSha256,
+                  bytes: $aabBytes
+                }
+              }
+            }' > release-dist/android-update.json
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v7
@@ -181,55 +375,78 @@ jobs:
           path: release-dist
           merge-multiple: true
 
-      - name: Generate Android update manifest, checksums, and notes
+      - name: Set up Java for published APK verification
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK for published APK verification
+        uses: android-actions/setup-android@v3
+
+      - name: Install APK verification tools
+        run: sdkmanager "build-tools;36.0.0"
+
+      - name: Verify staged update manifest and generate checksums
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
 
-          version_name="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
-          version_code="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -n 1)"
-          if [ -z "$version_name" ] || [ -z "$version_code" ]; then
-            echo "::error::Could not read versionName/versionCode from app/build.gradle.kts."
+          manifest="release-dist/android-update.json"
+          jq -e '
+            .schema == "openaria.echo.mobile.android-update.v1" and
+            .packageName == "com.openaria.openaria_echo_mobile" and
+            (.signingCertificateSha256 | test("^[0-9a-f]{64}$")) and
+            (.android.apk.sha256 | test("^[0-9a-f]{64}$")) and
+            (.android.apk.bytes > 0) and
+            (.android.aab.sha256 | test("^[0-9a-f]{64}$")) and
+            (.android.aab.bytes > 0)
+          ' "$manifest" >/dev/null
+
+          apk_url="$(jq -er '.android.apk.url' "$manifest")"
+          apk_name="$(basename "$apk_url")"
+          apk_file="release-dist/${apk_name}"
+          if [ ! -f "$apk_file" ]; then
+            echo "::error::Update manifest points to missing staged APK ${apk_name}."
+            exit 1
+          fi
+          expected_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${apk_name}"
+          if [ "$apk_url" != "$expected_url" ]; then
+            echo "::error::Update manifest APK URL does not match the release asset URL."
             exit 1
           fi
 
-          apk_file="$(find release-dist -maxdepth 1 -type f -name 'openaria-echo-mobile-*-android-*.apk' | sort | tail -n 1)"
-          if [ -z "$apk_file" ]; then
-            echo "::error::Android APK is required for the update manifest."
-            exit 1
-          fi
-
-          apk_name="$(basename "$apk_file")"
           apk_sha256="$(sha256sum "$apk_file" | cut -d ' ' -f 1)"
           apk_bytes="$(wc -c < "$apk_file" | tr -d ' ')"
-          apk_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${apk_name}"
-          pub_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          if [ "$apk_sha256" != "$(jq -er '.android.apk.sha256' "$manifest")" ]; then
+            echo "::error::Staged APK SHA-256 does not match android-update.json."
+            exit 1
+          fi
+          if [ "$apk_bytes" != "$(jq -er '.android.apk.bytes' "$manifest")" ]; then
+            echo "::error::Staged APK size does not match android-update.json."
+            exit 1
+          fi
 
-          jq -n \
-            --arg version "$version_name" \
-            --argjson versionCode "$version_code" \
-            --arg pubDate "$pub_date" \
-            --arg notes "Open Aria Echo Mobile ${RELEASE_TAG}" \
-            --arg apkUrl "$apk_url" \
-            --arg apkSha256 "$apk_sha256" \
-            --argjson apkBytes "$apk_bytes" \
-            '{
-              schema: "openaria.echo.mobile.android-update.v1",
-              version: $version,
-              versionCode: $versionCode,
-              packageName: "com.openaria.openaria_echo_mobile",
-              pubDate: $pubDate,
-              notes: $notes,
-              android: {
-                apk: {
-                  url: $apkUrl,
-                  sha256: $apkSha256,
-                  bytes: $apkBytes
-                }
-              }
-            }' > release-dist/android-update.json
+          aab_url="$(jq -er '.android.aab.url' "$manifest")"
+          aab_name="$(basename "$aab_url")"
+          aab_file="release-dist/${aab_name}"
+          expected_aab_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${aab_name}"
+          if [ ! -f "$aab_file" ] || [ "$aab_url" != "$expected_aab_url" ]; then
+            echo "::error::Update manifest AAB identity does not match the staged Release asset."
+            exit 1
+          fi
+          aab_sha256="$(sha256sum "$aab_file" | cut -d ' ' -f 1)"
+          aab_bytes="$(wc -c < "$aab_file" | tr -d ' ')"
+          if [ "$aab_sha256" != "$(jq -er '.android.aab.sha256' "$manifest")" ]; then
+            echo "::error::Staged AAB SHA-256 does not match android-update.json."
+            exit 1
+          fi
+          if [ "$aab_bytes" != "$(jq -er '.android.aab.bytes' "$manifest")" ]; then
+            echo "::error::Staged AAB size does not match android-update.json."
+            exit 1
+          fi
 
           cd release-dist
           sha256sum * > SHA256SUMS.txt
@@ -242,7 +459,6 @@ jobs:
             printf '\n'
             printf 'Android artifacts are signed with the repository Android signing secrets.\n'
             printf 'android-update.json is the app-consumed update manifest. Routine updates are downloaded from inside the Android app.\n'
-            printf 'No iOS artifact is built or published.\n'
           } > RELEASE_NOTES.md
 
           cat release-dist/SHA256SUMS.txt
@@ -285,11 +501,147 @@ jobs:
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
               --title "Open Aria Echo Mobile ${RELEASE_TAG}" \
-              --notes-file RELEASE_NOTES.md
+              --notes-file RELEASE_NOTES.md \
+              --latest
             gh release upload "$RELEASE_TAG" release-dist/* --clobber
           else
             gh release create "$RELEASE_TAG" release-dist/* \
               --title "Open Aria Echo Mobile ${RELEASE_TAG}" \
               --notes-file RELEASE_NOTES.md \
-              --verify-tag
+              --verify-tag \
+              --latest
           fi
+
+      - name: Post-publish verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANDROID_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          export PATH="${ANDROID_SDK_ROOT}/build-tools/36.0.0:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}"
+
+          verify_dir="$(mktemp -d)"
+          latest_manifest_url="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/android-update.json"
+          for attempt in $(seq 1 10); do
+            curl --fail --location --retry 3 --output "$verify_dir/android-update.json" "$latest_manifest_url"
+            if cmp --silent release-dist/android-update.json "$verify_dir/android-update.json"; then
+              break
+            fi
+            if [ "$attempt" -eq 10 ]; then
+              echo "::error::Latest Release manifest did not converge to ${RELEASE_TAG}."
+              exit 1
+            fi
+            sleep 2
+          done
+
+          apk_url="$(jq -er '.android.apk.url' "$verify_dir/android-update.json")"
+          apk_name="$(basename "$apk_url")"
+          curl --fail --location --retry 5 --output "$verify_dir/$apk_name" "$apk_url"
+          cmp --silent "release-dist/$apk_name" "$verify_dir/$apk_name"
+
+          downloaded_sha256="$(sha256sum "$verify_dir/$apk_name" | cut -d ' ' -f 1)"
+          downloaded_bytes="$(wc -c < "$verify_dir/$apk_name" | tr -d ' ')"
+          test "$downloaded_sha256" = "$(jq -er '.android.apk.sha256' "$verify_dir/android-update.json")"
+          test "$downloaded_bytes" = "$(jq -er '.android.apk.bytes' "$verify_dir/android-update.json")"
+
+          apksigner verify --verbose --print-certs "$verify_dir/$apk_name" > "$verify_dir/apksigner.txt"
+          mapfile -t published_digests < <(
+            sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' "$verify_dir/apksigner.txt" \
+              | tr '[:upper:]' '[:lower:]'
+          )
+          expected_release_certificate="$(printf '%s' "$ANDROID_RELEASE_CERT_SHA256" | tr '[:upper:]' '[:lower:]')"
+          test "${#published_digests[@]}" -eq 1
+          test "${published_digests[0]}" = "$expected_release_certificate"
+          test "${published_digests[0]}" = "$(jq -er '.signingCertificateSha256' "$verify_dir/android-update.json")"
+          test "$(apkanalyzer manifest application-id "$verify_dir/$apk_name")" = "$(jq -er '.packageName' "$verify_dir/android-update.json")"
+          test "$(apkanalyzer manifest version-name "$verify_dir/$apk_name")" = "$(jq -er '.version' "$verify_dir/android-update.json")"
+          test "$(apkanalyzer manifest version-code "$verify_dir/$apk_name")" = "$(jq -er '.versionCode' "$verify_dir/android-update.json")"
+
+          aab_url="$(jq -er '.android.aab.url' "$verify_dir/android-update.json")"
+          aab_name="$(basename "$aab_url")"
+          curl --fail --location --retry 5 --output "$verify_dir/$aab_name" "$aab_url"
+          cmp --silent "release-dist/$aab_name" "$verify_dir/$aab_name"
+          LC_ALL=C jarsigner -verify -verbose -certs "$verify_dir/$aab_name" > "$verify_dir/jarsigner.txt" 2>&1
+          grep -Fx 'jar verified.' "$verify_dir/jarsigner.txt" >/dev/null
+          LC_ALL=C keytool -printcert -jarfile "$verify_dir/$aab_name" > "$verify_dir/aab-certificate.txt"
+          mapfile -t published_aab_digests < <(
+            sed -n 's/^[[:space:]]*SHA256: //p' "$verify_dir/aab-certificate.txt" \
+              | tr -d ':' \
+              | tr '[:upper:]' '[:lower:]'
+          )
+          test "${#published_aab_digests[@]}" -eq 1
+          test "${published_aab_digests[0]}" = "$expected_release_certificate"
+          test "$(sha256sum "$verify_dir/$aab_name" | cut -d ' ' -f 1)" = "$(jq -er '.android.aab.sha256' "$verify_dir/android-update.json")"
+          test "$(wc -c < "$verify_dir/$aab_name" | tr -d ' ')" = "$(jq -er '.android.aab.bytes' "$verify_dir/android-update.json")"
+
+          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          test "$latest_tag" = "$RELEASE_TAG"
+
+  android_in_app_upgrade:
+    name: Upgrade previous production through the app
+    runs-on: ubuntu-latest
+    needs: [android, release]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout published release
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android verification tools
+        run: sdkmanager "build-tools;36.0.0"
+
+      - name: Enable KVM for Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Prepare acceptance evidence directory
+        run: mkdir -p android-upgrade-evidence
+
+      - name: Run previous production in-app upgrade
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        env:
+          EXPECTED_VERSION_NAME: ${{ needs.android.outputs.version_name }}
+          EXPECTED_VERSION_CODE: ${{ needs.android.outputs.version_code }}
+          BASELINE_TAG: ${{ needs.android.outputs.previous_tag }}
+          BASELINE_VERSION_NAME: ${{ needs.android.outputs.previous_version_name }}
+          BASELINE_VERSION_CODE: ${{ needs.android.outputs.previous_version_code }}
+          BASELINE_APK_NAME: ${{ needs.android.outputs.previous_apk_name }}
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: |
+            export PATH="${ANDROID_SDK_ROOT}/build-tools/36.0.0:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}"
+            python3 scripts/android-in-app-update-acceptance.py \
+              --repository "${GITHUB_REPOSITORY}" \
+              --release-tag "${RELEASE_TAG}" \
+              --expected-version-name "${EXPECTED_VERSION_NAME}" \
+              --expected-version-code "${EXPECTED_VERSION_CODE}" \
+              --baseline-tag "${BASELINE_TAG}" \
+              --baseline-version-name "${BASELINE_VERSION_NAME}" \
+              --baseline-version-code "${BASELINE_VERSION_CODE}" \
+              --baseline-apk-name "${BASELINE_APK_NAME}" \
+              --evidence-dir android-upgrade-evidence
+
+      - name: Upload in-app upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-in-app-upgrade-${{ env.RELEASE_TAG }}
+          path: android-upgrade-evidence/*
+          if-no-files-found: warn

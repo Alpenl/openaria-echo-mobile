@@ -6,9 +6,13 @@ Open Aria Echo Mobile 是原生 Android 客户端。Flutter 版本保留在 `flu
 
 应用启动后先进入“连接机身”页。附近机身通过 Android NSD/mDNS 的 `_ylx-capture._tcp` 服务发现；手动地址、历史记录和发现候选都必须经过 Device API v4 `/api/v4/device` 探测、契约校验和鉴权后，才会进入已验证工作台。未连接时不会展示假机身、假 ready、假视频、假录制指标或无行为按钮。
 
-当前移动端已锁定 Device API v4 OpenAPI，并对契约存在的能力实现真实客户端路径：JPEG 最新帧预览、双目/左眼/右眼检视、网格与 RAW IMU 预览叠加、权威采集状态、SSE 对账、幂等 start/stop、能力门禁的标定采集、safe-swap 请求与回执读取、会话台账筛选、未成功结果、manifest、制品 HEAD/Range 下载、SHA-256 校验、打开/分享、机身身份、存储、运行时网络状态、相机连接、相机对焦和应用更新。
+当前移动端已锁定 Device API v4 OpenAPI，并对当前产品能力实现真实客户端路径：JPEG 最新帧预览、双目/左眼/右眼检视、网格与 RAW IMU 预览叠加、权威采集状态、SSE 对账、幂等 start/stop、能力门禁的标定采集、会话台账筛选、未成功结果、manifest、制品 HEAD/Range 下载、SHA-256 校验、打开/分享、机身身份、固定存储状态、运行时网络状态、相机连接、相机对焦和应用更新。按照 Score D-049，当前 Android 产品不提供可移除介质或换盘工作流；契约中遗留的 wire 解析只作为冻结兼容代码保留。
 
-网络页使用 `/network`、`/network/scan`、`/network/credentials`、`/network/apply`、`/network/retry`、`/network/forget` 和 `/network/events`。apply 支持热点、Wi-Fi client、有线 DHCP 和有线静态 IPv4 四种期望状态。Wi-Fi 密码只用于换取一次性 `credential_ref`；apply 请求不会携带明文密码。网络切换、retry 和 forget 只在设备描述符与 `/network` mutation capability 同时允许、且采集处于 idle 时开放，断链/Rescue AP 场景通过设备权威事务和 SSE/HTTP 对账呈现。
+制品下载可以校验服务端 Range 响应，但不会跨用户尝试复用 `.part`：取消或失败会清理本次临时文件，普通重试从 byte 0 开始。
+
+连接后的状态请求由连接代次和前台生命周期统一约束：capture/network SSE 健康时作为实时来源，HTTP 状态只做启动与每 30 秒一次的低频对账；SSE 明确不可用时使用有界退避轮询。预览仅在应用前台且“取景”页可见时串行获取，会话和对焦仅在启动、进入对应页面或相关事件后刷新，旧连接的晚响应不会覆盖新连接状态。
+
+网络页使用 `/network`、`/network/scan`、`/network/credentials`、`/network/apply`、`/network/retry`、`/network/forget` 和 `/network/events`。apply 支持热点、Wi-Fi client、有线 DHCP 和有线静态 IPv4 四种期望状态。Wi-Fi 密码只用于换取一次性 `credential_ref`；apply 请求不会携带明文密码。网络切换、retry 和 forget 只在设备描述符与 `/network` mutation capability 同时允许、且采集处于 idle 时开放；只呈现设备明确返回的事务结果和正常回退，断链时显示错误且不恢复或重放中断事务。
 
 ## Build
 

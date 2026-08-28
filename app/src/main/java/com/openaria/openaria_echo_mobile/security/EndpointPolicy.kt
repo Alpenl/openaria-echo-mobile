@@ -24,11 +24,13 @@ object EndpointPolicy {
         if (scheme != "https" && scheme != "http") {
             return Decision.Rejected(RejectReason.UNSUPPORTED_SCHEME)
         }
-        if (!uri.userInfo.isNullOrBlank()) {
+        if (!uri.userInfo.isNullOrBlank() || uri.rawAuthority.orEmpty().contains("@")) {
             return Decision.Rejected(RejectReason.CREDENTIALS_IN_URI)
         }
 
-        val host = uri.host?.trim()?.takeIf { it.isNotEmpty() }
+        val authority = parseAuthority(uri)
+            ?: return Decision.Rejected(RejectReason.MISSING_HOST)
+        val host = authority.host.trim().takeIf { it.isNotEmpty() }
             ?: return Decision.Rejected(RejectReason.MISSING_HOST)
         if (!uri.rawQuery.isNullOrEmpty() || !uri.rawFragment.isNullOrEmpty()) {
             return Decision.Rejected(RejectReason.PATH_QUERY_OR_FRAGMENT)
@@ -40,8 +42,13 @@ object EndpointPolicy {
 
         val canonicalHost = canonicalHost(host)
             ?: return Decision.Rejected(RejectReason.MISSING_HOST)
+        val normalizedPort = when {
+            scheme == "http" && authority.port == 80 -> -1
+            scheme == "https" && authority.port == 443 -> -1
+            else -> authority.port
+        }
         val normalized = try {
-            URI(scheme, null, canonicalHost, uri.port, null, null, null)
+            URI(scheme, null, canonicalHost, normalizedPort, null, null, null)
         } catch (_: URISyntaxException) {
             return Decision.Rejected(RejectReason.INVALID_URI)
         }
@@ -58,13 +65,34 @@ object EndpointPolicy {
     private fun canonicalHost(host: String): String? {
         val unbracketed = host.removePrefix("[").removeSuffix("]")
         if (unbracketed.contains(":")) {
-            return unbracketed.lowercase(Locale.US)
+            val scopeDelimiter = unbracketed.indexOf('%')
+            if (scopeDelimiter == -1) return unbracketed.lowercase(Locale.US)
+            val address = unbracketed.substring(0, scopeDelimiter).lowercase(Locale.US)
+            val scope = unbracketed.substring(scopeDelimiter + 1).takeIf(String::isNotEmpty)
+                ?: return null
+            if (scope.any { !it.isLetterOrDigit() }) return null
+            return "$address%$scope"
         }
         return try {
             IDN.toASCII(unbracketed).lowercase(Locale.US)
         } catch (_: IllegalArgumentException) {
             null
         }
+    }
+
+    private fun parseAuthority(uri: URI): Authority? {
+        uri.host?.let { host ->
+            if (uri.port != -1 && uri.port !in 1..65535) return null
+            return Authority(host, uri.port)
+        }
+        val rawAuthority = uri.rawAuthority?.takeIf { it.isNotEmpty() } ?: return null
+        if (rawAuthority.startsWith("[") || rawAuthority.contains("@")) return null
+        val delimiter = rawAuthority.lastIndexOf(':')
+        if (delimiter == -1) return Authority(rawAuthority, -1)
+        if (rawAuthority.indexOf(':') != delimiter) return null
+        val port = rawAuthority.substring(delimiter + 1).toIntOrNull() ?: return null
+        if (port !in 1..65535) return null
+        return Authority(rawAuthority.substring(0, delimiter), port)
     }
 
     private fun allowsLocalHttp(host: String): Boolean {
@@ -83,7 +111,7 @@ object EndpointPolicy {
         }
         if (host.contains(":")) {
             val address = try {
-                InetAddress.getByName(host)
+                InetAddress.getByName(host.substringBefore("%"))
             } catch (_: Exception) {
                 return false
             }
@@ -121,6 +149,11 @@ object EndpointPolicy {
     data class BodyTarget(
         val origin: URI,
         val cleartext: Boolean,
+    )
+
+    private data class Authority(
+        val host: String,
+        val port: Int,
     )
 
     sealed interface Decision {

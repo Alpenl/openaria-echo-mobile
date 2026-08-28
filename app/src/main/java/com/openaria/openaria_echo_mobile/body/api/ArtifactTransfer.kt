@@ -10,16 +10,14 @@ object ArtifactTransfer {
                 return ArtifactPreparationPlan.AlreadySaved
             }
             return ArtifactPreparationPlan.Download(
-                resumeFromBytes = partialResumeOffset(artifact, local.partial),
                 deleteTargetBeforeDownload = true,
-                deletePartialBeforeDownload = shouldDeletePartialBeforeDownload(artifact, local.partial),
+                deletePartialBeforeDownload = local.partial.exists,
             )
         }
 
         return ArtifactPreparationPlan.Download(
-            resumeFromBytes = partialResumeOffset(artifact, local.partial),
             deleteTargetBeforeDownload = false,
-            deletePartialBeforeDownload = shouldDeletePartialBeforeDownload(artifact, local.partial),
+            deletePartialBeforeDownload = local.partial.exists,
         )
     }
 
@@ -43,12 +41,6 @@ object ArtifactTransfer {
                     else -> ArtifactCompletionPlan.Publish
                 }
             }
-            is ArtifactDownloadResult.Cancelled,
-            is ArtifactDownloadResult.NetworkFailure,
-            -> ArtifactCompletionPlan.KeepPartialAndReject(downloadResult)
-            ArtifactDownloadResult.RangeNotSatisfiable -> {
-                ArtifactCompletionPlan.DeletePartialAndReject(downloadResult)
-            }
             else -> ArtifactCompletionPlan.DeletePartialAndReject(downloadResult)
         }
     }
@@ -68,19 +60,6 @@ object ArtifactTransfer {
         }
     }
 
-    private fun partialResumeOffset(
-        artifact: ArtifactDescriptor,
-        partial: ArtifactLocalFile,
-    ): Long {
-        return if (partial.exists && partial.bytes in 1 until artifact.bytes) partial.bytes else 0L
-    }
-
-    private fun shouldDeletePartialBeforeDownload(
-        artifact: ArtifactDescriptor,
-        partial: ArtifactLocalFile,
-    ): Boolean {
-        return partial.exists && partial.bytes !in 0 until artifact.bytes
-    }
 }
 
 data class ArtifactLocalFiles(
@@ -97,7 +76,6 @@ data class ArtifactLocalFile(
 sealed interface ArtifactPreparationPlan {
     data object AlreadySaved : ArtifactPreparationPlan
     data class Download(
-        val resumeFromBytes: Long,
         val deleteTargetBeforeDownload: Boolean,
         val deletePartialBeforeDownload: Boolean,
     ) : ArtifactPreparationPlan
@@ -105,6 +83,5 @@ sealed interface ArtifactPreparationPlan {
 
 sealed interface ArtifactCompletionPlan {
     data object Publish : ArtifactCompletionPlan
-    data class KeepPartialAndReject(val reason: ArtifactDownloadResult) : ArtifactCompletionPlan
     data class DeletePartialAndReject(val reason: ArtifactDownloadResult) : ArtifactCompletionPlan
 }

@@ -4,6 +4,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class WorkflowGateTest {
     @Test
@@ -48,5 +49,89 @@ class WorkflowGateTest {
         assertContains(appBuild, "AppUpdateManager.java")
         assertContains(appBuild, "Update manifest URL must be HTTPS.")
         assertContains(appBuild, "android.apk.url must be an HTTPS URL")
+    }
+
+    @Test
+    fun `Android release proves version signer and published update bytes`() {
+        val release = File("../.github/workflows/mobile-release.yml").readText()
+        val appBuild = File("build.gradle.kts").readText()
+
+        assertContains(appBuild, "versionCode = 6")
+        assertContains(appBuild, "versionName = \"0.1.3\"")
+        assertContains(release, "expected_tag=\"v\${version_name}\"")
+        assertContains(release, "versionCode must increase")
+        assertContains(release, "apksigner verify --verbose --print-certs")
+        assertContains(release, "apkanalyzer manifest application-id")
+        assertContains(release, "apkanalyzer manifest version-name")
+        assertContains(release, "apkanalyzer manifest version-code")
+        assertContains(release, "signingCertificateSha256")
+        assertContains(release, "ANDROID_RELEASE_CERT_SHA256")
+        assertContains(release, "protected release certificate")
+        assertFalse(
+            release.contains("print-certs \"\$apk_file\" | tee"),
+            "Certificate identity must be compared without copying its raw digest into Actions logs.",
+        )
+        assertContains(release, "Previous release signing certificate")
+        assertContains(release, "Post-publish verification")
+        assertContains(release, "curl --fail --location")
+        assertContains(release, "cmp --silent")
+        assertContains(release, "jarsigner -verify -verbose -certs")
+        assertContains(release, "keytool -printcert -jarfile")
+        assertContains(release, "jar verified.")
+        assertContains(release, "aabSha256")
+        assertContains(release, "aabBytes")
+        assertTrue(
+            "apkanalyzer manifest application-id".toRegex().findAll(release).count() >= 2,
+            "APK package identity must be checked before and after publication.",
+        )
+        assertTrue(
+            "apksigner verify --verbose --print-certs".toRegex().findAll(release).count() >= 3,
+            "APK signature must be checked for candidate, previous release, and downloaded release.",
+        )
+        assertFalse(release.contains("macos-"))
+        assertFalse(release.lowercase().contains("ios"))
+    }
+
+    @Test
+    fun `published release upgrades the previous production baseline through its own updater`() {
+        val release = File("../.github/workflows/mobile-release.yml").readText()
+        val acceptanceScript = File("../scripts/android-in-app-update-acceptance.py")
+
+        assertTrue(acceptanceScript.isFile, "The real in-app upgrade acceptance script must be versioned.")
+        val acceptance = acceptanceScript.readText()
+
+        assertContains(release, "android_in_app_upgrade:")
+        assertContains(release, "needs: [android, release]")
+        assertContains(release, "previous_tag: \${{ steps.release_metadata.outputs.previous_tag }}")
+        assertContains(release, "previous_version_name")
+        assertContains(release, "previous_version_code")
+        assertContains(release, "tag_name != \$candidate")
+        assertContains(release, "Run previous production in-app upgrade")
+        assertContains(release, "scripts/android-in-app-update-acceptance.py")
+        assertContains(release, "python3 -m py_compile scripts/android-in-app-update-acceptance.py")
+        assertContains(release, "Upload in-app upgrade evidence")
+        assertContains(acceptance, "--baseline-tag")
+        assertContains(acceptance, "--baseline-version-name")
+        assertContains(acceptance, "--baseline-version-code")
+        assertContains(acceptance, "releases/latest/download/android-update.json")
+        assertContains(acceptance, "unknownSourcesPromptOpenedByBaselineApp")
+        assertContains(acceptance, "Unknown Sources was already enabled")
+        assertContains(acceptance, "unknownSourcesSwitchInitiallyOff")
+        assertContains(acceptance, "unknownSourcesSwitchClicked")
+        assertContains(acceptance, "baselineSupportsVerifiedRetry")
+        assertContains(acceptance, "secondInstallTapAfterPermission")
+        assertContains(acceptance, "installerHandoffObserved")
+        assertContains(acceptance, "candidateDownloadedByOldApp")
+        assertContains(acceptance, "certificateMatchesManifest")
+        assertContains(acceptance, "manualCandidateDownload")
+        assertFalse(
+            acceptance.contains("BASELINE_TAG ="),
+            "Acceptance must use the previous production Release, not a permanently fixed baseline.",
+        )
+        assertFalse(
+            acceptance.contains("android.settings.MANAGE_UNKNOWN_APP_SOURCES"),
+            "The baseline app must open Unknown Sources; the acceptance driver must only observe it.",
+        )
+        assertFalse(acceptance.contains("appops set"), "Unknown-sources permission must be granted through system UI.")
     }
 }

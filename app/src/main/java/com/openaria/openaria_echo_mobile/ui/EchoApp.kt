@@ -892,6 +892,12 @@ fun EchoApp(
             return@LaunchedEffect
         }
         val generation = connectionGeneration
+        val streamState = EventStreamReconnectState()
+        fun markCaptureStreamUnavailable(): Long {
+            val decision = streamState.onUnavailable()
+            captureStreamHealth = decision.health
+            return decision.nextRequestDelayMs
+        }
         while (isActive) {
             val eventResult = withContext(Dispatchers.IO) {
                 deviceClient.readCaptureEvents(
@@ -905,7 +911,8 @@ fun EchoApp(
             if (!isCurrentConnection(activeConnection, generation) || !appInForeground) return@LaunchedEffect
             when (eventResult) {
                 is CaptureEventsResult.Batch -> {
-                    captureStreamHealth = EventStreamHealth.Healthy
+                    val streamDecision = streamState.onBatch(eventResult.events.size)
+                    captureStreamHealth = streamDecision.health
                     var needsCaptureReconciliation = false
                     var needsImmediateReconciliation = false
                     var sessionsChanged = false
@@ -934,37 +941,40 @@ fun EchoApp(
                     if (sessionsChanged && selectedTab == EchoTab.SESSIONS) {
                         refreshSessionLedger(activeConnection, generation)
                     }
-                    delay(if (eventResult.events.isEmpty()) 1_000L else 250L)
+                    delay(streamDecision.nextRequestDelayMs)
+                }
+                CaptureEventsResult.NoEvents -> {
+                    delay(markCaptureStreamUnavailable())
                 }
                 CaptureEventsResult.AuthenticationRequired -> {
-                    captureStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markCaptureStreamUnavailable()
                     captureMessage = CaptureStatusMessage.AuthRequired
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
                 CaptureEventsResult.Forbidden -> {
-                    captureStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markCaptureStreamUnavailable()
                     captureMessage = CaptureStatusMessage.Forbidden
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
                 is CaptureEventsResult.HttpFailure -> {
-                    captureStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markCaptureStreamUnavailable()
                     captureMessage = CaptureStatusMessage.HttpFailure(eventResult.statusCode)
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
                 is CaptureEventsResult.InvalidRequest -> {
-                    captureStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markCaptureStreamUnavailable()
                     captureMessage = CaptureStatusMessage.InvalidResponse(eventResult.message)
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
                 is CaptureEventsResult.InvalidResponse -> {
-                    captureStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markCaptureStreamUnavailable()
                     captureMessage = CaptureStatusMessage.InvalidResponse(eventResult.message)
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
                 is CaptureEventsResult.NetworkFailure -> {
-                    captureStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markCaptureStreamUnavailable()
                     captureMessage = CaptureStatusMessage.NetworkFailure(eventResult.message)
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
             }
         }
@@ -2521,6 +2531,12 @@ private fun NetworkScreen(
             return@LaunchedEffect
         }
         val generation = connectionGeneration
+        val streamState = EventStreamReconnectState()
+        fun markNetworkStreamUnavailable(): Long {
+            val decision = streamState.onUnavailable()
+            networkStreamHealth = decision.health
+            return decision.nextRequestDelayMs
+        }
         while (isActive) {
             val currentStatus = networkStatus
             val eventResult = withContext(Dispatchers.IO) {
@@ -2535,7 +2551,8 @@ private fun NetworkScreen(
             if (!isCurrentConnection(activeConnection, generation) || !isForeground) return@LaunchedEffect
             when (eventResult) {
                 is NetworkEventsResult.Batch -> {
-                    networkStreamHealth = EventStreamHealth.Healthy
+                    val streamDecision = streamState.onBatch(eventResult.events.size)
+                    networkStreamHealth = streamDecision.health
                     var needsReconciliation = false
                     var needsImmediateReconciliation = false
                     eventResult.events.forEach { event ->
@@ -2561,37 +2578,40 @@ private fun NetworkScreen(
                     } else if (eventResult.events.isNotEmpty()) {
                         networkMessage = null
                     }
-                    delay(if (eventResult.events.isEmpty()) 1_000L else 250L)
+                    delay(streamDecision.nextRequestDelayMs)
+                }
+                NetworkEventsResult.NoEvents -> {
+                    delay(markNetworkStreamUnavailable())
                 }
                 NetworkEventsResult.AuthenticationRequired -> {
-                    networkStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markNetworkStreamUnavailable()
                     networkMessage = NetworkMessage.AuthRequired
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
                 NetworkEventsResult.Forbidden -> {
-                    networkStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markNetworkStreamUnavailable()
                     networkMessage = NetworkMessage.Forbidden
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
                 is NetworkEventsResult.HttpFailure -> {
-                    networkStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markNetworkStreamUnavailable()
                     networkMessage = NetworkMessage.HttpFailure(eventResult.statusCode)
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
                 is NetworkEventsResult.InvalidRequest -> {
-                    networkStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markNetworkStreamUnavailable()
                     networkMessage = NetworkMessage.InvalidResponse(eventResult.message)
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
                 is NetworkEventsResult.InvalidResponse -> {
-                    networkStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markNetworkStreamUnavailable()
                     networkMessage = NetworkMessage.InvalidResponse(eventResult.message)
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
                 is NetworkEventsResult.NetworkFailure -> {
-                    networkStreamHealth = EventStreamHealth.Degraded
+                    val retryDelayMs = markNetworkStreamUnavailable()
                     networkMessage = NetworkMessage.NetworkFailure(eventResult.message)
-                    delay(ConnectionRequestPolicy.EVENT_RETRY_DELAY_MS)
+                    delay(retryDelayMs)
                 }
             }
         }
@@ -5721,7 +5741,8 @@ internal object ConnectionRequestPolicy {
     const val HEALTHY_RECONCILIATION_INTERVAL_MS = 30_000L
     const val FALLBACK_INITIAL_DELAY_MS = 2_000L
     const val FALLBACK_MAX_DELAY_MS = 30_000L
-    const val EVENT_RETRY_DELAY_MS = 2_000L
+    const val EVENT_RETRY_INITIAL_DELAY_MS = 2_000L
+    const val EVENT_BATCH_RECONNECT_DELAY_MS = 250L
     const val COORDINATOR_TICK_MS = 1_000L
     const val PREVIEW_INTERVAL_MS = 1_000L
 
@@ -5739,7 +5760,35 @@ internal object ConnectionRequestPolicy {
     }
 }
 
-private enum class EventStreamHealth {
+internal data class EventStreamReconnectDecision(
+    val health: EventStreamHealth,
+    val nextRequestDelayMs: Long,
+)
+
+internal class EventStreamReconnectState {
+    private var retryDelayMs = ConnectionRequestPolicy.EVENT_RETRY_INITIAL_DELAY_MS
+
+    fun onBatch(eventCount: Int): EventStreamReconnectDecision {
+        require(eventCount >= 0) { "eventCount must be non-negative" }
+        if (eventCount == 0) return onUnavailable()
+        retryDelayMs = ConnectionRequestPolicy.EVENT_RETRY_INITIAL_DELAY_MS
+        return EventStreamReconnectDecision(
+            health = EventStreamHealth.Healthy,
+            nextRequestDelayMs = ConnectionRequestPolicy.EVENT_BATCH_RECONNECT_DELAY_MS,
+        )
+    }
+
+    fun onUnavailable(): EventStreamReconnectDecision {
+        val nextRequestDelayMs = retryDelayMs
+        retryDelayMs = ConnectionRequestPolicy.nextFallbackDelay(retryDelayMs)
+        return EventStreamReconnectDecision(
+            health = EventStreamHealth.Degraded,
+            nextRequestDelayMs = nextRequestDelayMs,
+        )
+    }
+}
+
+internal enum class EventStreamHealth {
     Starting,
     Healthy,
     Degraded,

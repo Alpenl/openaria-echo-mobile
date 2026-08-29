@@ -265,9 +265,18 @@ class DeviceHttpClient {
             }
         } catch (exception: IOException) {
             SessionListResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
+        } catch (exception: RuntimeException) {
+            // Some JDK/Android HttpURLConnection implementations race with
+            // disconnect() and throw NPE instead of IOException. Once the
+            // caller has cancelled, expose the same typed transport result.
+            if (cancellation?.isCancelled() == true) {
+                SessionListResult.NetworkFailure("session request cancelled")
+            } else {
+                throw exception
+            }
         } finally {
             cancellation?.clear(http)
-            http.disconnect()
+            runCatching { http.disconnect() }
         }
     }
 

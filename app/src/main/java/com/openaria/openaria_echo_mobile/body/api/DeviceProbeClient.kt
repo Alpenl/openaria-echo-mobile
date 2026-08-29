@@ -90,9 +90,17 @@ class DeviceProbeClient {
             }
         } catch (exception: IOException) {
             ProbeResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
+        } catch (exception: RuntimeException) {
+            // A concurrent cancellation can surface as a JDK NPE while the
+            // connection is being disconnected; keep admission failure typed.
+            if (cancellation?.isCancelled() == true) {
+                ProbeResult.NetworkFailure("admission cancelled")
+            } else {
+                throw exception
+            }
         } finally {
             cancellation?.clear(connection)
-            connection.disconnect()
+            runCatching { connection.disconnect() }
         }
     }
 

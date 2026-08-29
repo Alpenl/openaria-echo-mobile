@@ -70,6 +70,64 @@ class DeviceDiscoveryClientTest {
     }
 
     @Test
+    fun `lost for the duplicate found object invalidates the merged service revision`() {
+        val backend = FakeDiscoveryBackend()
+        val client = DeviceDiscoveryClient(backend, FakeDiscoveryScheduler())
+        val states = mutableListOf<DiscoveryState>()
+        client.start(states::add)
+        val first = service("body-a", Any())
+        val duplicate = service("body-a", Any())
+
+        backend.latestScan.onServiceFound(first)
+        backend.latestScan.onServiceFound(duplicate)
+        assertEquals(1, backend.resolveCalls.size)
+
+        backend.latestScan.onServiceLost(duplicate)
+        backend.succeedNext(resolved("body-a", "192.168.1.10"))
+
+        assertTrue(assertIs<DiscoveryState.Scanning>(states.last()).bodies.isEmpty())
+    }
+
+    @Test
+    fun `lost with a fresh native object marks the service key offline`() {
+        val backend = FakeDiscoveryBackend()
+        val client = DeviceDiscoveryClient(backend, FakeDiscoveryScheduler())
+        val states = mutableListOf<DiscoveryState>()
+        client.start(states::add)
+
+        backend.latestScan.onServiceFound(service("body-a", Any()))
+        backend.succeedNext(resolved("body-a", "192.168.1.10"))
+
+        backend.latestScan.onServiceLost(service("body-a", Any()))
+
+        val body = assertIs<DiscoveryState.Scanning>(states.last()).bodies.single()
+        assertEquals(false, body.isOnline)
+    }
+
+    @Test
+    fun `lost from an old generation cannot remove the same service in a new scan`() {
+        val backend = FakeDiscoveryBackend()
+        val client = DeviceDiscoveryClient(backend, FakeDiscoveryScheduler())
+        val newStates = mutableListOf<DiscoveryState>()
+        client.start { }
+        val oldScan = backend.latestScan
+        val oldService = service("body-a", Any())
+        oldScan.onServiceFound(oldService)
+        backend.succeedNext(resolved("body-a", "192.168.1.10"))
+
+        client.start(newStates::add)
+        val newScan = backend.latestScan
+        newScan.onServiceFound(service("body-a", Any()))
+        backend.succeedNext(resolved("body-a", "192.168.1.11"))
+
+        oldScan.onServiceLost(oldService)
+
+        val body = assertIs<DiscoveryState.Scanning>(newStates.last()).bodies.single()
+        assertEquals("http://192.168.1.11:8080", body.origin)
+        assertTrue(body.isOnline)
+    }
+
+    @Test
     fun `lost marks a body offline and reappear replaces endpoints`() {
         val backend = FakeDiscoveryBackend()
         val client = DeviceDiscoveryClient(backend, FakeDiscoveryScheduler())

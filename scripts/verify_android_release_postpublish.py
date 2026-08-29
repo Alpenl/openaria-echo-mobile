@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -36,7 +37,11 @@ SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 RELEASE_TAG = re.compile(r"^v([0-9]+\.[0-9]+\.[0-9]+)$")
 DOWNLOAD_CHUNK_BYTES = 64 * 1024
 DOWNLOAD_MAX_REDIRECTS = 5
+DOWNLOAD_WORKER_FLAG = "--internal-anonymous-download-worker"
 AAB_MAX_ENTRY_COUNT = 4096
+AAB_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+AAB_MAX_CENTRAL_DIRECTORY_BYTES = 16 * 1024 * 1024
+AAB_MAX_ZIP64_EOCD_BYTES = 4096
 AAB_MAX_ENTRY_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 AAB_MAX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 AAB_MAX_COMPRESSION_RATIO = 100.0
@@ -1212,18 +1217,15 @@ def _raise_download_timeout(
     )
 
 
-def download_anonymous_asset(
+def _validate_anonymous_download_arguments(
     *,
     asset_name: str,
-    url: str,
-    partial_output: Path,
     expected_size: int,
     expected_digest: str,
     connect_timeout_seconds: float,
     body_timeout_seconds: float,
     total_timeout_seconds: float,
-    allow_http_for_tests: bool = False,
-) -> dict[str, Any]:
+) -> None:
     mismatches: list[dict[str, Any]] = []
     _require(
         mismatches,
@@ -1287,6 +1289,28 @@ def download_anonymous_asset(
         )
     if mismatches:
         raise VerificationFailure(mismatches)
+
+
+def _download_anonymous_asset_in_worker(
+    *,
+    asset_name: str,
+    url: str,
+    partial_output: Path,
+    expected_size: int,
+    expected_digest: str,
+    connect_timeout_seconds: float,
+    body_timeout_seconds: float,
+    total_timeout_seconds: float,
+    allow_http_for_tests: bool = False,
+) -> dict[str, Any]:
+    _validate_anonymous_download_arguments(
+        asset_name=asset_name,
+        expected_size=expected_size,
+        expected_digest=expected_digest,
+        connect_timeout_seconds=connect_timeout_seconds,
+        body_timeout_seconds=body_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+    )
 
     partial_output.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1454,7 +1478,10 @@ def download_anonymous_asset(
                     DOWNLOAD_CHUNK_BYTES, expected_size - observed_size + 1
                 )
                 try:
-                    chunk = response.read(read_limit)
+                    # read1 performs at most one payload recv. The supervising
+                    # process still enforces the absolute attempt deadline,
+                    # including chunk framing and all pre-body phases.
+                    chunk = response.read1(read_limit)
                 except TimeoutError:
                     _raise_download_timeout(
                         asset_name=asset_name,
@@ -1552,6 +1579,227 @@ def download_anonymous_asset(
     }
 
 
+def _anonymous_download_worker_main() -> int:
+    try:
+        request = json.load(sys.stdin)
+        if not isinstance(request, dict):
+            raise TypeError("worker request must be an object")
+        report = _download_anonymous_asset_in_worker(
+            asset_name=request["asset_name"],
+            url=request["url"],
+            partial_output=Path(request["partial_output"]),
+            expected_size=request["expected_size"],
+            expected_digest=request["expected_digest"],
+            connect_timeout_seconds=request["connect_timeout_seconds"],
+            body_timeout_seconds=request["body_timeout_seconds"],
+            total_timeout_seconds=request["total_timeout_seconds"],
+            allow_http_for_tests=request["allow_http_for_tests"],
+        )
+        result: dict[str, Any] = {
+            "schema": "openaria.mobile.anonymous-download-worker.v1",
+            "status": "success",
+            "report": report,
+        }
+    except VerificationFailure as error:
+        result = {
+            "schema": "openaria.mobile.anonymous-download-worker.v1",
+            "status": "verification_failure",
+            "mismatches": error.mismatches,
+        }
+    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as error:
+        result = {
+            "schema": "openaria.mobile.anonymous-download-worker.v1",
+            "status": "internal_error",
+            "error_type": type(error).__name__,
+        }
+    json.dump(result, sys.stdout, sort_keys=True)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return 0
+
+
+def _kill_and_reap_download_worker(
+    process: subprocess.Popen[str],
+) -> tuple[str, str]:
+    if process.poll() is None:
+        process.kill()
+    # SIGKILL closes the worker's only network connection. communicate() waits
+    # for and reaps the direct child, so no timed-out resolver or socket keeps
+    # running after this function returns.
+    stdout, stderr = process.communicate()
+    return stdout, stderr
+
+
+def download_anonymous_asset(
+    *,
+    asset_name: str,
+    url: str,
+    partial_output: Path,
+    expected_size: int,
+    expected_digest: str,
+    connect_timeout_seconds: float,
+    body_timeout_seconds: float,
+    total_timeout_seconds: float,
+    allow_http_for_tests: bool = False,
+) -> dict[str, Any]:
+    _validate_anonymous_download_arguments(
+        asset_name=asset_name,
+        expected_size=expected_size,
+        expected_digest=expected_digest,
+        connect_timeout_seconds=connect_timeout_seconds,
+        body_timeout_seconds=body_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+    )
+
+    def remove_partial() -> None:
+        try:
+            partial_output.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    remove_partial()
+    request = {
+        "asset_name": asset_name,
+        "url": url,
+        "partial_output": str(partial_output),
+        "expected_size": expected_size,
+        "expected_digest": expected_digest,
+        "connect_timeout_seconds": connect_timeout_seconds,
+        "body_timeout_seconds": body_timeout_seconds,
+        "total_timeout_seconds": total_timeout_seconds,
+        "allow_http_for_tests": allow_http_for_tests,
+    }
+    environment = dict(os.environ)
+    for credential_name in (
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+        "ACTIONS_ID_TOKEN_REQUEST_URL",
+        "ACTIONS_RUNTIME_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+    ):
+        environment.pop(credential_name, None)
+
+    started = time.monotonic()
+    deadline = started + total_timeout_seconds
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), DOWNLOAD_WORKER_FLAG],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+            start_new_session=True,
+        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _kill_and_reap_download_worker(process)
+            remove_partial()
+            raise _download_failure(
+                f"anonymous_downloads[{asset_name}].total_timeout_seconds",
+                "complete attempt finished before the total deadline",
+                "expired",
+            )
+        try:
+            stdout, _stderr = process.communicate(
+                json.dumps(request, sort_keys=True), timeout=remaining
+            )
+        except subprocess.TimeoutExpired:
+            _kill_and_reap_download_worker(process)
+            remove_partial()
+            raise _download_failure(
+                f"anonymous_downloads[{asset_name}].total_timeout_seconds",
+                "complete attempt finished before the total deadline",
+                "expired",
+            ) from None
+    except VerificationFailure:
+        raise
+    except OSError as error:
+        if process is not None and process.poll() is None:
+            _kill_and_reap_download_worker(process)
+        remove_partial()
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].worker_start",
+            "isolated anonymous download worker started and was reaped",
+            type(error).__name__,
+        ) from error
+
+    finished = time.monotonic()
+    if finished > deadline:
+        remove_partial()
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].total_timeout_seconds",
+            "complete attempt finished before the total deadline",
+            "expired",
+        )
+    if process.returncode != 0:
+        remove_partial()
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].worker_exit",
+            0,
+            process.returncode,
+        )
+    try:
+        result = json.loads(stdout)
+    except json.JSONDecodeError as error:
+        remove_partial()
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].worker_protocol",
+            "single valid JSON result",
+            "invalid",
+        ) from error
+    if (
+        not isinstance(result, dict)
+        or result.get("schema") != "openaria.mobile.anonymous-download-worker.v1"
+    ):
+        remove_partial()
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].worker_protocol",
+            "openaria.mobile.anonymous-download-worker.v1 object",
+            "invalid",
+        )
+    if result.get("status") == "verification_failure":
+        mismatches = result.get("mismatches")
+        remove_partial()
+        if isinstance(mismatches, list) and all(
+            isinstance(mismatch, dict) for mismatch in mismatches
+        ):
+            raise VerificationFailure(mismatches)
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].worker_protocol",
+            "field-level verification mismatches",
+            "invalid",
+        )
+    if result.get("status") != "success" or not isinstance(result.get("report"), dict):
+        remove_partial()
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].worker_protocol",
+            "successful bounded download result",
+            result.get("status"),
+        )
+
+    report = result["report"]
+    worker_elapsed = report.get("elapsed_seconds")
+    report["elapsed_seconds"] = round(finished - started, 6)
+    report["worker"] = {
+        "isolated_process": True,
+        "reaped": process.poll() is not None,
+        "network_elapsed_seconds": worker_elapsed,
+        "credentials_removed": [
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "ACTIONS_RUNTIME_TOKEN",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+        ],
+    }
+    report["limits"]["total_timeout_scope"] = (
+        "worker start, DNS, TCP/TLS, headers, redirects, body, and worker reap"
+    )
+    return report
+
+
 def _run_tool(
     command: list[str], field: str, *, timeout_seconds: int
 ) -> subprocess.CompletedProcess[str]:
@@ -1596,7 +1844,376 @@ def _safe_tool_output(
     return output
 
 
+def _preflight_aab_zip_container(aab_path: Path) -> dict[str, Any]:
+    eocd_struct = struct.Struct("<4s4H2IH")
+    zip64_locator_struct = struct.Struct("<4sIQI")
+    zip64_eocd_struct = struct.Struct("<4sQ2H2I4Q")
+    central_header_struct = struct.Struct("<4s6H3I5H2I")
+    eocd_signature = b"PK\x05\x06"
+    zip64_locator_signature = b"PK\x06\x07"
+    zip64_eocd_signature = b"PK\x06\x06"
+    central_signature = b"PK\x01\x02"
+
+    try:
+        archive_bytes = aab_path.stat().st_size
+    except OSError as error:
+        raise _download_failure(
+            "aab.archive.container_preflight.archive_bytes",
+            f"1..{AAB_MAX_ARCHIVE_BYTES}",
+            type(error).__name__,
+        ) from error
+    mismatches: list[dict[str, Any]] = []
+    _require(
+        mismatches,
+        0 < archive_bytes <= AAB_MAX_ARCHIVE_BYTES,
+        "aab.archive.container_preflight.archive_bytes",
+        f"1..{AAB_MAX_ARCHIVE_BYTES}",
+        archive_bytes,
+    )
+    _require(
+        mismatches,
+        archive_bytes >= eocd_struct.size,
+        "aab.archive.container_preflight.minimum_bytes",
+        f">= {eocd_struct.size}",
+        archive_bytes,
+    )
+    if mismatches:
+        raise VerificationFailure(mismatches)
+
+    try:
+        with aab_path.open("rb") as archive_file:
+            tail_bytes = min(archive_bytes, eocd_struct.size + 65535)
+            archive_file.seek(archive_bytes - tail_bytes)
+            tail = archive_file.read(tail_bytes)
+            candidates: list[tuple[int, tuple[Any, ...]]] = []
+            search_from = 0
+            while True:
+                relative_offset = tail.find(eocd_signature, search_from)
+                if relative_offset < 0:
+                    break
+                if relative_offset + eocd_struct.size <= len(tail):
+                    values = eocd_struct.unpack_from(tail, relative_offset)
+                    comment_bytes = values[-1]
+                    if relative_offset + eocd_struct.size + comment_bytes == len(tail):
+                        candidates.append((relative_offset, values))
+                search_from = relative_offset + 1
+            _require(
+                mismatches,
+                len(candidates) == 1,
+                "aab.archive.container_preflight.eocd_candidate_count",
+                1,
+                len(candidates),
+            )
+            if mismatches:
+                raise VerificationFailure(mismatches)
+
+            relative_eocd_offset, eocd = candidates[0]
+            eocd_offset = archive_bytes - tail_bytes + relative_eocd_offset
+            (
+                _signature,
+                disk_number,
+                central_directory_disk,
+                entries_on_disk_16,
+                total_entries_16,
+                central_directory_bytes_32,
+                central_directory_offset_32,
+                comment_bytes,
+            ) = eocd
+            _mismatch(
+                mismatches,
+                "aab.archive.container_preflight.disk_number",
+                0,
+                disk_number,
+            )
+            _mismatch(
+                mismatches,
+                "aab.archive.container_preflight.central_directory_disk",
+                0,
+                central_directory_disk,
+            )
+
+            sentinel_used = (
+                entries_on_disk_16 == 0xFFFF
+                or total_entries_16 == 0xFFFF
+                or central_directory_bytes_32 == 0xFFFFFFFF
+                or central_directory_offset_32 == 0xFFFFFFFF
+            )
+            locator_offset = eocd_offset - zip64_locator_struct.size
+            locator = b""
+            if locator_offset >= 0:
+                archive_file.seek(locator_offset)
+                locator = archive_file.read(zip64_locator_struct.size)
+            has_zip64_locator = locator.startswith(zip64_locator_signature)
+            _mismatch(
+                mismatches,
+                "aab.archive.container_preflight.zip64_required",
+                sentinel_used,
+                has_zip64_locator,
+            )
+            if mismatches:
+                raise VerificationFailure(mismatches)
+
+            zip64 = False
+            zip64_eocd_bytes = 0
+            directory_end = eocd_offset
+            if sentinel_used and has_zip64_locator:
+                zip64 = True
+                (
+                    _locator_signature,
+                    zip64_eocd_disk,
+                    zip64_eocd_offset,
+                    total_disks,
+                ) = zip64_locator_struct.unpack(locator)
+                _mismatch(
+                    mismatches,
+                    "aab.archive.container_preflight.zip64_eocd_disk",
+                    0,
+                    zip64_eocd_disk,
+                )
+                _mismatch(
+                    mismatches,
+                    "aab.archive.container_preflight.total_disks",
+                    1,
+                    total_disks,
+                )
+                _require(
+                    mismatches,
+                    0 <= zip64_eocd_offset <= locator_offset - zip64_eocd_struct.size,
+                    "aab.archive.container_preflight.zip64_eocd_offset",
+                    "bounded offset before locator",
+                    zip64_eocd_offset,
+                )
+                if mismatches:
+                    raise VerificationFailure(mismatches)
+                archive_file.seek(zip64_eocd_offset)
+                zip64_header = archive_file.read(zip64_eocd_struct.size)
+                _require(
+                    mismatches,
+                    len(zip64_header) == zip64_eocd_struct.size,
+                    "aab.archive.container_preflight.zip64_eocd_header_bytes",
+                    zip64_eocd_struct.size,
+                    len(zip64_header),
+                )
+                if mismatches:
+                    raise VerificationFailure(mismatches)
+                zip64_values = zip64_eocd_struct.unpack(zip64_header)
+                (
+                    zip64_signature,
+                    zip64_record_payload_bytes,
+                    _version_made_by,
+                    _version_needed,
+                    zip64_disk_number,
+                    zip64_central_directory_disk,
+                    entries_on_disk,
+                    total_entries,
+                    central_directory_bytes,
+                    central_directory_offset,
+                ) = zip64_values
+                zip64_eocd_bytes = 12 + zip64_record_payload_bytes
+                _mismatch(
+                    mismatches,
+                    "aab.archive.container_preflight.zip64_eocd_signature",
+                    zip64_eocd_signature.hex(),
+                    zip64_signature.hex(),
+                )
+                _require(
+                    mismatches,
+                    44 <= zip64_record_payload_bytes <= AAB_MAX_ZIP64_EOCD_BYTES - 12,
+                    "aab.archive.container_preflight.zip64_eocd_bytes",
+                    f"56..{AAB_MAX_ZIP64_EOCD_BYTES}",
+                    zip64_eocd_bytes,
+                )
+                _mismatch(
+                    mismatches,
+                    "aab.archive.container_preflight.zip64_eocd_end",
+                    locator_offset,
+                    zip64_eocd_offset + zip64_eocd_bytes,
+                )
+                _mismatch(
+                    mismatches,
+                    "aab.archive.container_preflight.zip64_disk_number",
+                    0,
+                    zip64_disk_number,
+                )
+                _mismatch(
+                    mismatches,
+                    "aab.archive.container_preflight.zip64_central_directory_disk",
+                    0,
+                    zip64_central_directory_disk,
+                )
+                for field, classic_value, sentinel, zip64_value in (
+                    (
+                        "entries_on_disk",
+                        entries_on_disk_16,
+                        0xFFFF,
+                        entries_on_disk,
+                    ),
+                    (
+                        "total_entries",
+                        total_entries_16,
+                        0xFFFF,
+                        total_entries,
+                    ),
+                    (
+                        "central_directory_bytes",
+                        central_directory_bytes_32,
+                        0xFFFFFFFF,
+                        central_directory_bytes,
+                    ),
+                    (
+                        "central_directory_offset",
+                        central_directory_offset_32,
+                        0xFFFFFFFF,
+                        central_directory_offset,
+                    ),
+                ):
+                    if classic_value != sentinel:
+                        _mismatch(
+                            mismatches,
+                            f"aab.archive.container_preflight.zip64_classic_{field}",
+                            zip64_value,
+                            classic_value,
+                        )
+                directory_end = zip64_eocd_offset
+            else:
+                entries_on_disk = entries_on_disk_16
+                total_entries = total_entries_16
+                central_directory_bytes = central_directory_bytes_32
+                central_directory_offset = central_directory_offset_32
+
+            _mismatch(
+                mismatches,
+                "aab.archive.container_preflight.entries_on_disk",
+                total_entries,
+                entries_on_disk,
+            )
+            _require(
+                mismatches,
+                0 < total_entries <= AAB_MAX_ENTRY_COUNT,
+                "aab.archive.container_preflight.entry_count",
+                f"1..{AAB_MAX_ENTRY_COUNT}",
+                total_entries,
+            )
+            _require(
+                mismatches,
+                0 < central_directory_bytes <= AAB_MAX_CENTRAL_DIRECTORY_BYTES,
+                "aab.archive.container_preflight.central_directory_bytes",
+                f"1..{AAB_MAX_CENTRAL_DIRECTORY_BYTES}",
+                central_directory_bytes,
+            )
+            _require(
+                mismatches,
+                0 <= central_directory_offset < directory_end,
+                "aab.archive.container_preflight.central_directory_offset",
+                "bounded offset before EOCD records",
+                central_directory_offset,
+            )
+            _mismatch(
+                mismatches,
+                "aab.archive.container_preflight.central_directory_end",
+                directory_end,
+                central_directory_offset + central_directory_bytes,
+            )
+            if mismatches:
+                raise VerificationFailure(mismatches)
+
+            archive_file.seek(central_directory_offset)
+            remaining_directory_bytes = central_directory_bytes
+            actual_entries = 0
+            for entry_index in range(total_entries):
+                central_header = archive_file.read(central_header_struct.size)
+                if len(central_header) != central_header_struct.size:
+                    mismatches.append(
+                        {
+                            "field": "aab.archive.container_preflight.central_header_bytes",
+                            "expected": central_header_struct.size,
+                            "actual": len(central_header),
+                        }
+                    )
+                    break
+                central_values = central_header_struct.unpack(central_header)
+                _require(
+                    mismatches,
+                    central_values[0] == central_signature,
+                    f"aab.archive.container_preflight.entries[{entry_index}].signature",
+                    central_signature.hex(),
+                    central_values[0].hex(),
+                )
+                filename_bytes = central_values[10]
+                extra_bytes = central_values[11]
+                entry_comment_bytes = central_values[12]
+                entry_disk_number = central_values[13]
+                variable_bytes = filename_bytes + extra_bytes + entry_comment_bytes
+                record_bytes = central_header_struct.size + variable_bytes
+                _require(
+                    mismatches,
+                    record_bytes <= remaining_directory_bytes,
+                    f"aab.archive.container_preflight.entries[{entry_index}].record_bytes",
+                    f"<= {remaining_directory_bytes}",
+                    record_bytes,
+                )
+                _mismatch(
+                    mismatches,
+                    f"aab.archive.container_preflight.entries[{entry_index}].disk_number",
+                    0,
+                    entry_disk_number,
+                )
+                if mismatches:
+                    break
+                archive_file.seek(variable_bytes, os.SEEK_CUR)
+                remaining_directory_bytes -= record_bytes
+                actual_entries += 1
+            _mismatch(
+                mismatches,
+                "aab.archive.container_preflight.actual_entry_count",
+                total_entries,
+                actual_entries,
+            )
+            _mismatch(
+                mismatches,
+                "aab.archive.container_preflight.unparsed_central_directory_bytes",
+                0,
+                remaining_directory_bytes,
+            )
+            if mismatches:
+                raise VerificationFailure(mismatches)
+    except VerificationFailure:
+        raise
+    except (OSError, struct.error) as error:
+        raise VerificationFailure(
+            [
+                {
+                    "field": "aab.archive.container_preflight",
+                    "expected": "bounded unambiguous single-disk ZIP container",
+                    "actual": type(error).__name__,
+                }
+            ]
+        ) from error
+
+    return {
+        "archive_bytes": archive_bytes,
+        "central_directory_bytes": central_directory_bytes,
+        "central_directory_offset": central_directory_offset,
+        "declared_entry_count": total_entries,
+        "actual_entry_count": actual_entries,
+        "eocd_offset": eocd_offset,
+        "eocd_comment_bytes": comment_bytes,
+        "zip64": zip64,
+        "zip64_eocd_bytes": zip64_eocd_bytes,
+        "single_disk": True,
+        "unambiguous": True,
+        "checked_before_zipfile": True,
+        "limits": {
+            "archive_bytes": AAB_MAX_ARCHIVE_BYTES,
+            "central_directory_bytes": AAB_MAX_CENTRAL_DIRECTORY_BYTES,
+            "entry_count": AAB_MAX_ENTRY_COUNT,
+            "zip64_eocd_bytes": AAB_MAX_ZIP64_EOCD_BYTES,
+        },
+    }
+
+
 def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
+    container_evidence = _preflight_aab_zip_container(aab_path)
     entries: list[zipfile.ZipInfo] = []
     payload_entries: list[str] = []
     signature_controls: list[str] = []
@@ -1612,6 +2229,12 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
                 len(entries) <= AAB_MAX_ENTRY_COUNT,
                 "aab.archive.entry_count",
                 f"<= {AAB_MAX_ENTRY_COUNT}",
+                len(entries),
+            )
+            _mismatch(
+                resource_mismatches,
+                "aab.archive.entry_count_vs_container_preflight",
+                container_evidence["actual_entry_count"],
                 len(entries),
             )
             for entry in entries:
@@ -1711,7 +2334,7 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
                         name,
                     )
                     continue
-                signature_file = re.fullmatch(r"META-INF/([^/]+)\.SF", normalized_name)
+                signature_file = re.fullmatch(r"META-INF/([^/]*)\.SF", normalized_name)
                 if signature_file is not None:
                     signature_files.append((signature_file.group(1), name))
                     signature_controls.append(name)
@@ -1724,7 +2347,7 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
                     )
                     continue
                 signature_block = re.fullmatch(
-                    r"META-INF/([^/]+)\.(RSA|DSA|EC)", normalized_name
+                    r"META-INF/([^/]*)\.(RSA|DSA|EC)", normalized_name
                 )
                 if signature_block is not None:
                     signature_blocks.append((signature_block.group(1), name))
@@ -1737,7 +2360,7 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
                         name,
                     )
                     continue
-                if re.fullmatch(r"META-INF/SIG-[^/]+", normalized_name) is not None:
+                if re.fullmatch(r"META-INF/SIG-[^/]*", normalized_name) is not None:
                     signature_controls.append(name)
                     mismatches.append(
                         {
@@ -1807,6 +2430,7 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
             ]
         ) from error
     return {
+        "container_preflight": container_evidence,
         "entry_count": len(entries),
         "payload_entry_count": len(payload_entries),
         "signature_control_entries": sorted(signature_controls),
@@ -1819,12 +2443,15 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
             "max_entry_uncompressed_bytes": max_entry_uncompressed_bytes,
             "max_compression_ratio": round(max_compression_ratio, 6),
             "limits": {
+                "archive_bytes": AAB_MAX_ARCHIVE_BYTES,
+                "central_directory_bytes": AAB_MAX_CENTRAL_DIRECTORY_BYTES,
                 "entry_count": AAB_MAX_ENTRY_COUNT,
                 "entry_uncompressed_bytes": AAB_MAX_ENTRY_UNCOMPRESSED_BYTES,
                 "total_uncompressed_bytes": AAB_MAX_TOTAL_UNCOMPRESSED_BYTES,
                 "compression_ratio": AAB_MAX_COMPRESSION_RATIO,
             },
             "checked_before_crc_decompression": True,
+            "container_checked_before_zipfile": True,
         },
     }
 
@@ -2332,6 +2959,100 @@ def verify_downloaded_release(
             ),
         ),
         (
+            "archive.resources.container_checked_before_zipfile",
+            True,
+            _at(
+                aab_verification,
+                "archive",
+                "resources",
+                "container_checked_before_zipfile",
+            ),
+        ),
+        (
+            "archive.container_preflight.archive_bytes",
+            expected_aab["size"],
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "archive_bytes",
+            ),
+        ),
+        (
+            "archive.container_preflight.single_disk",
+            True,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "single_disk",
+            ),
+        ),
+        (
+            "archive.container_preflight.unambiguous",
+            True,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "unambiguous",
+            ),
+        ),
+        (
+            "archive.container_preflight.checked_before_zipfile",
+            True,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "checked_before_zipfile",
+            ),
+        ),
+        (
+            "archive.container_preflight.limits.archive_bytes",
+            AAB_MAX_ARCHIVE_BYTES,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "limits",
+                "archive_bytes",
+            ),
+        ),
+        (
+            "archive.container_preflight.limits.central_directory_bytes",
+            AAB_MAX_CENTRAL_DIRECTORY_BYTES,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "limits",
+                "central_directory_bytes",
+            ),
+        ),
+        (
+            "archive.container_preflight.limits.entry_count",
+            AAB_MAX_ENTRY_COUNT,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "limits",
+                "entry_count",
+            ),
+        ),
+        (
+            "archive.container_preflight.limits.zip64_eocd_bytes",
+            AAB_MAX_ZIP64_EOCD_BYTES,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "limits",
+                "zip64_eocd_bytes",
+            ),
+        ),
+        (
             "archive.resources.limits.entry_count",
             AAB_MAX_ENTRY_COUNT,
             _at(
@@ -2445,6 +3166,102 @@ def verify_downloaded_release(
             f"number between 0 and {limit}",
             actual,
         )
+    archive_entry_count = _at(aab_verification, "archive", "entry_count")
+    _mismatch(
+        mismatches,
+        "aab.strict_verification.archive.container_preflight.declared_entry_count",
+        archive_entry_count,
+        _at(
+            aab_verification,
+            "archive",
+            "container_preflight",
+            "declared_entry_count",
+        ),
+    )
+    _mismatch(
+        mismatches,
+        "aab.strict_verification.archive.container_preflight.actual_entry_count",
+        archive_entry_count,
+        _at(
+            aab_verification,
+            "archive",
+            "container_preflight",
+            "actual_entry_count",
+        ),
+    )
+    for field, limit, actual in (
+        (
+            "container_preflight.central_directory_bytes",
+            AAB_MAX_CENTRAL_DIRECTORY_BYTES,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "central_directory_bytes",
+            ),
+        ),
+        (
+            "container_preflight.archive_bytes",
+            AAB_MAX_ARCHIVE_BYTES,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "archive_bytes",
+            ),
+        ),
+    ):
+        _require(
+            mismatches,
+            isinstance(actual, int)
+            and not isinstance(actual, bool)
+            and 0 < actual <= limit,
+            f"aab.strict_verification.archive.{field}",
+            f"integer between 1 and {limit}",
+            actual,
+        )
+    container_archive_bytes = _at(
+        aab_verification, "archive", "container_preflight", "archive_bytes"
+    )
+    container_directory_bytes = _at(
+        aab_verification,
+        "archive",
+        "container_preflight",
+        "central_directory_bytes",
+    )
+    container_directory_offset = _at(
+        aab_verification,
+        "archive",
+        "container_preflight",
+        "central_directory_offset",
+    )
+    container_eocd_offset = _at(
+        aab_verification, "archive", "container_preflight", "eocd_offset"
+    )
+    _require(
+        mismatches,
+        all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in (
+                container_archive_bytes,
+                container_directory_bytes,
+                container_directory_offset,
+                container_eocd_offset,
+            )
+        )
+        and 0 <= container_directory_offset
+        and container_directory_offset + container_directory_bytes
+        <= container_eocd_offset
+        < container_archive_bytes,
+        "aab.strict_verification.archive.container_preflight.offset_closure",
+        "0 <= central directory <= EOCD < archive bytes",
+        {
+            "archive_bytes": container_archive_bytes,
+            "central_directory_bytes": container_directory_bytes,
+            "central_directory_offset": container_directory_offset,
+            "eocd_offset": container_eocd_offset,
+        },
+    )
     if mismatches:
         raise VerificationFailure(mismatches)
 
@@ -2839,6 +3656,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    if sys.argv[1:] == [DOWNLOAD_WORKER_FLAG]:
+        return _anonymous_download_worker_main()
     args = _parser().parse_args()
     try:
         args.handler(args)

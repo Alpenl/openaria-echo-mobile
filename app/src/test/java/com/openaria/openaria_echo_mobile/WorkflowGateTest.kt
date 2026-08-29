@@ -596,10 +596,17 @@ class WorkflowGateTest {
         assertContains(verifier, "aab.archive.duplicate_entries")
         assertContains(verifier, "aab.archive.signature_control_count")
         assertContains(verifier, "AAB_MAX_ENTRY_COUNT")
+        assertContains(verifier, "AAB_MAX_ARCHIVE_BYTES")
+        assertContains(verifier, "AAB_MAX_CENTRAL_DIRECTORY_BYTES")
+        assertContains(verifier, "_preflight_aab_zip_container")
+        assertContains(verifier, "checked_before_zipfile")
         assertContains(verifier, "AAB_MAX_ENTRY_UNCOMPRESSED_BYTES")
         assertContains(verifier, "AAB_MAX_TOTAL_UNCOMPRESSED_BYTES")
         assertContains(verifier, "AAB_MAX_COMPRESSION_RATIO")
         assertContains(verifier, "normalized_name = name.upper()")
+        assertContains(verifier, "DOWNLOAD_WORKER_FLAG")
+        assertContains(verifier, "_kill_and_reap_download_worker")
+        assertContains(verifier, "process.communicate")
         assertContains(verifier, "timeout=timeout_seconds")
         assertContains(workflow, "Final API recheck and write auditable evidence")
         assertTrue(
@@ -661,6 +668,15 @@ class WorkflowGateTest {
         assertContains(verifierTests, "test_zip_bomb_ratio_is_rejected_before_crc_decompression")
         assertContains(verifierTests, "test_jarsigner_timeout_is_classified_and_truststore_is_cleaned")
         assertContains(verifierTests, "test_jar_ignored_signature_controls_are_case_insensitive")
+        assertContains(verifierTests, "test_empty_basename_jar_signature_controls_are_rejected")
+        assertContains(verifierTests, "test_slow_declared_body_cannot_cross_total_wall_clock")
+        assertContains(verifierTests, "test_slow_chunked_body_cannot_cross_total_wall_clock")
+        assertContains(verifierTests, "test_slow_headers_are_killed_and_worker_is_reaped")
+        assertContains(verifierTests, "test_declared_entry_limit_is_rejected_before_zipfile_construction")
+        assertContains(verifierTests, "test_underdeclared_central_directory_is_rejected_before_zipfile")
+        assertContains(verifierTests, "test_archive_and_central_directory_byte_limits_precede_zipfile")
+        assertContains(verifierTests, "test_forged_zip64_entry_count_is_rejected_before_zipfile_construction")
+        assertContains(verifierTests, "test_keytool_import_and_list_failures_clean_ephemeral_truststore")
     }
 
     @Test

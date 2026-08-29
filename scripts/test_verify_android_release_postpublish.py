@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -85,15 +86,48 @@ class AnonymousDownloadHandler(BaseHTTPRequestHandler):
             except BrokenPipeError:
                 pass
             return
-        if self.path in ("/oversized-chunked", "/stalled-chunked"):
+        if self.path == "/slow-declared":
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(self.exact_body)))
+            self.end_headers()
+            try:
+                for value in self.exact_body:
+                    time.sleep(0.02)
+                    self.wfile.write(bytes([value]))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if self.path == "/slow-headers":
+            wire_response = (
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n"
+                b"Content-Type: application/octet-stream\r\n\r\nabcd"
+            )
+            try:
+                for value in wire_response:
+                    time.sleep(0.02)
+                    self.wfile.write(bytes([value]))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if self.path in (
+            "/oversized-chunked",
+            "/stalled-chunked",
+            "/slow-chunked",
+        ):
             self.send_response(200)
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             chunks = [self.exact_body]
             if self.path == "/oversized-chunked":
                 chunks.append(b"e")
+            if self.path == "/slow-chunked":
+                chunks = [bytes([value]) for value in self.exact_body]
             try:
                 for chunk in chunks:
+                    if self.path == "/slow-chunked":
+                        time.sleep(0.02)
                     self.wfile.write(f"{len(chunk):X}\r\n".encode())
                     self.wfile.write(chunk + b"\r\n")
                     self.wfile.flush()
@@ -101,7 +135,7 @@ class AnonymousDownloadHandler(BaseHTTPRequestHandler):
                     time.sleep(0.2)
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
-            except BrokenPipeError:
+            except (BrokenPipeError, ConnectionResetError):
                 pass
             return
         self.send_error(404)
@@ -122,16 +156,24 @@ class BoundedAnonymousDownloadTest(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join(timeout=2)
 
-    def download(self, root: Path, route: str, *, body_timeout: float = 0.5) -> dict:
+    def download(
+        self,
+        root: Path,
+        route: str,
+        *,
+        connect_timeout: float = 0.5,
+        body_timeout: float = 0.5,
+        total_timeout: float = 2,
+    ) -> dict:
         return download_anonymous_asset(
             asset_name="asset.bin",
             url=f"{self.base_url}{route}",
             partial_output=root / "asset.bin.partial",
             expected_size=len(AnonymousDownloadHandler.exact_body),
             expected_digest=f"sha256:{sha256(AnonymousDownloadHandler.exact_body)}",
-            connect_timeout_seconds=0.5,
+            connect_timeout_seconds=connect_timeout,
             body_timeout_seconds=body_timeout,
-            total_timeout_seconds=2,
+            total_timeout_seconds=total_timeout,
             allow_http_for_tests=True,
         )
 
@@ -147,6 +189,9 @@ class BoundedAnonymousDownloadTest(unittest.TestCase):
             self.assertEqual(4, report["limits"]["hard_max_bytes"])
             self.assertTrue(report["partial_verified_before_publish"])
             self.assertNotIn("Authorization", report["request_headers"])
+            self.assertTrue(report["worker"]["isolated_process"])
+            self.assertTrue(report["worker"]["reaped"])
+            self.assertIn("DNS", report["limits"]["total_timeout_scope"])
 
     def test_oversized_content_length_is_rejected_before_body_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -190,6 +235,84 @@ class BoundedAnonymousDownloadTest(unittest.TestCase):
             self.assertFalse((root / "asset.bin.partial").exists())
         self.assertIn(
             "anonymous_downloads[asset.bin].body_timeout_seconds",
+            mismatch_fields(raised.exception),
+        )
+
+    def test_slow_declared_body_cannot_cross_total_wall_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            started = time.monotonic()
+            with self.assertRaises(VerificationFailure) as raised:
+                self.download(
+                    root,
+                    "/slow-declared",
+                    connect_timeout=0.04,
+                    body_timeout=0.04,
+                    total_timeout=0.06,
+                )
+            elapsed = time.monotonic() - started
+
+            self.assertFalse((root / "asset.bin.partial").exists())
+        self.assertLess(elapsed, 0.16)
+        self.assertIn(
+            "anonymous_downloads[asset.bin].total_timeout_seconds",
+            mismatch_fields(raised.exception),
+        )
+
+    def test_slow_chunked_body_cannot_cross_total_wall_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            started = time.monotonic()
+            with self.assertRaises(VerificationFailure) as raised:
+                self.download(
+                    root,
+                    "/slow-chunked",
+                    connect_timeout=0.05,
+                    body_timeout=0.05,
+                    total_timeout=0.07,
+                )
+            elapsed = time.monotonic() - started
+
+            self.assertFalse((root / "asset.bin.partial").exists())
+        self.assertLess(elapsed, 0.18)
+        self.assertIn(
+            "anonymous_downloads[asset.bin].total_timeout_seconds",
+            mismatch_fields(raised.exception),
+        )
+
+    def test_slow_headers_are_killed_and_worker_is_reaped(self) -> None:
+        created_processes: list[subprocess.Popen[str]] = []
+        real_popen = subprocess.Popen
+
+        def capture_process(*args: object, **kwargs: object) -> subprocess.Popen[str]:
+            process = real_popen(*args, **kwargs)
+            created_processes.append(process)
+            return process
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            started = time.monotonic()
+            with (
+                mock.patch.object(
+                    verifier.subprocess, "Popen", side_effect=capture_process
+                ),
+                self.assertRaises(VerificationFailure) as raised,
+            ):
+                self.download(
+                    root,
+                    "/slow-headers",
+                    connect_timeout=0.05,
+                    body_timeout=0.05,
+                    total_timeout=0.07,
+                )
+            elapsed = time.monotonic() - started
+
+            self.assertFalse((root / "asset.bin.partial").exists())
+        self.assertLess(elapsed, 0.18)
+        self.assertEqual(1, len(created_processes))
+        self.assertIsNotNone(created_processes[0].poll())
+        self.assertIn(
+            "anonymous_downloads[asset.bin].total_timeout_seconds",
             mismatch_fields(raised.exception),
         )
 
@@ -577,6 +700,26 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
                     "digest": f"sha256:{sha256(aab)}",
                 },
                 "archive": {
+                    "container_preflight": {
+                        "archive_bytes": len(aab),
+                        "central_directory_bytes": 1,
+                        "central_directory_offset": 0,
+                        "declared_entry_count": 5,
+                        "actual_entry_count": 5,
+                        "eocd_offset": 1,
+                        "eocd_comment_bytes": 0,
+                        "zip64": False,
+                        "zip64_eocd_bytes": 0,
+                        "single_disk": True,
+                        "unambiguous": True,
+                        "checked_before_zipfile": True,
+                        "limits": {
+                            "archive_bytes": verifier.AAB_MAX_ARCHIVE_BYTES,
+                            "central_directory_bytes": verifier.AAB_MAX_CENTRAL_DIRECTORY_BYTES,
+                            "entry_count": verifier.AAB_MAX_ENTRY_COUNT,
+                            "zip64_eocd_bytes": verifier.AAB_MAX_ZIP64_EOCD_BYTES,
+                        },
+                    },
                     "entry_count": 5,
                     "payload_entry_count": 2,
                     "signature_control_entries": [
@@ -603,6 +746,7 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
                             "compression_ratio": verifier.AAB_MAX_COMPRESSION_RATIO,
                         },
                         "checked_before_crc_decompression": True,
+                        "container_checked_before_zipfile": True,
                     },
                 },
                 "certificate_sha256": CERTIFICATE,
@@ -796,6 +940,13 @@ class StrictAabVerifierTest(unittest.TestCase):
         self.assertTrue(
             evidence["archive"]["resources"]["checked_before_crc_decompression"]
         )
+        self.assertTrue(
+            evidence["archive"]["container_preflight"]["checked_before_zipfile"]
+        )
+        self.assertEqual(
+            evidence["archive"]["entry_count"],
+            evidence["archive"]["container_preflight"]["actual_entry_count"],
+        )
         self.assertLessEqual(
             evidence["archive"]["resources"]["max_compression_ratio"],
             verifier.AAB_MAX_COMPRESSION_RATIO,
@@ -944,6 +1095,214 @@ class StrictAabVerifierTest(unittest.TestCase):
                     )
                 )
 
+    def test_empty_basename_jar_signature_controls_are_rejected(self) -> None:
+        ignored_controls = (
+            "META-INF/.SF",
+            "META-INF/.RSA",
+            "META-INF/.DSA",
+            "META-INF/.EC",
+            "META-INF/SIG-",
+        )
+        for ignored_control in ignored_controls:
+            with self.subTest(ignored_control=ignored_control):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    aab = self.copy_fixture(root)
+                    with zipfile.ZipFile(aab, "a", zipfile.ZIP_DEFLATED) as archive:
+                        archive.writestr(ignored_control, b"ignored by jarsigner")
+
+                    with self.assertRaises(VerificationFailure) as raised:
+                        self.verify(aab, root)
+
+                fields = mismatch_fields(raised.exception)
+                self.assertTrue(
+                    "aab.archive.signature_control_count" in fields
+                    or "aab.archive.signature_controls" in fields
+                    or "aab.archive.signature_file_count" in fields
+                    or "aab.archive.signature_block_count" in fields
+                )
+
+    def test_declared_entry_limit_is_rejected_before_zipfile_construction(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive_path = Path(temporary_directory) / "too-many-empty-entries.aab"
+            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as archive:
+                for index in range(verifier.AAB_MAX_ENTRY_COUNT + 1):
+                    archive.writestr(f"empty/{index}", b"")
+
+            with (
+                mock.patch.object(
+                    verifier.zipfile,
+                    "ZipFile",
+                    side_effect=AssertionError("ZipFile must not be constructed"),
+                ),
+                self.assertRaises(VerificationFailure) as raised,
+            ):
+                verifier._audit_aab_archive(archive_path)
+
+        self.assertIn(
+            "aab.archive.container_preflight.entry_count",
+            mismatch_fields(raised.exception),
+        )
+
+    def test_underdeclared_central_directory_is_rejected_before_zipfile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive_path = Path(temporary_directory) / "underdeclared-entries.aab"
+            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as archive:
+                for index in range(32):
+                    archive.writestr(f"empty/{index}", b"")
+
+            archive_bytes = bytearray(archive_path.read_bytes())
+            eocd_offset = archive_bytes.rfind(b"PK\x05\x06")
+            self.assertGreaterEqual(eocd_offset, 0)
+            struct.pack_into("<H", archive_bytes, eocd_offset + 8, 1)
+            struct.pack_into("<H", archive_bytes, eocd_offset + 10, 1)
+            archive_path.write_bytes(archive_bytes)
+
+            with (
+                mock.patch.object(
+                    verifier.zipfile,
+                    "ZipFile",
+                    side_effect=AssertionError("ZipFile must not be constructed"),
+                ),
+                self.assertRaises(VerificationFailure) as raised,
+            ):
+                verifier._audit_aab_archive(archive_path)
+
+        self.assertIn(
+            "aab.archive.container_preflight.unparsed_central_directory_bytes",
+            mismatch_fields(raised.exception),
+        )
+
+    def test_archive_and_central_directory_byte_limits_precede_zipfile(self) -> None:
+        cases = (
+            (
+                "AAB_MAX_ARCHIVE_BYTES",
+                self.base_aab.stat().st_size - 1,
+                "aab.archive.container_preflight.archive_bytes",
+            ),
+            (
+                "AAB_MAX_CENTRAL_DIRECTORY_BYTES",
+                1,
+                "aab.archive.container_preflight.central_directory_bytes",
+            ),
+        )
+        for constant, limit, expected_field in cases:
+            with self.subTest(constant=constant):
+                with (
+                    mock.patch.object(verifier, constant, limit),
+                    mock.patch.object(
+                        verifier.zipfile,
+                        "ZipFile",
+                        side_effect=AssertionError("ZipFile must not be constructed"),
+                    ),
+                    self.assertRaises(VerificationFailure) as raised,
+                ):
+                    verifier._audit_aab_archive(self.base_aab)
+                self.assertIn(expected_field, mismatch_fields(raised.exception))
+
+    def test_forged_zip64_entry_count_is_rejected_before_zipfile_construction(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive_path = Path(temporary_directory) / "forged-zip64-count.aab"
+            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as archive:
+                archive.writestr("payload", b"payload")
+
+            archive_bytes = archive_path.read_bytes()
+            eocd_offset = archive_bytes.rfind(b"PK\x05\x06")
+            self.assertGreaterEqual(eocd_offset, 0)
+            eocd = struct.unpack_from("<4s4H2IH", archive_bytes, eocd_offset)
+            central_directory_bytes = eocd[5]
+            central_directory_offset = eocd[6]
+            forged_entries = verifier.AAB_MAX_ENTRY_COUNT + 1
+            zip64_eocd = struct.pack(
+                "<4sQ2H2I4Q",
+                b"PK\x06\x06",
+                44,
+                45,
+                45,
+                0,
+                0,
+                forged_entries,
+                forged_entries,
+                central_directory_bytes,
+                central_directory_offset,
+            )
+            zip64_locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, eocd_offset, 1)
+            classic_eocd = struct.pack(
+                "<4s4H2IH",
+                b"PK\x05\x06",
+                0,
+                0,
+                0xFFFF,
+                0xFFFF,
+                0xFFFFFFFF,
+                0xFFFFFFFF,
+                0,
+            )
+            archive_path.write_bytes(
+                archive_bytes[:eocd_offset] + zip64_eocd + zip64_locator + classic_eocd
+            )
+
+            with (
+                mock.patch.object(
+                    verifier.zipfile,
+                    "ZipFile",
+                    side_effect=AssertionError("ZipFile must not be constructed"),
+                ),
+                self.assertRaises(VerificationFailure) as raised,
+            ):
+                verifier._audit_aab_archive(archive_path)
+
+        self.assertIn(
+            "aab.archive.container_preflight.entry_count",
+            mismatch_fields(raised.exception),
+        )
+
+    def test_multidisk_and_ambiguous_eocd_are_rejected_before_zipfile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            original = root / "original.zip"
+            with zipfile.ZipFile(original, "w", zipfile.ZIP_STORED) as archive:
+                archive.writestr("payload", b"payload")
+            original_bytes = original.read_bytes()
+            eocd_offset = original_bytes.rfind(b"PK\x05\x06")
+
+            multidisk = root / "multidisk.aab"
+            multidisk_bytes = bytearray(original_bytes)
+            struct.pack_into("<H", multidisk_bytes, eocd_offset + 4, 1)
+            multidisk.write_bytes(multidisk_bytes)
+
+            ambiguous = root / "ambiguous.aab"
+            fake_eocd = struct.pack("<4s4H2IH", b"PK\x05\x06", 0, 0, 1, 1, 0, 0, 22)
+            ambiguous.write_bytes(
+                original_bytes[:eocd_offset] + fake_eocd + original_bytes[eocd_offset:]
+            )
+
+            expected_fields = (
+                (multidisk, "aab.archive.container_preflight.disk_number"),
+                (
+                    ambiguous,
+                    "aab.archive.container_preflight.eocd_candidate_count",
+                ),
+            )
+            for archive_path, expected_field in expected_fields:
+                with self.subTest(archive_path=archive_path.name):
+                    with (
+                        mock.patch.object(
+                            verifier.zipfile,
+                            "ZipFile",
+                            side_effect=AssertionError(
+                                "ZipFile must not be constructed"
+                            ),
+                        ),
+                        self.assertRaises(VerificationFailure) as raised,
+                    ):
+                        verifier._audit_aab_archive(archive_path)
+                    self.assertIn(expected_field, mismatch_fields(raised.exception))
+
     def test_zip_bomb_ratio_is_rejected_before_crc_decompression(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -970,7 +1329,11 @@ class StrictAabVerifierTest(unittest.TestCase):
 
     def test_entry_and_uncompressed_byte_limits_precede_crc(self) -> None:
         cases = (
-            ("AAB_MAX_ENTRY_COUNT", 1, "aab.archive.entry_count"),
+            (
+                "AAB_MAX_ENTRY_COUNT",
+                1,
+                "aab.archive.container_preflight.entry_count",
+            ),
             (
                 "AAB_MAX_ENTRY_UNCOMPRESSED_BYTES",
                 1,
@@ -1038,6 +1401,73 @@ class StrictAabVerifierTest(unittest.TestCase):
             "aab.jarsigner.strict.timeout_seconds",
             mismatch_fields(raised.exception),
         )
+
+    def test_keytool_import_and_list_failures_clean_ephemeral_truststore(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "-importcert",
+                "timeout",
+                "aab.keytool.import_pinned_trust_anchor.timeout_seconds",
+            ),
+            (
+                "-importcert",
+                "os_error",
+                "aab.keytool.import_pinned_trust_anchor",
+            ),
+            (
+                "-list",
+                "timeout",
+                "aab.keytool.list_pinned_trust_anchor.timeout_seconds",
+            ),
+            (
+                "-list",
+                "os_error",
+                "aab.keytool.list_pinned_trust_anchor",
+            ),
+        )
+        real_subprocess_run = subprocess.run
+        for marker, failure_kind, expected_field in cases:
+            with self.subTest(marker=marker, failure_kind=failure_kind):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    aab = self.copy_fixture(root)
+                    trust_parent = root / "temporary-truststores"
+                    trust_parent.mkdir()
+
+                    def run_with_keytool_failure(
+                        command: list[str],
+                        *args: object,
+                        marker: str = marker,
+                        failure_kind: str = failure_kind,
+                        **kwargs: object,
+                    ) -> subprocess.CompletedProcess[str]:
+                        if command[0] == "keytool" and marker in command:
+                            if failure_kind == "timeout":
+                                raise subprocess.TimeoutExpired(
+                                    command, kwargs.get("timeout")
+                                )
+                            raise OSError("synthetic keytool failure")
+                        return real_subprocess_run(command, *args, **kwargs)
+
+                    with (
+                        mock.patch.object(
+                            verifier.subprocess,
+                            "run",
+                            side_effect=run_with_keytool_failure,
+                        ),
+                        self.assertRaises(VerificationFailure) as raised,
+                    ):
+                        verify_aab_signature(
+                            aab_path=aab,
+                            expected_certificate_sha256=self.certificate,
+                            report_dir=root / "reports",
+                            temporary_parent=trust_parent,
+                        )
+
+                    self.assertEqual([], list(trust_parent.iterdir()))
+                self.assertIn(expected_field, mismatch_fields(raised.exception))
 
 
 if __name__ == "__main__":

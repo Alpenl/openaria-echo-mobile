@@ -145,10 +145,11 @@ class SessionLedgerRepository {
 
         return when (result) {
             is SessionListResult.Page -> {
-                if (!result.value.matches(request)) {
+                val pageFailure = pageInvariantFailure(result.value, request)
+                if (pageFailure != null) {
                     return SessionLedgerApplyResult.Failed(
                         SessionLedgerFailure.Protocol(
-                            SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH,
+                            pageFailure,
                         ),
                     )
                 }
@@ -191,6 +192,7 @@ class SessionLedgerRepository {
         return when (result) {
             is SessionListResult.Page -> {
                 val next = result.value
+                val pageFailure = pageInvariantFailure(next, request)
                 if (!next.matches(request)) {
                     SessionLedgerApplyResult.Failed(
                         SessionLedgerFailure.Protocol(
@@ -205,6 +207,12 @@ class SessionLedgerRepository {
                         takeId = request.takeId,
                         limit = request.limit,
                         reason = SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED,
+                    )
+                } else if (pageFailure != null) {
+                    SessionLedgerApplyResult.Failed(
+                        SessionLedgerFailure.Protocol(
+                            pageFailure,
+                        ),
                     )
                 } else if (next.nextCursor != null &&
                     (next.nextCursor == request.cursor || next.nextCursor in consumedCursors)
@@ -252,6 +260,43 @@ class SessionLedgerRepository {
         }
     }
 
+    /**
+     * DeviceHttpClient validates decoded JSON pages, but callers can also supply a typed page
+     * directly. Keep that boundary defensive so an invalid transport cannot publish or merge data.
+     */
+    private fun pageInvariantFailure(
+        value: SessionListPage,
+        request: SessionLedgerRequest,
+    ): SessionProtocolFailureReason? {
+        if (!value.matches(request)) return SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH
+        if (value.items.size + value.diagnostics.size > request.limit) {
+            return SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH
+        }
+        if (request.takeId != null && value.items.any { it.takeId != request.takeId }) {
+            return SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH
+        }
+        if (value.nextCursor?.isBlank() == true) {
+            return SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH
+        }
+        if (value.contract == SessionListContract.V2 && value.catalogRevision != null) {
+            return SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH
+        }
+        if (value.contract == SessionListContract.V3 && value.catalogRevision.isNullOrBlank()) {
+            return SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH
+        }
+        if (value.items.map { it.sessionId }.toSet().size != value.items.size ||
+            value.diagnostics.map { it.quarantineId }.toSet().size != value.diagnostics.size
+        ) {
+            return SessionProtocolFailureReason.DUPLICATE_IDENTITY
+        }
+        if (value.items.any { parseStartedAt(it.startedAt) == null } ||
+            !value.items.zipWithNext().all { (newer, older) -> isStrictlyNewer(newer, older) }
+        ) {
+            return SessionProtocolFailureReason.NEWEST_FIRST_BOUNDARY_INVERTED
+        }
+        return null
+    }
+
     private fun appendSameRevision(
         current: SessionListPage,
         next: SessionListPage,
@@ -280,11 +325,25 @@ class SessionLedgerRepository {
     ): Boolean {
         val accumulatedOldest = current.items.lastOrNull() ?: return false
         val nextNewest = next.items.firstOrNull() ?: return false
-        val currentTime = OffsetDateTime.parse(accumulatedOldest.startedAt).toInstant()
-        val nextTime = OffsetDateTime.parse(nextNewest.startedAt).toInstant()
+        val currentTime = parseStartedAt(accumulatedOldest.startedAt) ?: return true
+        val nextTime = parseStartedAt(nextNewest.startedAt) ?: return true
         val timeComparison = currentTime.compareTo(nextTime)
         return timeComparison < 0 ||
             (timeComparison == 0 && accumulatedOldest.sessionId <= nextNewest.sessionId)
+    }
+
+    private fun isStrictlyNewer(newer: SessionSummary, older: SessionSummary): Boolean {
+        val newerTime = parseStartedAt(newer.startedAt) ?: return false
+        val olderTime = parseStartedAt(older.startedAt) ?: return false
+        val timeComparison = newerTime.compareTo(olderTime)
+        return timeComparison > 0 ||
+            (timeComparison == 0 && newer.sessionId > older.sessionId)
+    }
+
+    private fun parseStartedAt(value: String) = try {
+        OffsetDateTime.parse(value).toInstant()
+    } catch (_: RuntimeException) {
+        null
     }
 
     private fun SessionListPage.matches(request: SessionLedgerRequest): Boolean {

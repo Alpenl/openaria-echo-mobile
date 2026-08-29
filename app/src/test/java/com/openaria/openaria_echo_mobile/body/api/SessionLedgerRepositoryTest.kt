@@ -325,6 +325,92 @@ class SessionLedgerRepositoryTest {
     }
 
     @Test
+    fun `refresh rejects a typed page that exceeds its request limit`() {
+        val repository = SessionLedgerRepository()
+        val refresh = requireNotNull(repository.beginRefresh(takeId = TAKE_ID, limit = 1))
+        val oversized = page(REVISION_A, null, 1).copy(
+            diagnostics = listOf(diagnostic(1)),
+            requestIdentity = SessionListRequestIdentity(
+                limit = 1,
+                cursor = null,
+                takeId = TAKE_ID,
+            ),
+        )
+
+        val outcome = repository.complete(refresh, SessionListResult.Page(oversized))
+
+        val failed = assertIs<SessionLedgerApplyResult.Failed>(outcome)
+        val failure = assertIs<SessionLedgerFailure.Protocol>(failed.failure)
+        assertEquals(SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH, failure.reason)
+        assertNull(repository.page)
+    }
+
+    @Test
+    fun `refresh rejects a typed page containing an item from another take`() {
+        val repository = SessionLedgerRepository()
+        val refresh = requireNotNull(repository.beginRefresh(takeId = TAKE_ID))
+        val wrongTake = page(REVISION_A, null, 1).copy(
+            items = listOf(summary(1, takeId = TAKE_ID_B)),
+        )
+
+        val outcome = repository.complete(refresh, SessionListResult.Page(wrongTake))
+
+        val failed = assertIs<SessionLedgerApplyResult.Failed>(outcome)
+        val failure = assertIs<SessionLedgerFailure.Protocol>(failed.failure)
+        assertEquals(SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH, failure.reason)
+        assertNull(repository.page)
+    }
+
+    @Test
+    fun `refresh rejects duplicate session identities before publishing a page`() {
+        val repository = SessionLedgerRepository()
+        val refresh = requireNotNull(repository.beginRefresh(takeId = TAKE_ID))
+        val duplicate = page(REVISION_A, null, 1).copy(
+            items = listOf(summary(1, TAKE_ID), summary(1, TAKE_ID)),
+        )
+
+        val outcome = repository.complete(refresh, SessionListResult.Page(duplicate))
+
+        val failed = assertIs<SessionLedgerApplyResult.Failed>(outcome)
+        val failure = assertIs<SessionLedgerFailure.Protocol>(failed.failure)
+        assertEquals(SessionProtocolFailureReason.DUPLICATE_IDENTITY, failure.reason)
+        assertNull(repository.page)
+    }
+
+    @Test
+    fun `refresh rejects a typed page that is not newest first`() {
+        val repository = SessionLedgerRepository()
+        val refresh = requireNotNull(repository.beginRefresh(takeId = TAKE_ID))
+        val inverted = page(REVISION_A, null, 1).copy(
+            items = listOf(summary(2, TAKE_ID), summary(1, TAKE_ID)),
+        )
+
+        val outcome = repository.complete(refresh, SessionListResult.Page(inverted))
+
+        val failed = assertIs<SessionLedgerApplyResult.Failed>(outcome)
+        val failure = assertIs<SessionLedgerFailure.Protocol>(failed.failure)
+        assertEquals(SessionProtocolFailureReason.NEWEST_FIRST_BOUNDARY_INVERTED, failure.reason)
+        assertNull(repository.page)
+    }
+
+    @Test
+    fun `append fails closed when a typed boundary timestamp is malformed`() {
+        val repository = repositoryWithFirstPage()
+        val append = requireNotNull(repository.beginLoadMore())
+        val malformed = page(REVISION_A, null, 2, requestCursor = append.cursor).copy(
+            items = listOf(summary(2, TAKE_ID).copy(startedAt = "not-a-date")),
+        )
+
+        val outcome = repository.complete(append, SessionListResult.Page(malformed))
+
+        val failed = assertIs<SessionLedgerApplyResult.Failed>(outcome)
+        val failure = assertIs<SessionLedgerFailure.Protocol>(failed.failure)
+        assertEquals(SessionProtocolFailureReason.NEWEST_FIRST_BOUNDARY_INVERTED, failure.reason)
+        assertEquals(listOf(sessionId(1)), repository.page?.items?.map { it.sessionId })
+        assertEquals("cursor-2", repository.page?.nextCursor)
+    }
+
+    @Test
     fun `non-advancing opaque cursor is rejected without mutation`() {
         val repository = repositoryWithFirstPage()
         val append = requireNotNull(repository.beginLoadMore())

@@ -259,6 +259,54 @@ class DeviceApiMockWebServerIntegrationTest {
     }
 
     @Test
+    fun `direct filtered refresh and 409 recovery send take id without a stale cursor`() {
+        withMockWebServer { server ->
+            server.enqueue(jsonResponse(200, fixtureText("session-list-v3.json")))
+            server.enqueue(jsonResponse(409, fixtureText("catalog-changed.json")))
+            server.enqueue(jsonResponse(200, fixtureText("session-list-v3-unusable.json")))
+            val connection = connection(server)
+            val client = DeviceHttpClient()
+            val repository = SessionLedgerRepository()
+
+            val initial = requireNotNull(repository.beginRefresh(takeId = TAKE_ID, limit = 7))
+            assertIs<SessionLedgerApplyResult.Applied>(
+                repository.complete(initial, client.listSessions(connection, initial)),
+            )
+            assertEquals("opaque-page-2", repository.page?.nextCursor)
+
+            val refresh = requireNotNull(repository.beginRefresh(takeId = TAKE_ID, limit = 7))
+            assertNull(refresh.cursor)
+            assertNull(refresh.catalogRevision)
+            val refreshRequired = assertIs<SessionLedgerApplyResult.RefreshRequired>(
+                repository.complete(refresh, client.listSessions(connection, refresh)),
+            )
+            assertEquals(TAKE_ID, refreshRequired.takeId)
+            assertNull(repository.page)
+
+            val recovery = requireNotNull(
+                repository.beginRefresh(
+                    takeId = refreshRequired.takeId,
+                    limit = refreshRequired.limit,
+                    catalogRecovery = true,
+                ),
+            )
+            assertEquals(TAKE_ID, recovery.takeId)
+            assertNull(recovery.cursor)
+            assertNull(recovery.catalogRevision)
+            assertIs<SessionLedgerApplyResult.Applied>(
+                repository.complete(recovery, client.listSessions(connection, recovery)),
+            )
+
+            repeat(3) {
+                assertEquals(
+                    "/api/v4/sessions?limit=7&take_id=$TAKE_ID",
+                    server.takeRecordedRequest().path,
+                )
+            }
+        }
+    }
+
+    @Test
     fun `MockWebServer verifies artifact HEAD metadata and resumed Range download`() {
         withMockWebServer { server ->
             val payload = "hello".toByteArray(Charsets.UTF_8)
@@ -338,6 +386,18 @@ class DeviceApiMockWebServerIntegrationTest {
             target = target,
             descriptor = descriptor(),
             bearerToken = bearerToken,
+        )
+    }
+
+    private fun DeviceHttpClient.listSessions(
+        connection: DeviceConnection,
+        request: SessionLedgerRequest,
+    ): SessionListResult {
+        return listSessions(
+            connection = connection,
+            limit = request.limit,
+            cursor = request.cursor,
+            takeId = request.takeId,
         )
     }
 

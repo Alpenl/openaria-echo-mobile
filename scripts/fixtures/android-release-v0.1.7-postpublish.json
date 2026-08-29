@@ -1,0 +1,304 @@
+{
+  "fixture_schema": "openaria.mobile.sanitized-release-post-publish-fixture.v1",
+  "provenance": {
+    "captured_from": "GitHub REST API and source-run ownership receipt",
+    "captured_at": "2026-08-29T14:30:00Z",
+    "sanitized": true,
+    "omitted": [
+      "API hyperlinks and avatar URLs",
+      "unrelated repository metadata",
+      "unrelated completed job steps",
+      "immutable-release raw HTTP headers"
+    ]
+  },
+  "repository": {
+    "id": 1347037784,
+    "full_name": "Alpenl/openaria-echo-mobile",
+    "default_branch": "main",
+    "owner": {
+      "id": 112090565,
+      "login": "Alpenl",
+      "type": "User"
+    }
+  },
+  "source_run": {
+    "id": 33253867763,
+    "run_attempt": 1,
+    "head_sha": "83147d60a6c41395a7cec2d5b5586a9694090c37",
+    "head_branch": "main",
+    "path": ".github/workflows/mobile-release.yml",
+    "event": "workflow_dispatch",
+    "status": "completed",
+    "conclusion": "failure",
+    "created_at": "2026-08-29T12:59:37Z",
+    "actor": {
+      "id": 112090565,
+      "login": "Alpenl",
+      "type": "User"
+    },
+    "triggering_actor": {
+      "id": 112090565,
+      "login": "Alpenl",
+      "type": "User"
+    },
+    "repository": {
+      "id": 1347037784,
+      "full_name": "Alpenl/openaria-echo-mobile",
+      "owner": {
+        "id": 112090565,
+        "login": "Alpenl",
+        "type": "User"
+      }
+    },
+    "head_repository": {
+      "id": 1347037784,
+      "full_name": "Alpenl/openaria-echo-mobile"
+    }
+  },
+  "source_jobs": {
+    "jobs": [
+      {
+        "id": 99104115496,
+        "name": "Build Android release",
+        "run_id": 33253867763,
+        "run_attempt": 1,
+        "run_url": "https://api.github.com/repos/Alpenl/openaria-echo-mobile/actions/runs/33253867763",
+        "workflow_name": "Mobile Release",
+        "head_branch": "main",
+        "head_sha": "83147d60a6c41395a7cec2d5b5586a9694090c37",
+        "status": "completed",
+        "conclusion": "success",
+        "steps": [
+          {
+            "number": 3,
+            "name": "Validate release metadata",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-29T12:59:47Z",
+            "completed_at": "2026-08-29T12:59:52Z"
+          },
+          {
+            "number": 4,
+            "name": "Upload immutable-release preflight evidence",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-29T12:59:52Z",
+            "completed_at": "2026-08-29T12:59:54Z"
+          },
+          {
+            "number": 20,
+            "name": "Build Android release artifacts",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-29T13:11:37Z",
+            "completed_at": "2026-08-29T13:12:14Z"
+          },
+          {
+            "number": 22,
+            "name": "Verify APK identity and generate update manifest",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-29T13:12:15Z",
+            "completed_at": "2026-08-29T13:12:22Z"
+          },
+          {
+            "number": 23,
+            "name": "Upload Android artifacts",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-29T13:12:22Z",
+            "completed_at": "2026-08-29T13:12:24Z"
+          }
+        ]
+      },
+      {
+        "id": 99105601252,
+        "name": "Assemble release",
+        "run_id": 33253867763,
+        "run_attempt": 1,
+        "run_url": "https://api.github.com/repos/Alpenl/openaria-echo-mobile/actions/runs/33253867763",
+        "workflow_name": "Mobile Release",
+        "head_branch": "main",
+        "head_sha": "83147d60a6c41395a7cec2d5b5586a9694090c37",
+        "status": "completed",
+        "conclusion": "failure",
+        "steps": [
+          {
+            "number": 2,
+            "name": "Reject stale release rerun preflight",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-29T13:12:58Z",
+            "completed_at": "2026-08-29T13:12:58Z"
+          },
+          {
+            "number": 11,
+            "name": "Upload exact-run pre-publish ownership receipt",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-29T13:14:21Z",
+            "completed_at": "2026-08-29T13:14:22Z"
+          },
+          {
+            "number": 14,
+            "name": "Upgrade previous production through the staged production updater",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-29T13:14:22Z",
+            "completed_at": "2026-08-29T13:17:48Z"
+          },
+          {
+            "number": 15,
+            "name": "Upload pre-publish in-app upgrade evidence",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-29T13:17:48Z",
+            "completed_at": "2026-08-29T13:17:49Z"
+          },
+          {
+            "number": 16,
+            "name": "Publish the receipt-owned GitHub Release",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-29T13:17:49Z",
+            "completed_at": "2026-08-29T13:17:55Z"
+          },
+          {
+            "number": 17,
+            "name": "Post-publish verification",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-08-29T13:17:55Z",
+            "completed_at": "2026-08-29T13:18:30Z"
+          }
+        ]
+      }
+    ]
+  },
+  "ownership_artifact": {
+    "id": 9715378093,
+    "name": "android-release-ownership-v0.1.7-33253867763-1",
+    "size_in_bytes": 1383,
+    "digest": "sha256:e9b06e7a17e3e8f90f4ad10f6b02d701da1d4ab2b4db80eb71ecd96b787821bd",
+    "expired": false,
+    "created_at": "2026-08-29T13:14:22Z",
+    "expires_at": "2026-09-28T13:14:21Z",
+    "workflow_run": {
+      "id": 33253867763,
+      "repository_id": 1347037784,
+      "head_repository_id": 1347037784,
+      "head_branch": "main",
+      "head_sha": "83147d60a6c41395a7cec2d5b5586a9694090c37"
+    }
+  },
+  "ownership": {
+    "schema": "openaria.mobile.release-ownership.v1",
+    "repository": "Alpenl/openaria-echo-mobile",
+    "run_id": "33253867763",
+    "run_attempt": "1",
+    "draft_never_public": true,
+    "draft_created_by_run": true,
+    "target": {
+      "tag": "v0.1.7",
+      "source_commit": "83147d60a6c41395a7cec2d5b5586a9694090c37",
+      "release_id": 378992098,
+      "assets": [
+        {
+          "name": "SHA256SUMS.txt",
+          "size": 312,
+          "digest": "sha256:4613b574647ec57c291d0de4d408193585855ae3cbc71d7a6dc2ce3681cfc30c",
+          "browser_download_url": "https://github.com/Alpenl/openaria-echo-mobile/releases/download/untagged-34bcda81f176314000da/SHA256SUMS.txt"
+        },
+        {
+          "name": "android-update.json",
+          "size": 875,
+          "digest": "sha256:95ac6d47560fc76307ef6300ab728751118d61e9c334f1f83501303d6874e528",
+          "browser_download_url": "https://github.com/Alpenl/openaria-echo-mobile/releases/download/untagged-34bcda81f176314000da/android-update.json"
+        },
+        {
+          "name": "openaria-echo-mobile-v0.1.7-android-signed.aab",
+          "size": 6913203,
+          "digest": "sha256:e18787258e18644c0b2ce6ea5060b56044c041ef37364d0528be1a29d4b21706",
+          "browser_download_url": "https://github.com/Alpenl/openaria-echo-mobile/releases/download/untagged-34bcda81f176314000da/openaria-echo-mobile-v0.1.7-android-signed.aab"
+        },
+        {
+          "name": "openaria-echo-mobile-v0.1.7-android-signed.apk",
+          "size": 7279144,
+          "digest": "sha256:df9d3c6533039d0a1ba051ecae4e3bf6b391226d4f57ba8cd2c34f689e9e419f",
+          "browser_download_url": "https://github.com/Alpenl/openaria-echo-mobile/releases/download/untagged-34bcda81f176314000da/openaria-echo-mobile-v0.1.7-android-signed.apk"
+        }
+      ]
+    },
+    "baseline": {
+      "tag": "v0.1.6",
+      "release_id": 378776133,
+      "tag_commit": "807277e66d9922dc179f00d85ddcdcb5244c7ded",
+      "immutable_at_capture": false,
+      "legacy_bootstrap": true,
+      "legacy_bootstrap_authorized": true
+    },
+    "immutable_releases_preflight": {
+      "schema": "openaria.github.immutable-releases-preflight.v1",
+      "repository": "Alpenl/openaria-echo-mobile",
+      "actor": "Alpenl",
+      "source_commit": "83147d60a6c41395a7cec2d5b5586a9694090c37",
+      "default_branch": "main",
+      "default_branch_head": "83147d60a6c41395a7cec2d5b5586a9694090c37",
+      "release_tag": "v0.1.7",
+      "allow_legacy_baseline_bootstrap": true,
+      "endpoint": "GET /repos/Alpenl/openaria-echo-mobile/immutable-releases",
+      "api_version": "2026-03-10",
+      "checked_at": "2026-08-29T12:59:34Z",
+      "enabled": true,
+      "response_sha256": "f4b2b8919d556de186d7b4afe009126b30c99e3edefb005e4e56ab17069b52dd",
+      "response_raw_base64": "eyJlbmFibGVkIjp0cnVlLCJlbmZvcmNlZF9ieV9vd25lciI6ZmFsc2V9",
+      "response": {
+        "enabled": true,
+        "enforced_by_owner": false
+      },
+      "run_created_at": "2026-08-29T12:59:37Z"
+    }
+  },
+  "published_release": {
+    "id": 378992098,
+    "tag_name": "v0.1.7",
+    "draft": false,
+    "prerelease": false,
+    "immutable": true,
+    "published_at": "2026-08-29T13:17:54Z",
+    "target_commitish": "83147d60a6c41395a7cec2d5b5586a9694090c37",
+    "assets": [
+      {
+        "name": "SHA256SUMS.txt",
+        "size": 312,
+        "digest": "sha256:4613b574647ec57c291d0de4d408193585855ae3cbc71d7a6dc2ce3681cfc30c",
+        "browser_download_url": "https://github.com/Alpenl/openaria-echo-mobile/releases/download/v0.1.7/SHA256SUMS.txt"
+      },
+      {
+        "name": "android-update.json",
+        "size": 875,
+        "digest": "sha256:95ac6d47560fc76307ef6300ab728751118d61e9c334f1f83501303d6874e528",
+        "browser_download_url": "https://github.com/Alpenl/openaria-echo-mobile/releases/download/v0.1.7/android-update.json"
+      },
+      {
+        "name": "openaria-echo-mobile-v0.1.7-android-signed.aab",
+        "size": 6913203,
+        "digest": "sha256:e18787258e18644c0b2ce6ea5060b56044c041ef37364d0528be1a29d4b21706",
+        "browser_download_url": "https://github.com/Alpenl/openaria-echo-mobile/releases/download/v0.1.7/openaria-echo-mobile-v0.1.7-android-signed.aab"
+      },
+      {
+        "name": "openaria-echo-mobile-v0.1.7-android-signed.apk",
+        "size": 7279144,
+        "digest": "sha256:df9d3c6533039d0a1ba051ecae4e3bf6b391226d4f57ba8cd2c34f689e9e419f",
+        "browser_download_url": "https://github.com/Alpenl/openaria-echo-mobile/releases/download/v0.1.7/openaria-echo-mobile-v0.1.7-android-signed.apk"
+      }
+    ]
+  },
+  "tag_ref": {
+    "ref": "refs/tags/v0.1.7",
+    "object": {
+      "type": "commit",
+      "sha": "83147d60a6c41395a7cec2d5b5586a9694090c37"
+    }
+  }
+}

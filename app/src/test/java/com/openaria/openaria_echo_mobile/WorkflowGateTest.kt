@@ -8,6 +8,8 @@ import kotlin.test.assertTrue
 
 class WorkflowGateTest {
     private val releaseFile = File("../.github/workflows/mobile-release.yml")
+    private val readOnlyPostPublishFile =
+        File("../.github/workflows/mobile-release-readonly-postpublish.yml")
 
     @Test
     fun `ci and release workflows run emulator UI tests instead of only compiling them`() {
@@ -43,6 +45,7 @@ class WorkflowGateTest {
             listOf(
                 File("../.github/workflows/mobile-ci.yml"),
                 releaseFile,
+                readOnlyPostPublishFile,
             )
 
         assertTrue(
@@ -112,6 +115,7 @@ class WorkflowGateTest {
     fun `Android release proves version signer and exact published bytes`() {
         val release = releaseFile.readText()
         val appBuild = File("build.gradle.kts").readText()
+        val postPublishVerifier = File("../scripts/verify_android_release_postpublish.py").readText()
 
         assertContains(appBuild, "versionCode = 10")
         assertContains(appBuild, "versionName = \"0.1.7\"")
@@ -134,9 +138,16 @@ class WorkflowGateTest {
         assertFalse(release.contains("merge-multiple: true"))
         assertContains(release, "source_commit: \${{ steps.release_metadata.outputs.source_commit }}")
         assertContains(release, "ref: \${{ needs.android.outputs.source_commit }}")
-        assertContains(release, "jarsigner -verify -verbose -certs")
-        assertContains(release, "keytool -printcert -jarfile")
-        assertContains(release, "jar verified.")
+        assertTrue(
+            "verify_android_release_postpublish.py aab".toRegex(RegexOption.LITERAL).findAll(release).count() == 2,
+            "Candidate and same-run published AABs must share the strict verifier.",
+        )
+        assertContains(postPublishVerifier, "jarsigner")
+        assertContains(postPublishVerifier, "-strict")
+        assertContains(postPublishVerifier, "openaria-release-anchor")
+        assertContains(postPublishVerifier, "TemporaryDirectory")
+        assertContains(postPublishVerifier, "all_payload_entries_signed")
+        assertFalse(release.contains("grep -Fx 'jar verified.'"))
         assertContains(release, "aabSha256")
         assertContains(release, "aabBytes")
         assertTrue(
@@ -452,6 +463,27 @@ class WorkflowGateTest {
     }
 
     @Test
+    fun `post publish asset closure ignores draft URLs but binds exact public URLs`() {
+        val release = releaseFile.readText()
+        val verifier = File("../scripts/verify_android_release_postpublish.py").readText()
+        val postPublish =
+            release
+                .substringAfter("      - name: Post-publish verification")
+                .substringBefore("      - name: Upload post-publish verification evidence")
+
+        assertFalse(
+            postPublish.contains("[ \"\${published_assets}\" = \"\${owned_assets}\" ]"),
+            "A draft receipt contains untagged-* URLs that GitHub rewrites when the Release becomes public.",
+        )
+        assertContains(postPublish, "scripts/verify_android_release_postpublish.py")
+        assertContains(verifier, "owned_asset_identity")
+        assertContains(verifier, "published_asset_identity")
+        assertContains(verifier, "expected_public_url")
+        assertContains(verifier, "browser_download_url")
+        assertContains(verifier, "Android post-publish mismatch")
+    }
+
+    @Test
     fun `post publish work is bounded read only verification of exact immutable state`() {
         val release = releaseFile.readText()
         val postPublish =
@@ -476,9 +508,9 @@ class WorkflowGateTest {
         )
         assertContains(postPublish, "releases/\${owned_release_id}")
         assertContains(postPublish, "releases/tags/\${RELEASE_TAG}")
-        assertContains(postPublish, "'.immutable'")
         assertContains(postPublish, "published_assets")
-        assertContains(postPublish, "openaria.mobile.release-post-publish-verification.v1")
+        assertContains(postPublish, "openaria.mobile.release-post-publish-verification.v2")
+        assertContains(postPublish, "aab_all_payload_entries_and_signer")
         assertContains(postPublish, "legacy_bootstrap_authorized")
         assertContains(postPublishEvidenceUpload, "if-no-files-found: error")
         assertFalse(release.contains("if-no-files-found: warn"))
@@ -494,6 +526,170 @@ class WorkflowGateTest {
     }
 
     @Test
+    fun `supplemental post publish verifier is strictly read only and source bound`() {
+        val workflow = readOnlyPostPublishFile.readText()
+        val verifier = File("../scripts/verify_android_release_postpublish.py").readText()
+        val verifierTests = File("../scripts/test_verify_android_release_postpublish.py").readText()
+        val fixture = File("../scripts/fixtures/android-release-v0.1.7-postpublish.json").readText()
+        val trigger = workflow.substringBefore("permissions:")
+        val permissions = workflow.substringAfter("permissions:").substringBefore("concurrency:")
+
+        assertContains(trigger, "workflow_dispatch:")
+        assertContains(trigger, "source_run_id:")
+        assertContains(trigger, "release_tag:")
+        assertContains(trigger, "source_commit:")
+        assertContains(permissions, "actions: read")
+        assertContains(permissions, "contents: read")
+        assertFalse(permissions.contains("write"))
+        assertTrue(
+            permissions.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toSet() ==
+                setOf("actions: read", "contents: read"),
+            "The supplement may have only the two explicit read permissions.",
+        )
+        assertContains(workflow, "group: openaria-mobile-release-publication")
+        assertContains(releaseFile.readText(), "group: openaria-mobile-release-publication")
+        assertContains(workflow, "timeout-minutes: 30")
+        assertContains(workflow, "actions/runs/\${SOURCE_RUN_ID}")
+        assertContains(workflow, "attempts/\${source_run_attempt}/jobs")
+        assertContains(workflow, "attempts/\${SOURCE_RUN_ATTEMPT}/jobs")
+        assertContains(workflow, ".github/workflows/mobile-release.yml")
+        assertContains(workflow, ".run_attempt == 1")
+        assertContains(workflow, ".conclusion == \"failure\"")
+        assertContains(workflow, "android-release-ownership-\${RELEASE_TAG}-\${SOURCE_RUN_ID}-\${source_run_attempt}")
+        assertContains(workflow, "Download exact numeric ownership artifact")
+        assertContains(workflow, "artifact-ids: \${{ steps.source_binding.outputs.ownership_artifact_id }}")
+        assertContains(workflow, "digest-mismatch: error")
+        assertContains(workflow, "merge-multiple: true")
+        assertContains(workflow, "run-id: \${{ inputs.source_run_id }}")
+        assertContains(workflow, "find \"\${ownership_root}\" -mindepth 1 -printf '%P\\n'")
+        assertContains(workflow, "release-ownership.json")
+        assertContains(workflow, "scripts/verify_android_release_postpublish.py state")
+        assertContains(workflow, "scripts/verify_android_release_postpublish.py complete")
+        assertContains(workflow, "diagnostic-context.json")
+        assertContains(workflow, "Download closed public asset set anonymously")
+        val boundedDownload =
+            workflow.substringAfter("Download closed public asset set anonymously")
+                .substringBefore("Set up Java")
+        assertContains(boundedDownload, "verify_android_release_postpublish.py download")
+        assertContains(boundedDownload, "--partial-output")
+        assertContains(boundedDownload, "--connect-timeout-seconds 10")
+        assertContains(boundedDownload, "--body-timeout-seconds 20")
+        assertContains(boundedDownload, "--total-timeout-seconds 120")
+        assertContains(boundedDownload, "stat --format='%s'")
+        assertContains(boundedDownload, "sha256sum")
+        assertContains(boundedDownload, "mv --")
+        assertTrue(
+            boundedDownload.indexOf("actual_size=") < boundedDownload.indexOf("mv --") &&
+                boundedDownload.indexOf("actual_digest=") < boundedDownload.indexOf("mv --"),
+            "Exact partial size and digest must be checked before the file enters the verified asset set.",
+        )
+        assertFalse(
+            boundedDownload.contains("Authorization"),
+        )
+        assertContains(workflow, "SHA256SUMS.txt")
+        assertContains(workflow, "apksigner verify --verbose --print-certs")
+        assertContains(workflow, "apkanalyzer manifest application-id")
+        assertContains(workflow, "apkanalyzer manifest version-name")
+        assertContains(workflow, "apkanalyzer manifest version-code")
+        assertContains(workflow, "verify_android_release_postpublish.py aab")
+        assertContains(verifier, "-verbose:summary")
+        assertContains(verifier, "aab.archive.duplicate_entries")
+        assertContains(verifier, "aab.archive.signature_control_count")
+        assertContains(verifier, "AAB_MAX_ENTRY_COUNT")
+        assertContains(verifier, "AAB_MAX_ARCHIVE_BYTES")
+        assertContains(verifier, "AAB_MAX_CENTRAL_DIRECTORY_BYTES")
+        assertContains(verifier, "_preflight_aab_zip_container")
+        assertContains(verifier, "checked_before_zipfile")
+        assertContains(verifier, "os.O_NOFOLLOW")
+        assertContains(verifier, "os.fstat")
+        assertContains(verifier, "zipfile.ZipFile(archive_file)")
+        assertContains(verifier, "preflight_and_zipfile_same_descriptor")
+        assertContains(verifier, "aab.archive.stable_file.hashed_bytes")
+        assertContains(verifier, "AAB_MAX_ENTRY_UNCOMPRESSED_BYTES")
+        assertContains(verifier, "AAB_MAX_TOTAL_UNCOMPRESSED_BYTES")
+        assertContains(verifier, "AAB_MAX_COMPRESSION_RATIO")
+        assertContains(verifier, "normalized_name = name.upper()")
+        assertContains(verifier, "DOWNLOAD_WORKER_FLAG")
+        assertContains(verifier, "_kill_and_reap_download_worker")
+        assertContains(verifier, "process.communicate")
+        assertContains(verifier, "fixed-minimal-allowlist")
+        assertContains(verifier, "timeout=timeout_seconds")
+        assertContains(workflow, "Final API recheck and write auditable evidence")
+        assertTrue(
+            "releases/latest".toRegex(RegexOption.LITERAL).findAll(workflow).count() == 2,
+            "Latest must be read before downloads and again immediately before evidence.",
+        )
+        assertTrue(
+            "commits/\${default_branch}".toRegex(RegexOption.LITERAL).findAll(workflow).count() == 1 &&
+                "commits/\${DEFAULT_BRANCH}".toRegex(RegexOption.LITERAL).findAll(workflow).count() == 1,
+            "The verifier must bind the current default-branch HEAD before and after downloads.",
+        )
+        assertTrue(
+            "actions/artifacts/\${OWNERSHIP_ARTIFACT_ID}".toRegex(RegexOption.LITERAL).findAll(workflow).count() == 1,
+            "The final recheck must refetch the selected numeric artifact ID.",
+        )
+        assertContains(workflow, "Upload successful auditable read-only post-publish evidence")
+        assertContains(workflow, "android-release-readonly-postpublish-")
+        val failedDiagnostics = workflow.substringAfter("      - name: Upload failed read-only verification diagnostics")
+        assertFalse(
+            failedDiagnostics.contains("inputs.release_tag") || failedDiagnostics.contains("inputs.source_run_id"),
+            "Unvalidated dispatch inputs must not control the failed diagnostic artifact name.",
+        )
+        listOf(
+            "contents: write",
+            "actions: write",
+            "--method POST",
+            "--method PATCH",
+            "--method DELETE",
+            "gh release edit",
+            "gh release delete",
+            "gh release upload",
+            "gh release create",
+            "gh workflow run",
+            "gh run rerun",
+            "git push",
+            "git tag",
+            "curl --request",
+            "curl -X",
+        ).forEach { forbidden ->
+            assertFalse(workflow.contains(forbidden), "Read-only supplement must reject mutation surface: $forbidden")
+        }
+        assertContains(verifier, "source_run_jobs_actor_and_ownership_receipt")
+        assertContains(verifier, "release_id_latest_immutable_and_tag_commit")
+        assertContains(verifier, "anonymous_asset_bytes_and_digests")
+        assertContains(verifier, "final_recheck")
+        assertContains(verifier, "response_raw_base64")
+        assertContains(verifier, "Publish the receipt-owned GitHub Release")
+        assertContains(fixture, "openaria.mobile.sanitized-release-post-publish-fixture.v1")
+        assertContains(verifierTests, "test_wrong_source_run_is_rejected")
+        assertContains(verifierTests, "test_wrong_tag_is_rejected")
+        assertContains(verifierTests, "test_tampered_receipt_release_id_is_rejected")
+        assertContains(verifierTests, "test_tampered_receipt_digest_is_rejected")
+        assertContains(verifierTests, "test_real_sanitized_v017_api_receipt_and_job_chain_replays")
+        assertContains(verifierTests, "test_appended_unsigned_payload_is_rejected")
+        assertContains(verifierTests, "test_tampered_signed_payload_is_rejected")
+        assertContains(verifierTests, "test_duplicate_payload_name_is_rejected_even_when_bytes_match")
+        assertContains(verifierTests, "test_extra_meta_inf_signature_control_is_rejected")
+        assertContains(verifierTests, "test_chunked_response_cannot_cross_expected_byte_ceiling")
+        assertContains(verifierTests, "test_zip_bomb_ratio_is_rejected_before_crc_decompression")
+        assertContains(verifierTests, "test_jarsigner_timeout_is_classified_and_truststore_is_cleaned")
+        assertContains(verifierTests, "test_jar_ignored_signature_controls_are_case_insensitive")
+        assertContains(verifierTests, "test_empty_basename_jar_signature_controls_are_rejected")
+        assertContains(verifierTests, "test_replacing_legal_signature_pair_with_empty_basename_is_rejected")
+        assertContains(verifierTests, "test_path_replacement_after_preflight_cannot_change_zipfile_input")
+        assertContains(verifierTests, "test_aab_symlink_is_rejected_before_preflight")
+        assertContains(verifierTests, "test_download_worker_receives_only_fixed_noncredential_environment")
+        assertContains(verifierTests, "test_slow_declared_body_cannot_cross_total_wall_clock")
+        assertContains(verifierTests, "test_slow_chunked_body_cannot_cross_total_wall_clock")
+        assertContains(verifierTests, "test_slow_headers_are_killed_and_worker_is_reaped")
+        assertContains(verifierTests, "test_declared_entry_limit_is_rejected_before_zipfile_construction")
+        assertContains(verifierTests, "test_underdeclared_central_directory_is_rejected_before_zipfile")
+        assertContains(verifierTests, "test_archive_and_central_directory_byte_limits_precede_zipfile")
+        assertContains(verifierTests, "test_forged_zip64_entry_count_is_rejected_before_zipfile_construction")
+        assertContains(verifierTests, "test_keytool_import_and_list_failures_clean_ephemeral_truststore")
+    }
+
+    @Test
     fun `release workflow runs source and executable staged updater tests`() {
         val release = releaseFile.readText()
         val dispatcher = File("../scripts/dispatch-android-release.sh").readText()
@@ -503,6 +699,7 @@ class WorkflowGateTest {
         assertContains(release, "python3 -m unittest scripts/test_android_staged_update_server.py")
         assertContains(release, "python3 -m unittest scripts/test_dispatch_android_release.py")
         assertContains(release, "python3 -m unittest scripts/test_public_android_release_closure.py")
+        assertContains(release, "python3 -m unittest scripts/test_verify_android_release_postpublish.py")
         assertContains(release, "bash -n scripts/android-staged-update-acceptance.sh")
         assertContains(release, "bash -n scripts/dispatch-android-release.sh")
         assertContains(dispatcher, "repos/\${repository}/immutable-releases")

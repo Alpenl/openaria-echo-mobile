@@ -348,6 +348,7 @@ jobs:
           python3 -m unittest scripts/test_android_staged_update_server.py
           python3 -m unittest scripts/test_dispatch_android_release.py
           python3 -m unittest scripts/test_public_android_release_closure.py
+          python3 -m unittest scripts/test_verify_android_release_postpublish.py
           bash -n scripts/android-staged-update-acceptance.sh
           bash -n scripts/dispatch-android-release.sh
 
@@ -516,18 +517,11 @@ jobs:
           apk_bytes="$(wc -c < "$apk_file" | tr -d ' ')"
           apk_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${apk_name}"
           aab_file="release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-signed.aab"
-          LC_ALL=C jarsigner -verify -verbose -certs "$aab_file" > app/build/jarsigner-release.txt 2>&1
-          grep -Fx 'jar verified.' app/build/jarsigner-release.txt >/dev/null
-          LC_ALL=C keytool -printcert -jarfile "$aab_file" > app/build/aab-certificate.txt
-          mapfile -t aab_digests < <(
-            sed -n 's/^[[:space:]]*SHA256: //p' app/build/aab-certificate.txt \
-              | tr -d ':' \
-              | tr '[:upper:]' '[:lower:]'
-          )
-          if [ "${#aab_digests[@]}" -ne 1 ] || [ "${aab_digests[0]}" != "$expected_release_certificate" ]; then
-            echo "::error::AAB signer does not match the protected release certificate configuration."
-            exit 1
-          fi
+          python3 scripts/verify_android_release_postpublish.py aab \
+            --aab "$aab_file" \
+            --expected-certificate-sha256 "$expected_release_certificate" \
+            --report-dir app/build/aab-candidate-verification \
+            --output app/build/aab-candidate-verification.json
           aab_name="$(basename "$aab_file")"
           aab_sha256="$(sha256sum "$aab_file" | cut -d ' ' -f 1)"
           aab_bytes="$(wc -c < "$aab_file" | tr -d ' ')"
@@ -1324,16 +1318,11 @@ jobs:
             fi
             sleep 2
           done
-          LC_ALL=C jarsigner -verify -verbose -certs "$verify_dir/$aab_name" > "$verify_dir/jarsigner.txt" 2>&1
-          grep -Fx 'jar verified.' "$verify_dir/jarsigner.txt" >/dev/null
-          LC_ALL=C keytool -printcert -jarfile "$verify_dir/$aab_name" > "$verify_dir/aab-certificate.txt"
-          mapfile -t published_aab_digests < <(
-            sed -n 's/^[[:space:]]*SHA256: //p' "$verify_dir/aab-certificate.txt" \
-              | tr -d ':' \
-              | tr '[:upper:]' '[:lower:]'
-          )
-          test "${#published_aab_digests[@]}" -eq 1
-          test "${published_aab_digests[0]}" = "$expected_release_certificate"
+          python3 scripts/verify_android_release_postpublish.py aab \
+            --aab "$verify_dir/$aab_name" \
+            --expected-certificate-sha256 "$expected_release_certificate" \
+            --report-dir "$verify_dir/aab-published-verification" \
+            --output "$verify_dir/aab-published-verification.json"
           test "$(sha256sum "$verify_dir/$aab_name" | cut -d ' ' -f 1)" = "$(jq -er '.android.aab.sha256' "$verify_dir/android-update.json")"
           test "$(wc -c < "$verify_dir/$aab_name" | tr -d ' ')" = "$(jq -er '.android.aab.bytes' "$verify_dir/android-update.json")"
 
@@ -1346,24 +1335,26 @@ jobs:
             echo "::error::Post-publish evidence does not match the dispatch bootstrap authorization."
             exit 1
           fi
+          api_state_dir="${verify_dir}/api-state"
+          mkdir -p "${api_state_dir}"
           api_state_verified=false
           for attempt in $(seq 1 10); do
-            if latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest")" \
-              && published_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${owned_release_id}")" \
-              && published_by_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")" \
-              && published_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"; then
-              published_assets="$(jq -Sc '[.assets[] | {name, size, digest, browser_download_url}] | sort_by(.name)' <<<"${published_release}")"
-              if [ "$(jq -r '.tag_name' <<<"${latest_release}")" = "${RELEASE_TAG}" ] \
-                && [ "$(jq -r '.id' <<<"${latest_release}")" = "${owned_release_id}" ] \
-                && [ "$(jq -r '.id' <<<"${published_release}")" = "${owned_release_id}" ] \
-                && [ "$(jq -r '.id' <<<"${published_by_tag}")" = "${owned_release_id}" ] \
-                && [ "$(jq -r '.tag_name' <<<"${published_release}")" = "${RELEASE_TAG}" ] \
-                && [ "$(jq -r '.draft' <<<"${published_release}")" = "false" ] \
-                && [ "$(jq -r '.prerelease' <<<"${published_release}")" = "false" ] \
-                && [ "$(jq -r '.immutable' <<<"${published_release}")" = "true" ] \
-                && [ "${published_assets}" = "${owned_assets}" ] \
-                && [ "$(jq -r '.object.type' <<<"${published_tag}")" = "commit" ] \
-                && [ "$(jq -r '.object.sha' <<<"${published_tag}")" = "${owned_source_commit}" ]; then
+            if gh api "repos/${GITHUB_REPOSITORY}/releases/latest" > "${api_state_dir}/latest-release.json" \
+              && gh api "repos/${GITHUB_REPOSITORY}/releases/${owned_release_id}" > "${api_state_dir}/published-release.json" \
+              && gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > "${api_state_dir}/published-by-tag.json" \
+              && gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" > "${api_state_dir}/tag-ref.json"; then
+              if python3 scripts/verify_android_release_postpublish.py state \
+                --ownership "${ownership}" \
+                --latest-release "${api_state_dir}/latest-release.json" \
+                --published-release "${api_state_dir}/published-release.json" \
+                --published-by-tag "${api_state_dir}/published-by-tag.json" \
+                --tag-ref "${api_state_dir}/tag-ref.json" \
+                --repository "${GITHUB_REPOSITORY}" \
+                --source-run-id "${GITHUB_RUN_ID}" \
+                --source-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+                --tag "${RELEASE_TAG}" \
+                --commit "${owned_source_commit}" \
+                --output "${api_state_dir}/validated-state.json"; then
                 api_state_verified=true
                 break
               fi
@@ -1374,9 +1365,16 @@ jobs:
             echo "::error::Published Release API state did not converge to the exact immutable receipt-owned target."
             exit 1
           fi
+          owned_asset_identity="$(jq -Sc '[.target.assets[] | {name, size, digest}] | sort_by(.name)' "${ownership}")"
+          published_asset_identity="$(jq -Sc '[.target.assets[] | {name, size, digest}] | sort_by(.name)' "${api_state_dir}/validated-state.json")"
+          if [ "${owned_asset_identity}" != "${published_asset_identity}" ]; then
+            echo "::error::Validated post-publish asset identity unexpectedly diverged from the ownership receipt."
+            exit 1
+          fi
+          published_assets="$(jq -Sc '.target.assets' "${api_state_dir}/validated-state.json")"
 
           jq -n \
-            --arg schema "openaria.mobile.release-post-publish-verification.v1" \
+            --arg schema "openaria.mobile.release-post-publish-verification.v2" \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
@@ -1386,14 +1384,17 @@ jobs:
             --argjson target_assets "${published_assets}" \
             --arg publish_cli_outcome "${PUBLISH_CLI_OUTCOME}" \
             --argjson legacy_bootstrap_authorized "${owned_legacy_bootstrap_authorized}" \
+            --argjson aab_strict_verification "$(jq -c . "${verify_dir}/aab-published-verification.json")" \
             '{schema: $schema, repository: $repository, run_id: $run_id,
               run_attempt: $run_attempt, source_commit: $source_commit,
               publish_cli_outcome: $publish_cli_outcome,
               legacy_bootstrap_authorized: $legacy_bootstrap_authorized,
               target: {tag: $target_tag, release_id: $target_release_id,
                 immutable: true, latest: true, assets: $target_assets},
+              aab_strict_verification: $aab_strict_verification,
               verification: {api_state: "exact", anonymous_bytes: "exact",
-                apk_identity_and_signer: "exact", aab_signer: "exact"}}' \
+                apk_identity_and_signer: "exact",
+                aab_all_payload_entries_and_signer: "strict-exact"}}' \
             > release-transition/post-publish-verification.json
 
       - name: Upload post-publish verification evidence

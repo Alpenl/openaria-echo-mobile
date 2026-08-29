@@ -69,8 +69,12 @@ class DeviceAdmissionClient internal constructor(
             if (!isAttemptCurrent() || cancellation.isCancelled()) return DeviceAdmissionResult.Cancelled
 
             when (probe) {
-                ProbeResult.AuthenticationRequired -> {
-                    return DeviceAdmissionResult.AuthenticationRequired(candidate.normalizedOrigin)
+                is ProbeResult.AuthenticationRequired -> {
+                    val challengedOrigin = EndpointPolicy.canonicalOrigin(probe.origin)
+                    return DeviceAdmissionResult.AuthenticationRequired(
+                        challengedOrigin.takeIf { it == candidate.normalizedOrigin }
+                            ?: candidate.normalizedOrigin,
+                    )
                 }
                 ProbeResult.Forbidden -> return DeviceAdmissionResult.Forbidden(candidate.normalizedOrigin)
                 is ProbeResult.HttpFailure -> return DeviceAdmissionResult.HttpFailure(probe.failure)

@@ -201,7 +201,7 @@ class DeviceAdmissionClientTest {
 
             val challenged = DeviceAdmissionClient().admit(
                 candidates = listOf(
-                    DeviceAdmissionCandidate(unreachable, null),
+                    DeviceAdmissionCandidate(unreachable, "primary-token"),
                     DeviceAdmissionCandidate("${server.origin()}/", null),
                 ),
                 isAttemptCurrent = { true },
@@ -217,7 +217,7 @@ class DeviceAdmissionClientTest {
             server.enqueue(jsonResponse(200, idleCaptureStatusJson()))
             val retried = DeviceAdmissionClient().admit(
                 candidates = listOf(
-                    DeviceAdmissionCandidate(unreachable, null),
+                    DeviceAdmissionCandidate(unreachable, "primary-token"),
                     DeviceAdmissionCandidate(server.origin(), "backup-token"),
                 ),
                 isAttemptCurrent = { true },

@@ -8,6 +8,8 @@ import kotlin.test.assertTrue
 
 class WorkflowGateTest {
     private val releaseFile = File("../.github/workflows/mobile-release.yml")
+    private val readOnlyPostPublishFile =
+        File("../.github/workflows/mobile-release-readonly-postpublish.yml")
 
     @Test
     fun `ci and release workflows run emulator UI tests instead of only compiling them`() {
@@ -43,6 +45,7 @@ class WorkflowGateTest {
             listOf(
                 File("../.github/workflows/mobile-ci.yml"),
                 releaseFile,
+                readOnlyPostPublishFile,
             )
 
         assertTrue(
@@ -452,6 +455,27 @@ class WorkflowGateTest {
     }
 
     @Test
+    fun `post publish asset closure ignores draft URLs but binds exact public URLs`() {
+        val release = releaseFile.readText()
+        val verifier = File("../scripts/verify_android_release_postpublish.py").readText()
+        val postPublish =
+            release
+                .substringAfter("      - name: Post-publish verification")
+                .substringBefore("      - name: Upload post-publish verification evidence")
+
+        assertFalse(
+            postPublish.contains("[ \"\${published_assets}\" = \"\${owned_assets}\" ]"),
+            "A draft receipt contains untagged-* URLs that GitHub rewrites when the Release becomes public.",
+        )
+        assertContains(postPublish, "scripts/verify_android_release_postpublish.py")
+        assertContains(verifier, "owned_asset_identity")
+        assertContains(verifier, "published_asset_identity")
+        assertContains(verifier, "expected_public_url")
+        assertContains(verifier, "browser_download_url")
+        assertContains(verifier, "Android post-publish mismatch")
+    }
+
+    @Test
     fun `post publish work is bounded read only verification of exact immutable state`() {
         val release = releaseFile.readText()
         val postPublish =
@@ -476,7 +500,6 @@ class WorkflowGateTest {
         )
         assertContains(postPublish, "releases/\${owned_release_id}")
         assertContains(postPublish, "releases/tags/\${RELEASE_TAG}")
-        assertContains(postPublish, "'.immutable'")
         assertContains(postPublish, "published_assets")
         assertContains(postPublish, "openaria.mobile.release-post-publish-verification.v1")
         assertContains(postPublish, "legacy_bootstrap_authorized")
@@ -494,6 +517,79 @@ class WorkflowGateTest {
     }
 
     @Test
+    fun `supplemental post publish verifier is strictly read only and source bound`() {
+        val workflow = readOnlyPostPublishFile.readText()
+        val verifier = File("../scripts/verify_android_release_postpublish.py").readText()
+        val verifierTests = File("../scripts/test_verify_android_release_postpublish.py").readText()
+        val trigger = workflow.substringBefore("permissions:")
+        val permissions = workflow.substringAfter("permissions:").substringBefore("concurrency:")
+
+        assertContains(trigger, "workflow_dispatch:")
+        assertContains(trigger, "source_run_id:")
+        assertContains(trigger, "release_tag:")
+        assertContains(trigger, "source_commit:")
+        assertContains(permissions, "actions: read")
+        assertContains(permissions, "contents: read")
+        assertFalse(permissions.contains("write"))
+        assertTrue(
+            permissions.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toSet() ==
+                setOf("actions: read", "contents: read"),
+            "The supplement may have only the two explicit read permissions.",
+        )
+        assertContains(workflow, "actions/runs/\${SOURCE_RUN_ID}")
+        assertContains(workflow, ".github/workflows/mobile-release.yml")
+        assertContains(workflow, ".run_attempt == 1")
+        assertContains(workflow, ".conclusion == \"failure\"")
+        assertContains(workflow, "android-release-ownership-\${RELEASE_TAG}-\${SOURCE_RUN_ID}-\${source_run_attempt}")
+        assertContains(workflow, "Download exact source-run ownership artifact")
+        assertContains(workflow, "run-id: \${{ inputs.source_run_id }}")
+        assertContains(workflow, "release-ownership.json")
+        assertContains(workflow, "scripts/verify_android_release_postpublish.py state")
+        assertContains(workflow, "scripts/verify_android_release_postpublish.py complete")
+        assertContains(workflow, "Download closed public asset set anonymously")
+        assertContains(workflow, "curl --fail --location --retry 3 --retry-all-errors")
+        assertFalse(
+            workflow.substringAfter("Download closed public asset set anonymously")
+                .substringBefore("Set up Java")
+                .contains("Authorization"),
+        )
+        assertContains(workflow, "SHA256SUMS.txt")
+        assertContains(workflow, "apksigner verify --verbose --print-certs")
+        assertContains(workflow, "apkanalyzer manifest application-id")
+        assertContains(workflow, "apkanalyzer manifest version-name")
+        assertContains(workflow, "apkanalyzer manifest version-code")
+        assertContains(workflow, "jarsigner -verify -verbose -certs")
+        assertContains(workflow, "keytool -printcert -jarfile")
+        assertContains(workflow, "Upload auditable read-only post-publish evidence")
+        assertContains(workflow, "android-release-readonly-postpublish-")
+        listOf(
+            "contents: write",
+            "actions: write",
+            "--method POST",
+            "--method PATCH",
+            "--method DELETE",
+            "gh release edit",
+            "gh release delete",
+            "gh release upload",
+            "gh release create",
+            "gh workflow run",
+            "gh run rerun",
+            "git push",
+            "git tag",
+            "curl --request",
+            "curl -X",
+        ).forEach { forbidden ->
+            assertFalse(workflow.contains(forbidden), "Read-only supplement must reject mutation surface: $forbidden")
+        }
+        assertContains(verifier, "release_id_latest_immutable_and_tag_commit")
+        assertContains(verifier, "anonymous_asset_bytes_and_digests")
+        assertContains(verifierTests, "test_wrong_source_run_is_rejected")
+        assertContains(verifierTests, "test_wrong_tag_is_rejected")
+        assertContains(verifierTests, "test_tampered_receipt_release_id_is_rejected")
+        assertContains(verifierTests, "test_tampered_receipt_digest_is_rejected")
+    }
+
+    @Test
     fun `release workflow runs source and executable staged updater tests`() {
         val release = releaseFile.readText()
         val dispatcher = File("../scripts/dispatch-android-release.sh").readText()
@@ -503,6 +599,7 @@ class WorkflowGateTest {
         assertContains(release, "python3 -m unittest scripts/test_android_staged_update_server.py")
         assertContains(release, "python3 -m unittest scripts/test_dispatch_android_release.py")
         assertContains(release, "python3 -m unittest scripts/test_public_android_release_closure.py")
+        assertContains(release, "python3 -m unittest scripts/test_verify_android_release_postpublish.py")
         assertContains(release, "bash -n scripts/android-staged-update-acceptance.sh")
         assertContains(release, "bash -n scripts/dispatch-android-release.sh")
         assertContains(dispatcher, "repos/\${repository}/immutable-releases")

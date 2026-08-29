@@ -45,6 +45,25 @@ concurrency group, exact ownership receipt, pre-publication state closure, and
 immutable postcheck reduce this residual race, but they cannot make the two
 GitHub operations atomic.
 
+If publication succeeds but the bounded post-publication read check fails, do
+not rerun the release workflow and do not edit, delete, or re-upload the public
+Release. After a verifier fix reaches the protected default branch, dispatch
+the separate read-only supplement with the original run, tag, and commit:
+
+```bash
+gh workflow run mobile-release-readonly-postpublish.yml \
+  -f source_run_id=<original-mobile-release-run-id> \
+  -f release_tag=<vX.Y.Z> \
+  -f source_commit=<40-character-published-commit>
+```
+
+That workflow has only `actions: read` and `contents: read`. It downloads the
+exact source-run ownership receipt, binds its numeric Release ID, anonymously
+downloads the closed four-asset public set, and verifies latest/immutable/tag,
+checksums, package/version, and APK/AAB signer identity. Its only output is an
+auditable Actions artifact; it has no Release, tag, workflow, or repository
+mutation path.
+
 The mutable v0.1.6 migration is disabled by default. Its only authorized use is
 the exact v0.1.7, versionCode 10 release from the frozen v0.1.6 Release ID, tag
 commit, and four-asset digest closure. For that one migration, use:

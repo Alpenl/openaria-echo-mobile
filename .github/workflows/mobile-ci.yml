@@ -46,6 +46,9 @@ jobs:
       - name: Test current Android UI gate runner
         run: python3 -m unittest scripts/test_android_current_ui_gate.py
 
+      - name: Test read-only Android Release post-publish verifier
+        run: python3 -m unittest scripts/test_verify_android_release_postpublish.py
+
       - name: Build debug APK
         run: ./gradlew assembleDebug
 

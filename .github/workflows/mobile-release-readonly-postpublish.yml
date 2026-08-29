@@ -1,0 +1,262 @@
+name: Android Release Read-only Post-publish Verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Completed Mobile Release run that created the durable ownership receipt."
+        required: true
+      release_tag:
+        description: "Exact immutable public vX.Y.Z tag owned by the source run."
+        required: true
+      source_commit:
+        description: "Exact 40-character commit published by the source run."
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: openaria-mobile-readonly-postpublish-${{ inputs.source_run_id }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  SOURCE_COMMIT: ${{ inputs.source_commit }}
+
+jobs:
+  verify:
+    name: Verify immutable Android Release without mutation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted verifier
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Bind source run and unique ownership artifact
+        id: source_binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${SOURCE_RUN_ID}" =~ ^[0-9]+$ ]] || [ "${SOURCE_RUN_ID}" -le 0 ]; then
+            echo "::error::source_run_id must be a positive integer."
+            exit 1
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release_tag must use vX.Y.Z."
+            exit 1
+          fi
+          if [[ ! "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::source_commit must be exactly 40 lowercase hexadecimal characters."
+            exit 1
+          fi
+
+          evidence_root="read-only-verification"
+          api_dir="${evidence_root}/api"
+          mkdir -p "${api_dir}"
+
+          repository_state="$(gh api "repos/${GITHUB_REPOSITORY}")"
+          default_branch="$(jq -er '.default_branch | strings' <<<"${repository_state}")"
+          trusted_verifier_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${default_branch}" --jq .sha)"
+          if [ "${GITHUB_REF}" != "refs/heads/${default_branch}" ] \
+            || [ "${GITHUB_SHA}" != "${trusted_verifier_commit}" ]; then
+            echo "::error::Read-only verification must run from the exact current default-branch head."
+            exit 1
+          fi
+
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}" \
+            > "${api_dir}/source-run.json"
+          if ! jq -e \
+            --argjson run_id "${SOURCE_RUN_ID}" \
+            --arg commit "${SOURCE_COMMIT}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == $run_id and
+              .run_attempt == 1 and
+              .head_sha == $commit and
+              .path == ".github/workflows/mobile-release.yml" and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "failure" and
+              .repository.full_name == $repository and
+              .head_repository.full_name == $repository
+            ' "${api_dir}/source-run.json" >/dev/null; then
+            echo "::error::Source run is not the exact first-attempt failed Mobile Release bound to the requested commit."
+            exit 1
+          fi
+          source_run_attempt="$(jq -er '.run_attempt | numbers' "${api_dir}/source-run.json")"
+          ownership_artifact_name="android-release-ownership-${RELEASE_TAG}-${SOURCE_RUN_ID}-${source_run_attempt}"
+
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100" \
+            | jq -sS '{artifacts: [.[].artifacts[]]}' \
+            > "${api_dir}/source-artifacts.json"
+          jq -c --arg name "${ownership_artifact_name}" \
+            '[.artifacts[] | select(.name == $name)]' \
+            "${api_dir}/source-artifacts.json" \
+            > "${api_dir}/ownership-artifact-matches.json"
+          if [ "$(jq 'length' "${api_dir}/ownership-artifact-matches.json")" -ne 1 ]; then
+            echo "::error::Source run must expose exactly one ownership artifact named ${ownership_artifact_name}."
+            exit 1
+          fi
+          jq -e '.[0] |
+            .expired == false and
+            (.id | type) == "number" and .id > 0 and
+            (.size_in_bytes | type) == "number" and .size_in_bytes > 0 and
+            (.digest | type) == "string" and
+            (.digest | test("^sha256:[0-9a-f]{64}$"))' \
+            "${api_dir}/ownership-artifact-matches.json" >/dev/null
+          jq -S '.[0]' "${api_dir}/ownership-artifact-matches.json" \
+            > "${api_dir}/ownership-artifact.json"
+
+          echo "source_run_attempt=${source_run_attempt}" >> "${GITHUB_OUTPUT}"
+          echo "ownership_artifact_name=${ownership_artifact_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download exact source-run ownership artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ steps.source_binding.outputs.ownership_artifact_name }}
+          path: read-only-verification/ownership
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Validate receipt-owned public API state and download plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ATTEMPT: ${{ steps.source_binding.outputs.source_run_attempt }}
+        run: |
+          set -euo pipefail
+          mapfile -t ownership_files < <(find read-only-verification/ownership -type f -print)
+          if [ "${#ownership_files[@]}" -ne 1 ] \
+            || [ "$(basename "${ownership_files[0]}")" != "release-ownership.json" ]; then
+            echo "::error::Ownership artifact must contain only release-ownership.json."
+            exit 1
+          fi
+          ownership="${ownership_files[0]}"
+          release_id="$(jq -er '.target.release_id | numbers' "${ownership}")"
+          if [ "${release_id}" -le 0 ]; then
+            echo "::error::Ownership receipt release_id must be positive."
+            exit 1
+          fi
+
+          api_dir="read-only-verification/api"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/latest" > "${api_dir}/latest-release.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${api_dir}/published-release.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > "${api_dir}/published-by-tag.json"
+          gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" > "${api_dir}/tag-ref.json"
+
+          python3 scripts/verify_android_release_postpublish.py state \
+            --ownership "${ownership}" \
+            --latest-release "${api_dir}/latest-release.json" \
+            --published-release "${api_dir}/published-release.json" \
+            --published-by-tag "${api_dir}/published-by-tag.json" \
+            --tag-ref "${api_dir}/tag-ref.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --source-run-id "${SOURCE_RUN_ID}" \
+            --source-run-attempt "${SOURCE_RUN_ATTEMPT}" \
+            --tag "${RELEASE_TAG}" \
+            --commit "${SOURCE_COMMIT}" \
+            --output read-only-verification/validated-state.json
+
+      - name: Download closed public asset set anonymously
+        run: |
+          set -euo pipefail
+          asset_dir="read-only-verification/anonymous-assets"
+          mkdir -p "${asset_dir}"
+          while IFS=$'\t' read -r asset_name asset_url; do
+            downloaded=false
+            for attempt in $(seq 1 10); do
+              if curl --fail --location --retry 3 --retry-all-errors \
+                --output "${asset_dir}/${asset_name}.partial" "${asset_url}"; then
+                mv "${asset_dir}/${asset_name}.partial" "${asset_dir}/${asset_name}"
+                downloaded=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "${downloaded}" != "true" ]; then
+              echo "::error::Anonymous download did not converge for ${asset_name}."
+              exit 1
+            fi
+          done < <(
+            jq -r '.target.assets[] | [.name, .browser_download_url] | @tsv' \
+              read-only-verification/validated-state.json
+          )
+
+      - name: Set up Java for APK and AAB verification
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK for APK verification
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Install Android verification tools
+        run: sdkmanager "build-tools;36.0.0"
+
+      - name: Verify anonymous bytes package version checksums and signers
+        env:
+          ANDROID_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          export PATH="${ANDROID_SDK_ROOT}/build-tools/36.0.0:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}"
+          if [[ ! "${ANDROID_RELEASE_CERT_SHA256}" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+            echo "::error::Protected Android release certificate identity is unavailable."
+            exit 1
+          fi
+
+          state="read-only-verification/validated-state.json"
+          asset_dir="read-only-verification/anonymous-assets"
+          report_dir="read-only-verification/reports"
+          evidence_dir="read-only-verification/evidence"
+          mkdir -p "${report_dir}" "${evidence_dir}"
+          apk_name="$(jq -er '.target.assets[] | select(.name | endswith(".apk")) | .name' "${state}")"
+          aab_name="$(jq -er '.target.assets[] | select(.name | endswith(".aab")) | .name' "${state}")"
+
+          apksigner verify --verbose --print-certs "${asset_dir}/${apk_name}" \
+            > "${report_dir}/apksigner.txt"
+          apkanalyzer manifest application-id "${asset_dir}/${apk_name}" \
+            > "${report_dir}/apk-package.txt"
+          apkanalyzer manifest version-name "${asset_dir}/${apk_name}" \
+            > "${report_dir}/apk-version-name.txt"
+          apkanalyzer manifest version-code "${asset_dir}/${apk_name}" \
+            > "${report_dir}/apk-version-code.txt"
+          LC_ALL=C jarsigner -verify -verbose -certs "${asset_dir}/${aab_name}" \
+            > "${report_dir}/jarsigner.txt" 2>&1
+          LC_ALL=C keytool -printcert -jarfile "${asset_dir}/${aab_name}" \
+            > "${report_dir}/aab-certificate.txt"
+
+          python3 scripts/verify_android_release_postpublish.py complete \
+            --state "${state}" \
+            --source-run-metadata read-only-verification/api/source-run.json \
+            --ownership-artifact-metadata read-only-verification/api/ownership-artifact.json \
+            --asset-dir "${asset_dir}" \
+            --expected-certificate-sha256 "${ANDROID_RELEASE_CERT_SHA256}" \
+            --apk-signature-report "${report_dir}/apksigner.txt" \
+            --apk-package-report "${report_dir}/apk-package.txt" \
+            --apk-version-name-report "${report_dir}/apk-version-name.txt" \
+            --apk-version-code-report "${report_dir}/apk-version-code.txt" \
+            --aab-signature-report "${report_dir}/jarsigner.txt" \
+            --aab-certificate-report "${report_dir}/aab-certificate.txt" \
+            --verification-run-id "${GITHUB_RUN_ID}" \
+            --verification-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --verification-commit "${GITHUB_SHA}" \
+            --output "${evidence_dir}/post-publish-verification.json"
+
+      - name: Upload auditable read-only post-publish evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: android-release-readonly-postpublish-${{ inputs.release_tag }}-${{ inputs.source_run_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            read-only-verification/evidence/**
+            read-only-verification/api/**
+            read-only-verification/ownership/release-ownership.json
+            read-only-verification/validated-state.json
+            read-only-verification/anonymous-assets/SHA256SUMS.txt
+            read-only-verification/anonymous-assets/android-update.json
+          if-no-files-found: error
+          retention-days: 90

@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -1216,7 +1217,11 @@ private fun ViewfinderScreen(
         ContractGate()
     }
 
-    if (landscape) {
+    // A short landscape window cannot fit the preview and a useful detail viewport
+    // at the same time. Keep the preview first, then make the whole page reachable
+    // through one scroll container so connection controls remain accessible.
+    val shortLandscape = landscape && LocalConfiguration.current.screenHeightDp <= 480
+    if (landscape && !shortLandscape) {
         Column(modifier = Modifier.fillMaxSize()) {
             previewContent()
             Spacer(Modifier.height(12.dp))
@@ -1314,6 +1319,7 @@ private fun PreviewFrame(
                         Modifier
                             .align(Alignment.BottomStart)
                             .width(compactStatusWidth)
+                            .heightIn(min = 96.dp)
                             .padding(start = 20.dp, bottom = 10.dp)
                     } else {
                         Modifier
@@ -1324,6 +1330,7 @@ private fun PreviewFrame(
                     Box(statusAreaModifier) {
                         Column(
                             modifier = Modifier
+                                .fillMaxWidth()
                                 .align(Alignment.Center)
                                 .semantics { liveRegion = LiveRegionMode.Polite }
                                 .clip(RoundedCornerShape(8.dp))
@@ -1340,6 +1347,7 @@ private fun PreviewFrame(
                                 value = previewStatusBody(bodyConnection, previewMessage),
                                 color = EchoColors.InkSecondary,
                                 style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
+                                modifier = Modifier.fillMaxWidth(),
                             )
                         }
                     }

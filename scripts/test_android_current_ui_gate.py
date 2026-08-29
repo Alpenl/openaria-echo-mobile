@@ -272,6 +272,15 @@ profile = next(
     for argument in sys.argv[1:]
     if "visualProfile=" in argument
 )
+requested_class = next(
+    argument.rsplit("=", 1)[1]
+    for argument in sys.argv[1:]
+    if "android.testInstrumentationRunnerArguments.class=" in argument
+)
+if requested_class.endswith("LandscapeThreeButtonSafeAreaTest"):
+    requested_method = "rootContentStaysInsideLandscapeThreeButtonSystemSafeArea"
+else:
+    requested_method = "currentApkKeepsSemanticsAndGeometryInsideTheRealSystemSafeArea"
 nonce = next(
     argument.rsplit("=", 1)[1]
     for argument in sys.argv[1:]
@@ -287,11 +296,11 @@ if os.environ.get("FAKE_SKIPPED_TEST_PROFILE") == profile:
 (result / f"TEST-{profile}.xml").write_text(
     (
         '<testsuite '
-        'name="com.openaria.openaria_echo_mobile.CurrentUiVisualGateTest" '
+        f'name="{requested_class}" '
         f'tests="{tests}" failures="{failures}" errors="{errors}" skipped="{skipped}">'
         '<testcase '
-        'name="currentApkKeepsSemanticsAndGeometryInsideTheRealSystemSafeArea" '
-        'classname="com.openaria.openaria_echo_mobile.CurrentUiVisualGateTest" />'
+        f'name="{requested_method}" '
+        f'classname="{requested_class}" />'
         '</testsuite>'
     ),
     encoding="utf-8",
@@ -299,16 +308,21 @@ if os.environ.get("FAKE_SKIPPED_TEST_PROFILE") == profile:
 if os.environ.get("FAKE_EXTRA_XML_PROFILE") == profile:
     (result / f"TEST-{profile}-extra.xml").write_text(
         (
-            '<testsuite name="com.openaria.openaria_echo_mobile.CurrentUiVisualGateTest" '
+            f'<testsuite name="{requested_class}" '
             'tests="1" failures="0" errors="0" skipped="0">'
             '<testcase '
-            'name="currentApkKeepsSemanticsAndGeometryInsideTheRealSystemSafeArea" '
-            'classname="com.openaria.openaria_echo_mobile.CurrentUiVisualGateTest" />'
+            f'name="{requested_method}" '
+            f'classname="{requested_class}" />'
             '</testsuite>'
         ),
         encoding="utf-8",
     )
-with Path(os.environ["FAKE_GRADLE_CALLS"]).open("a", encoding="utf-8") as calls:
+call_log_name = (
+    "FAKE_SAFE_AREA_CALLS"
+    if requested_class.endswith("LandscapeThreeButtonSafeAreaTest")
+    else "FAKE_GRADLE_CALLS"
+)
+with Path(os.environ[call_log_name]).open("a", encoding="utf-8") as calls:
     calls.write(profile + "\n")
 print(f"fake instrumentation profile={profile}")
 device_root = Path(os.environ["FAKE_DEVICE_FILES"])
@@ -352,6 +366,7 @@ class AndroidCurrentUiGateBehaviorTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.state_path = self.root / "state.json"
         self.calls_path = self.root / "gradle-calls.txt"
+        self.safe_area_calls_path = self.root / "safe-area-gradle-calls.txt"
         self.adb_calls_path = self.root / "adb-calls.jsonl"
         self.device_files = self.root / "device-files"
         self.evidence = self.root / "evidence"
@@ -390,6 +405,7 @@ class AndroidCurrentUiGateBehaviorTest(unittest.TestCase):
                 "OPENARIA_UI_GATE_POLL_INTERVAL_SECONDS": "0",
                 "FAKE_ANDROID_STATE": str(self.state_path),
                 "FAKE_GRADLE_CALLS": str(self.calls_path),
+                "FAKE_SAFE_AREA_CALLS": str(self.safe_area_calls_path),
                 "FAKE_ADB_CALLS": str(self.adb_calls_path),
                 "FAKE_DEVICE_FILES": str(self.device_files),
             }
@@ -489,6 +505,24 @@ class AndroidCurrentUiGateBehaviorTest(unittest.TestCase):
         self.assertIn("expected_navigation_mode=0", preflight)
         self.assertIn("expected_cutout_resource=absent", preflight)
         self.assertIn("gate=PASS", preflight)
+
+    def test_landscape_three_button_safe_area_runs_only_after_profile_convergence(self) -> None:
+        result = self.run_gate()
+
+        self.assertEqual(0, result.returncode, result.stdout)
+        self.assertEqual(
+            ["landscape_three_button"],
+            self.safe_area_calls_path.read_text(encoding="utf-8").splitlines(),
+        )
+        safe_area_results = self.evidence / "landscape_three_button-landscape-safe-area-results"
+        xml_files = sorted(safe_area_results.rglob("TEST-*.xml"))
+        self.assertEqual(1, len(xml_files))
+        safe_area_xml = xml_files[0].read_text(encoding="utf-8")
+        self.assertIn("LandscapeThreeButtonSafeAreaTest", safe_area_xml)
+        self.assertIn("rootContentStaysInsideLandscapeThreeButtonSystemSafeArea", safe_area_xml)
+        profile_result = self.read_result("landscape_three_button")
+        self.assertIn("landscape_safe_area_instrumentation_status=0", profile_result)
+        self.assertIn("landscape_safe_area_results_status=0", profile_result)
 
     def test_instrumentation_failure_preserves_code_and_finally_collects_evidence(self) -> None:
         result = self.run_gate(FAKE_GRADLE_FAIL_PROFILE="small_three_button")

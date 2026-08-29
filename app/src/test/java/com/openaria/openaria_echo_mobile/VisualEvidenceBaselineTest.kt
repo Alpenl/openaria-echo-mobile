@@ -74,6 +74,9 @@ class VisualEvidenceBaselineTest {
         assertContains(runnerSource, "android.testInstrumentationRunnerArguments.visualProfile")
         assertContains(runnerSource, "android.testInstrumentationRunnerArguments.evidenceNonce")
         assertContains(runnerSource, "android.testInstrumentationRunnerArguments.expectedDensityDpi")
+        assertContains(runnerSource, "LandscapeThreeButtonSafeAreaTest")
+        assertContains(runnerSource, "landscape-safe-area-results")
+        assertContains(runnerSource, "landscape_safe_area_results_status")
         assertContains(runnerSource, "validate_gradle_results")
         assertContains(runnerSource, "wait_for_state_convergence")
         assertContains(runnerSource, "capture_profile_evidence")
@@ -87,6 +90,10 @@ class VisualEvidenceBaselineTest {
 
         listOf(ci, release).forEach { workflow ->
             assertContains(workflow, "bash scripts/android-current-ui-gate.sh android-current-ui-evidence")
+            assertContains(
+                workflow,
+                "android.testInstrumentationRunnerArguments.notClass=com.openaria.openaria_echo_mobile.LandscapeThreeButtonSafeAreaTest",
+            )
             assertContains(workflow, "python3 -m unittest scripts/test_android_current_ui_gate.py")
             assertContains(workflow, "Upload current Android UI evidence")
             assertContains(workflow, "android-current-ui-evidence/**")

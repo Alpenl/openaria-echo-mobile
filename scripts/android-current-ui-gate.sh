@@ -6,6 +6,8 @@ set -uo pipefail
 readonly package_name="com.openaria.openaria_echo_mobile"
 readonly test_class="com.openaria.openaria_echo_mobile.CurrentUiVisualGateTest"
 readonly test_method="currentApkKeepsSemanticsAndGeometryInsideTheRealSystemSafeArea"
+readonly landscape_safe_area_test_class="com.openaria.openaria_echo_mobile.LandscapeThreeButtonSafeAreaTest"
+readonly landscape_safe_area_test_method="rootContentStaysInsideLandscapeThreeButtonSystemSafeArea"
 readonly shell_evidence_root="/data/local/tmp/openaria-current-ui"
 readonly host_evidence_root="${1:-android-current-ui-evidence}"
 readonly adb_bin="${OPENARIA_UI_GATE_ADB:-adb}"
@@ -452,8 +454,8 @@ copy_gradle_results() {
 }
 
 validate_gradle_results() {
-  local profile="$1" destination="$2"
-  python3 - "$profile" "$test_class" "$test_method" "$destination" <<'PY'
+  local profile="$1" destination="$2" expected_class="${3:-$test_class}" expected_method="${4:-$test_method}"
+  python3 - "$profile" "$expected_class" "$expected_method" "$destination" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -584,10 +586,14 @@ copy_shell_evidence() {
 
 run_profile() {
   local profile="$1" configuration_status preparation_status=125 instrumentation_status=125 primary_status=0
+  local current_results_status=125 landscape_safe_area_instrumentation_status=0 landscape_safe_area_results_status=0
   local result_root="app/build/outputs/androidTest-results"
+  local current_results_staging="$host_evidence_root/${profile}-current-ui-results-staging"
+  local landscape_safe_area_results="$host_evidence_root/${profile}-landscape-safe-area-results"
   profile_evidence_nonce=""
   printf 'profile=%s\n' "$profile"
   rm -rf "$result_root"
+  rm -rf "$current_results_staging" "$landscape_safe_area_results"
   configure_profile "$profile"; configuration_status=$?
   if (( configuration_status != 0 )); then
     primary_status=$configuration_status
@@ -614,6 +620,62 @@ run_profile() {
         -Pandroid.testInstrumentationRunnerArguments.expectedRotation="$profile_expected_rotation"
       instrumentation_status=$?
       if (( instrumentation_status != 0 )); then primary_status=$instrumentation_status; fi
+      if (( instrumentation_status == 0 )); then
+        mkdir -p "$current_results_staging"
+        if cp -a "$result_root/." "$current_results_staging/"; then
+          validate_gradle_results "$profile" "$current_results_staging" "$test_class" "$test_method"
+          if (( $? == 0 )); then current_results_status=0; else current_results_status=$missing_test_results_failure; fi
+        else
+          current_results_status=$missing_test_results_failure
+        fi
+        if (( current_results_status != 0 && primary_status == 0 )); then
+          primary_status=$current_results_status
+        fi
+      fi
+
+      # The safe-area assertion needs a real landscape + three-button system
+      # profile. The normal connected suite runs on the runner's default
+      # portrait profile, so execute this class only after this gate converges
+      # the landscape_three_button profile and retain its XML as evidence.
+      if [[ "$profile" == "landscape_three_button" && "$instrumentation_status" == "0" && "$current_results_status" == "0" ]]; then
+        rm -rf "$result_root"
+        mkdir -p "$result_root"
+        "$gradlew_bin" connectedDebugAndroidTest \
+          -Pandroid.testInstrumentationRunnerArguments.class="$landscape_safe_area_test_class" \
+          -Pandroid.testInstrumentationRunnerArguments.visualProfile="$profile" \
+          -Pandroid.testInstrumentationRunnerArguments.evidenceNonce="$profile_evidence_nonce" \
+          -Pandroid.testInstrumentationRunnerArguments.expectedWindowWidthPx="$profile_expected_window_width" \
+          -Pandroid.testInstrumentationRunnerArguments.expectedWindowHeightPx="$profile_expected_window_height" \
+          -Pandroid.testInstrumentationRunnerArguments.expectedDensityDpi="$profile_expected_density" \
+          -Pandroid.testInstrumentationRunnerArguments.expectedRotation="$profile_expected_rotation"
+        landscape_safe_area_instrumentation_status=$?
+        mkdir -p "$landscape_safe_area_results"
+        if [[ -d "$result_root" ]] && cp -a "$result_root/." "$landscape_safe_area_results/"; then
+          if (( landscape_safe_area_instrumentation_status == 0 )); then
+            validate_gradle_results "$profile" "$landscape_safe_area_results" \
+              "$landscape_safe_area_test_class" "$landscape_safe_area_test_method"
+            if (( $? == 0 )); then landscape_safe_area_results_status=0; else landscape_safe_area_results_status=$missing_test_results_failure; fi
+          else
+            landscape_safe_area_results_status=125
+          fi
+        else
+          landscape_safe_area_results_status=$missing_test_results_failure
+        fi
+        if (( landscape_safe_area_instrumentation_status != 0 )); then
+          primary_status=$landscape_safe_area_instrumentation_status
+        elif (( landscape_safe_area_results_status != 0 && primary_status == 0 )); then
+          primary_status=$landscape_safe_area_results_status
+        fi
+
+        # Keep the CurrentUiVisualGate XML in the canonical result root for
+        # capture_profile_evidence, while the targeted safe-area XML remains in
+        # its dedicated evidence directory above.
+        rm -rf "$result_root"
+        mkdir -p "$result_root"
+        if ! cp -a "$current_results_staging/." "$result_root/"; then
+          if (( primary_status == 0 )); then primary_status=$missing_test_results_failure; fi
+        fi
+      fi
     fi
   fi
   capture_profile_evidence "$profile" "$profile_evidence_nonce" "$instrumentation_status"
@@ -628,8 +690,12 @@ run_profile() {
     printf 'png_pull_status=%d\njson_pull_status=%d\n' "$evidence_png_status" "$evidence_json_status"
     printf 'evidence_identity_status=%d\n' "$evidence_identity_status"
     printf 'android_test_results_status=%d\nfinal_device_state_status=%d\n' "$evidence_results_status" "$evidence_state_status"
+    printf 'current_ui_results_status=%d\n' "$current_results_status"
+    printf 'landscape_safe_area_instrumentation_status=%d\nlandscape_safe_area_results_status=%d\n' \
+      "$landscape_safe_area_instrumentation_status" "$landscape_safe_area_results_status"
     printf 'profile_exit_status=%d\n' "$primary_status"
   } > "$host_evidence_root/${profile}-result.env"
+  rm -rf "$current_results_staging"
   return "$primary_status"
 }
 
@@ -782,6 +848,11 @@ clear_previous_host_evidence() {
     command_status=$?
     if (( command_status != 0 && first_failure == 0 )); then first_failure=$command_status; fi
     rm -rf "$host_evidence_root/${profile}-androidTest-results"
+    command_status=$?
+    if (( command_status != 0 && first_failure == 0 )); then first_failure=$command_status; fi
+    rm -rf \
+      "$host_evidence_root/${profile}-current-ui-results-staging" \
+      "$host_evidence_root/${profile}-landscape-safe-area-results"
     command_status=$?
     if (( command_status != 0 && first_failure == 0 )); then first_failure=$command_status; fi
   done

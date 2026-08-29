@@ -46,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -104,11 +105,13 @@ import com.openaria.openaria_echo_mobile.body.api.CaptureStatusSnapshot
 import com.openaria.openaria_echo_mobile.body.api.CalibrationCaptureCapability
 import com.openaria.openaria_echo_mobile.body.api.CameraFocusResult
 import com.openaria.openaria_echo_mobile.body.api.CameraFocusStatus
+import com.openaria.openaria_echo_mobile.body.api.DeviceAdmissionCancellation
+import com.openaria.openaria_echo_mobile.body.api.DeviceAdmissionClient
+import com.openaria.openaria_echo_mobile.body.api.DeviceAdmissionResult
 import com.openaria.openaria_echo_mobile.body.api.DeviceConnection
 import com.openaria.openaria_echo_mobile.body.api.DeviceHttpFailure
 import com.openaria.openaria_echo_mobile.body.api.DeviceHttpClient
 import com.openaria.openaria_echo_mobile.body.api.DeviceSessionManifest
-import com.openaria.openaria_echo_mobile.body.api.DeviceProbeClient
 import com.openaria.openaria_echo_mobile.body.api.DeviceRuntime
 import com.openaria.openaria_echo_mobile.body.api.NetworkDesiredState
 import com.openaria.openaria_echo_mobile.body.api.NetworkInterfaceRuntime
@@ -126,13 +129,15 @@ import com.openaria.openaria_echo_mobile.body.api.NetworkStreamEvent
 import com.openaria.openaria_echo_mobile.body.api.NetworkTransaction
 import com.openaria.openaria_echo_mobile.body.api.NetworkTransactionReceipt
 import com.openaria.openaria_echo_mobile.body.api.PreviewResult
-import com.openaria.openaria_echo_mobile.body.api.ProbeResult
 import com.openaria.openaria_echo_mobile.body.api.RetainedUnsuccessfulOutcome
 import com.openaria.openaria_echo_mobile.body.api.RetainedUnsuccessfulOutcomeResult
 import com.openaria.openaria_echo_mobile.body.api.SessionListPage
 import com.openaria.openaria_echo_mobile.body.api.SessionListResult
+import com.openaria.openaria_echo_mobile.body.api.SessionLedgerApplyResult
+import com.openaria.openaria_echo_mobile.body.api.SessionLedgerRepository
 import com.openaria.openaria_echo_mobile.body.api.SessionManifestResult
 import com.openaria.openaria_echo_mobile.body.api.SessionSummary
+import com.openaria.openaria_echo_mobile.body.api.VerifiedDeviceAdmission
 import com.openaria.openaria_echo_mobile.body.discovery.DeviceDiscoveryClient
 import com.openaria.openaria_echo_mobile.body.discovery.DeviceConnectionHistoryStore
 import com.openaria.openaria_echo_mobile.body.discovery.DeviceHistoryEntry
@@ -142,7 +147,10 @@ import com.openaria.openaria_echo_mobile.security.EndpointPolicy
 import com.openaria.openaria_echo_mobile.security.SecureTokenStore
 import com.openaria.openaria_echo_mobile.ui.theme.EchoColors
 import com.openaria.openaria_echo_mobile.ui.theme.EchoText
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -163,6 +171,7 @@ fun EchoApp(
 ) {
     var selectedTabName by rememberSaveable { mutableStateOf(EchoTab.VIEWFINDER.name) }
     var bodyConnection by remember { mutableStateOf<DeviceConnection?>(null) }
+    var admittedCaptureStatus by remember { mutableStateOf<CaptureStatusSnapshot?>(null) }
     var captureProjection by remember { mutableStateOf(CaptureProjectionState()) }
     var captureStatus by remember { mutableStateOf<CaptureStatusSnapshot?>(null) }
     var captureMessage by remember { mutableStateOf<CaptureStatusMessage?>(null) }
@@ -177,6 +186,15 @@ fun EchoApp(
     var sessionPage by remember { mutableStateOf<SessionListPage?>(null) }
     var sessionMessage by remember { mutableStateOf<SessionMessage?>(null) }
     var sessionLoadingMore by remember { mutableStateOf(false) }
+    var sessionRefreshTransportCancellation by remember {
+        mutableStateOf<DeviceAdmissionCancellation?>(null)
+    }
+    var sessionRefreshTransportGeneration by remember { mutableStateOf(0L) }
+    var sessionLoadMoreJob by remember { mutableStateOf<Job?>(null) }
+    var sessionLoadMoreTransportCancellation by remember {
+        mutableStateOf<DeviceAdmissionCancellation?>(null)
+    }
+    var sessionLoadMoreTransportGeneration by remember { mutableStateOf(0L) }
     var sessionManifest by remember { mutableStateOf<DeviceSessionManifest?>(null) }
     var sessionManifestMessage by remember { mutableStateOf<SessionManifestMessage?>(null) }
     var sessionManifestLoading by remember { mutableStateOf(false) }
@@ -191,9 +209,9 @@ fun EchoApp(
     var cameraFocusMessage by remember { mutableStateOf<CameraFocusMessage?>(null) }
     var cameraFocusCommandRunning by remember { mutableStateOf(false) }
     var connectionGeneration by remember { mutableStateOf(0L) }
+    var skipInitialReconciliationGeneration by remember { mutableStateOf<Long?>(null) }
     var captureStreamHealth by remember { mutableStateOf(EventStreamHealth.Starting) }
     var captureStatusRequestGeneration by remember { mutableStateOf<Long?>(null) }
-    var sessionRequestGeneration by remember { mutableStateOf<Long?>(null) }
     var focusRequestGeneration by remember { mutableStateOf<Long?>(null) }
     var sessionDetailGeneration by remember { mutableStateOf(0L) }
     var sessionOutcomeGeneration by remember { mutableStateOf(0L) }
@@ -204,6 +222,7 @@ fun EchoApp(
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
     }
     val deviceClient = remember { DeviceHttpClient() }
+    val sessionLedgerRepository = remember { SessionLedgerRepository() }
     val artifactStore = remember(context) { ArtifactDownloadStore(context) }
     val scope = rememberCoroutineScope()
     val previewFrameGate = remember { PreviewFrameGate() }
@@ -214,13 +233,68 @@ fun EchoApp(
     val captureReconciliationGate = remember(connectionGeneration) {
         ReconciliationGate(ConnectionRequestPolicy.HEALTHY_RECONCILIATION_INTERVAL_MS)
     }
+    val captureReconciliationCoordinator = remember(connectionGeneration) {
+        CaptureReconciliationCoordinator(connectionGeneration, captureReconciliationGate)
+    }
+
+    fun stopSessionRefreshTransport() {
+        sessionRefreshTransportGeneration += 1L
+        sessionRefreshTransportCancellation?.cancel()
+        sessionRefreshTransportCancellation = null
+    }
+
+    fun stopSessionLoadMoreTransport() {
+        sessionLoadMoreTransportGeneration += 1L
+        sessionLoadMoreTransportCancellation?.cancel()
+        sessionLoadMoreTransportCancellation = null
+        sessionLoadMoreJob?.cancel()
+        sessionLoadMoreJob = null
+    }
+
+    fun resetSessionLedgerForConnectionChange() {
+        stopSessionRefreshTransport()
+        stopSessionLoadMoreTransport()
+        sessionLedgerRepository.reset()
+        sessionPage = sessionLedgerRepository.page
+        sessionMessage = null
+        sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+    }
+
+    fun cancelSessionLedgerInFlight() {
+        stopSessionRefreshTransport()
+        stopSessionLoadMoreTransport()
+        sessionLedgerRepository.cancelInFlight()
+        sessionPage = sessionLedgerRepository.page
+        sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+    }
 
     fun replaceBodyConnection(nextConnection: DeviceConnection?) {
         cancelArtifactDownload?.invoke()
         previewFrameGate.beginGeneration()
         previewFrame = null
+        resetSessionLedgerForConnectionChange()
         connectionGeneration += 1L
+        admittedCaptureStatus = null
+        skipInitialReconciliationGeneration = null
         bodyConnection = nextConnection
+    }
+
+    fun admitBody(admission: VerifiedDeviceAdmission) {
+        cancelArtifactDownload?.invoke()
+        previewFrameGate.beginGeneration()
+        previewFrame = null
+        resetSessionLedgerForConnectionChange()
+        connectionGeneration += 1L
+        admittedCaptureStatus = admission.initialCaptureStatus
+        val initialProjection = CaptureProjection.applyHttpSnapshot(
+            CaptureProjectionState(),
+            admission.initialCaptureStatus,
+        ).state
+        captureProjection = initialProjection
+        captureStatus = initialProjection.snapshot
+        captureMessage = null
+        skipInitialReconciliationGeneration = connectionGeneration
+        bodyConnection = admission.connection
     }
 
     fun isCurrentConnection(activeConnection: DeviceConnection, generation: Long): Boolean {
@@ -235,28 +309,69 @@ fun EchoApp(
     suspend fun refreshSessionLedger(
         activeConnection: DeviceConnection,
         generation: Long = connectionGeneration,
+        takeId: String? = null,
+        limit: Int = 50,
+        catalogRecovery: Boolean = false,
     ) {
-        if (!isCurrentConnection(activeConnection, generation) || sessionRequestGeneration != null) return
-        sessionRequestGeneration = generation
+        if (!isCurrentConnection(activeConnection, generation)) return
+        stopSessionLoadMoreTransport()
+        sessionLedgerRepository.cancelLoadMore()
+        val request = sessionLedgerRepository.beginRefresh(
+            takeId = takeId,
+            limit = limit,
+            catalogRecovery = catalogRecovery,
+        ) ?: return
+        sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+        sessionMessage = null
+        sessionRefreshTransportGeneration += 1L
+        val transportGeneration = sessionRefreshTransportGeneration
+        val transportCancellation = DeviceAdmissionCancellation()
+        sessionRefreshTransportCancellation = transportCancellation
         val result = try {
             withContext(Dispatchers.IO) {
-                deviceClient.listSessions(activeConnection, limit = 50)
+                deviceClient.listSessions(
+                    connection = activeConnection,
+                    limit = request.limit,
+                    takeId = request.takeId,
+                    cancellation = transportCancellation,
+                )
             }
+        } catch (exception: Throwable) {
+            sessionLedgerRepository.cancel(request)
+            throw exception
         } finally {
-            if (sessionRequestGeneration == generation) sessionRequestGeneration = null
+            if (sessionRefreshTransportGeneration == transportGeneration) {
+                sessionRefreshTransportCancellation = null
+            }
         }
         if (!isCurrentConnection(activeConnection, generation)) return
-        when (result) {
-            is SessionListResult.Page -> {
-                sessionPage = mergeSessionRefresh(sessionPage, result.value)
+        when (val applied = sessionLedgerRepository.complete(request, result)) {
+            SessionLedgerApplyResult.Applied -> {
+                sessionPage = sessionLedgerRepository.page
+                sessionLoadingMore = sessionLedgerRepository.isLoadingMore
                 sessionMessage = null
             }
-            SessionListResult.AuthenticationRequired -> sessionMessage = SessionMessage.AuthRequired
-            SessionListResult.Forbidden -> sessionMessage = SessionMessage.Forbidden
-            is SessionListResult.HttpFailure -> sessionMessage = SessionMessage.HttpFailure(result.statusCode)
-            SessionListResult.InvalidRequest -> sessionMessage = SessionMessage.InvalidRequest
-            is SessionListResult.InvalidResponse -> sessionMessage = SessionMessage.InvalidResponse(result.message)
-            is SessionListResult.NetworkFailure -> sessionMessage = SessionMessage.NetworkFailure(result.message)
+            SessionLedgerApplyResult.Ignored -> {
+                sessionPage = sessionLedgerRepository.page
+                sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+            }
+            is SessionLedgerApplyResult.RefreshRequired -> {
+                sessionPage = sessionLedgerRepository.page
+                sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+                sessionMessage = null
+                refreshSessionLedger(
+                    activeConnection = activeConnection,
+                    generation = generation,
+                    takeId = applied.takeId,
+                    limit = applied.limit,
+                    catalogRecovery = applied.catalogRecovery,
+                )
+            }
+            is SessionLedgerApplyResult.Failed -> {
+                sessionPage = sessionLedgerRepository.page
+                sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+                sessionMessage = sessionMessageFor(applied.result)
+            }
         }
     }
 
@@ -265,42 +380,55 @@ fun EchoApp(
         generation: Long,
         force: Boolean,
     ): Boolean {
-        if (!isCurrentConnection(activeConnection, generation) || captureStatusRequestGeneration != null) {
-            return false
-        }
-        if (!captureReconciliationGate.tryAcquire(SystemClock.elapsedRealtime(), force)) {
-            return false
-        }
-        val baseline = captureProjection.authorityRevision()
-        captureStatusRequestGeneration = generation
-        val result = try {
-            withContext(Dispatchers.IO) { deviceClient.getCaptureStatus(activeConnection) }
-        } finally {
-            if (captureStatusRequestGeneration == generation) captureStatusRequestGeneration = null
-        }
-        if (!isCurrentConnection(activeConnection, generation) ||
-            !ConnectionRequestPolicy.canApplyResponse(
-                requestGeneration = generation,
-                currentGeneration = connectionGeneration,
-                requestBaseline = baseline,
-                currentRevision = captureProjection.authorityRevision(),
-            )
-        ) {
-            return false
-        }
-        when (result) {
-            is CaptureStatusResult.Snapshot -> {
-                val projected = CaptureProjection.applyHttpSnapshot(captureProjection, result.value)
-                applyCaptureProjectionState(projected.state)
-                captureMessage = null
+        var requestForce = force
+        while (isCurrentConnection(activeConnection, generation)) {
+            val request = captureReconciliationCoordinator.begin(
+                nowMs = SystemClock.elapsedRealtime(),
+                force = requestForce,
+            ) ?: return false
+            val baseline = captureProjection.authorityRevision()
+            captureStatusRequestGeneration = generation
+            val result = try {
+                withContext(Dispatchers.IO) { deviceClient.getCaptureStatus(activeConnection) }
+            } catch (throwable: Throwable) {
+                captureReconciliationCoordinator.cancel(request)
+                throw throwable
+            } finally {
+                if (captureStatusRequestGeneration == generation) captureStatusRequestGeneration = null
             }
-            CaptureStatusResult.AuthenticationRequired -> captureMessage = CaptureStatusMessage.AuthRequired
-            CaptureStatusResult.Forbidden -> captureMessage = CaptureStatusMessage.Forbidden
-            is CaptureStatusResult.HttpFailure -> captureMessage = CaptureStatusMessage.HttpFailure(result.statusCode)
-            is CaptureStatusResult.InvalidResponse -> captureMessage = CaptureStatusMessage.InvalidResponse(result.message)
-            is CaptureStatusResult.NetworkFailure -> captureMessage = CaptureStatusMessage.NetworkFailure(result.message)
+            when (captureReconciliationCoordinator.complete(request)) {
+                CaptureReconciliationResponseDisposition.SUPERSEDED -> {
+                    requestForce = true
+                    continue
+                }
+                CaptureReconciliationResponseDisposition.IGNORED -> return false
+                CaptureReconciliationResponseDisposition.CURRENT -> Unit
+            }
+            if (!isCurrentConnection(activeConnection, generation) ||
+                !ConnectionRequestPolicy.canApplyResponse(
+                    requestGeneration = request.connectionGeneration,
+                    currentGeneration = connectionGeneration,
+                    requestBaseline = baseline,
+                    currentRevision = captureProjection.authorityRevision(),
+                )
+            ) {
+                return false
+            }
+            when (result) {
+                is CaptureStatusResult.Snapshot -> {
+                    val projected = CaptureProjection.applyHttpSnapshot(captureProjection, result.value)
+                    applyCaptureProjectionState(projected.state)
+                    captureMessage = null
+                }
+                CaptureStatusResult.AuthenticationRequired -> captureMessage = CaptureStatusMessage.AuthRequired
+                CaptureStatusResult.Forbidden -> captureMessage = CaptureStatusMessage.Forbidden
+                is CaptureStatusResult.HttpFailure -> captureMessage = CaptureStatusMessage.HttpFailure(result.statusCode)
+                is CaptureStatusResult.InvalidResponse -> captureMessage = CaptureStatusMessage.InvalidResponse(result.message)
+                is CaptureStatusResult.NetworkFailure -> captureMessage = CaptureStatusMessage.NetworkFailure(result.message)
+            }
+            return result is CaptureStatusResult.Snapshot
         }
-        return result is CaptureStatusResult.Snapshot
+        return false
     }
 
     suspend fun refreshCameraFocus(activeConnection: DeviceConnection, generation: Long) {
@@ -355,6 +483,7 @@ fun EchoApp(
                 -> {
                     previewFrameGate.beginGeneration()
                     previewFrame = null
+                    cancelSessionLedgerInFlight()
                     appInForeground = false
                 }
                 else -> Unit
@@ -566,28 +695,65 @@ fun EchoApp(
 
     val loadMoreSessions: () -> Unit = {
         val activeConnection = bodyConnection
-        val currentPage = sessionPage
-        val cursor = currentPage?.nextCursor
-        if (activeConnection != null && currentPage != null && cursor != null && !sessionLoadingMore) {
+        val request = if (activeConnection == null) null else sessionLedgerRepository.beginLoadMore()
+        if (activeConnection != null && request != null) {
             val generation = connectionGeneration
-            sessionLoadingMore = true
+            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
             sessionMessage = null
-            scope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    deviceClient.listSessions(
-                        connection = activeConnection,
-                        limit = 50,
-                        cursor = cursor,
-                    )
-                }
-                if (!isCurrentConnection(activeConnection, generation)) return@launch
-                sessionLoadingMore = false
-                when (result) {
-                    is SessionListResult.Page -> {
-                        sessionPage = appendSessionPage(currentPage, result.value)
-                        sessionMessage = null
+            sessionLoadMoreTransportGeneration += 1L
+            val transportGeneration = sessionLoadMoreTransportGeneration
+            val transportCancellation = DeviceAdmissionCancellation()
+            sessionLoadMoreTransportCancellation = transportCancellation
+            sessionLoadMoreJob = scope.launch {
+                try {
+                    val result = try {
+                        withContext(Dispatchers.IO) {
+                            deviceClient.listSessions(
+                                connection = activeConnection,
+                                limit = request.limit,
+                                cursor = request.cursor,
+                                takeId = request.takeId,
+                                cancellation = transportCancellation,
+                            )
+                        }
+                    } catch (exception: Throwable) {
+                        sessionLedgerRepository.cancel(request)
+                        throw exception
                     }
-                    else -> sessionMessage = sessionMessageFor(result)
+                    if (!isCurrentConnection(activeConnection, generation)) return@launch
+                    when (val applied = sessionLedgerRepository.complete(request, result)) {
+                        SessionLedgerApplyResult.Applied -> {
+                            sessionPage = sessionLedgerRepository.page
+                            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+                            sessionMessage = null
+                        }
+                        SessionLedgerApplyResult.Ignored -> {
+                            sessionPage = sessionLedgerRepository.page
+                            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+                        }
+                        is SessionLedgerApplyResult.RefreshRequired -> {
+                            sessionPage = sessionLedgerRepository.page
+                            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+                            sessionMessage = null
+                            refreshSessionLedger(
+                                activeConnection = activeConnection,
+                                generation = generation,
+                                takeId = applied.takeId,
+                                limit = applied.limit,
+                                catalogRecovery = applied.catalogRecovery,
+                            )
+                        }
+                        is SessionLedgerApplyResult.Failed -> {
+                            sessionPage = sessionLedgerRepository.page
+                            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+                            sessionMessage = sessionMessageFor(applied.result)
+                        }
+                    }
+                } finally {
+                    if (sessionLoadMoreTransportGeneration == transportGeneration) {
+                        sessionLoadMoreTransportCancellation = null
+                        sessionLoadMoreJob = null
+                    }
                 }
             }
         }
@@ -659,8 +825,19 @@ fun EchoApp(
 
     LaunchedEffect(bodyConnection, connectionGeneration) {
         val activeConnection = bodyConnection
-        captureProjection = CaptureProjectionState()
-        captureStatus = null
+        val initialCaptureStatus = admittedCaptureStatus.takeIf { activeConnection != null }
+        val initialProjection = if (initialCaptureStatus == null) {
+            CaptureProjectionState()
+        } else {
+            CaptureProjection.applyHttpSnapshot(
+                CaptureProjectionState(),
+                initialCaptureStatus,
+            ).state
+        }
+        applyCaptureProjectionState(initialProjection)
+        if (initialCaptureStatus != null) {
+            captureReconciliationGate.recordAuthoritativeSnapshot(SystemClock.elapsedRealtime())
+        }
         captureMessage = null
         captureCommandMessage = null
         captureCommandRunning = false
@@ -669,11 +846,7 @@ fun EchoApp(
         previewMessage = if (activeConnection == null) null else PreviewMessage.Waiting
         captureStreamHealth = EventStreamHealth.Starting
         captureStatusRequestGeneration = null
-        sessionRequestGeneration = null
         focusRequestGeneration = null
-        sessionPage = null
-        sessionMessage = null
-        sessionLoadingMore = false
         dismissSessionDetail()
         dismissSessionOutcome()
         artifactDownloadMessage = null
@@ -687,8 +860,14 @@ fun EchoApp(
     LaunchedEffect(bodyConnection, connectionGeneration, appInForeground) {
         val activeConnection = bodyConnection ?: return@LaunchedEffect
         val generation = connectionGeneration
+        val usingAdmissionSnapshot = skipInitialReconciliationGeneration == generation
+        if (usingAdmissionSnapshot) {
+            skipInitialReconciliationGeneration = null
+        }
         if (!appInForeground) return@LaunchedEffect
-        reconcileCaptureStatus(activeConnection, generation, force = true)
+        if (!usingAdmissionSnapshot) {
+            reconcileCaptureStatus(activeConnection, generation, force = true)
+        }
         var fallbackDelayMs = ConnectionRequestPolicy.FALLBACK_INITIAL_DELAY_MS
         var fallbackDueAtMs = SystemClock.elapsedRealtime() + fallbackDelayMs
         while (isActive) {
@@ -915,12 +1094,21 @@ fun EchoApp(
         refreshCameraFocus(activeConnection, generation)
     }
 
-    LaunchedEffect(bodyConnection, connectionGeneration, appInForeground, selectedTab) {
+    LaunchedEffect(bodyConnection, connectionGeneration, selectedTab) {
         val activeConnection = bodyConnection ?: return@LaunchedEffect
+        if (selectedTab != EchoTab.SESSIONS) {
+            stopSessionLoadMoreTransport()
+            sessionLedgerRepository.cancelLoadMore()
+            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+        }
         if (!appInForeground) return@LaunchedEffect
         val generation = connectionGeneration
         when (selectedTab) {
-            EchoTab.SESSIONS -> refreshSessionLedger(activeConnection, generation)
+            EchoTab.SESSIONS -> {
+                if (sessionPage != null || sessionMessage != null) {
+                    refreshSessionLedger(activeConnection, generation)
+                }
+            }
             EchoTab.BODY -> refreshCameraFocus(activeConnection, generation)
             EchoTab.VIEWFINDER,
             EchoTab.NETWORK,
@@ -976,7 +1164,7 @@ fun EchoApp(
                             }
                         },
                         onShowImuOverlayChange = { showPreviewImuOverlay = it },
-                        onConnected = ::replaceBodyConnection,
+                        onConnected = ::admitBody,
                     )
                     EchoTab.SESSIONS -> SessionsScreen(
                         bodyConnection = bodyConnection,
@@ -1116,7 +1304,7 @@ private fun ViewfinderScreen(
     onShowGridChange: (Boolean) -> Unit,
     onShowFocusPeakingChange: (Boolean) -> Unit,
     onShowImuOverlayChange: (Boolean) -> Unit,
-    onConnected: (DeviceConnection) -> Unit,
+    onConnected: (VerifiedDeviceAdmission) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -1408,7 +1596,7 @@ private fun CaptureStatusPanel(
 }
 
 @Composable
-private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
+private fun ConnectionPanel(onConnected: (VerifiedDeviceAdmission) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var bodyOrigin by rememberSaveable { mutableStateOf("") }
@@ -1418,15 +1606,26 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
     var probeMessage by remember { mutableStateOf<ProbeMessage?>(null) }
     var tokenMessage by remember { mutableStateOf<TokenMessage?>(null) }
     var confirmTokenClear by rememberSaveable { mutableStateOf(false) }
+    var authorizationOrigin by rememberSaveable { mutableStateOf<String?>(null) }
     var probing by remember { mutableStateOf(false) }
     var cancelProbe by remember { mutableStateOf<(() -> Unit)?>(null) }
-    val probeClient = remember { DeviceProbeClient() }
+    val admissionClient = remember { DeviceAdmissionClient() }
+    val admissionFence = remember { ConnectionAdmissionFence() }
     val discoveryClient = remember(context) { DeviceDiscoveryClient(context) }
     var discoveryState by remember { mutableStateOf<DiscoveryState>(DiscoveryState.Idle(emptyList())) }
     val tokenStore = remember(context) { SecureTokenStore(context) }
     val historyStore = remember(context) { DeviceConnectionHistoryStore(context) }
     var historyEntries by remember { mutableStateOf(historyStore.load()) }
-    val hasStoredToken = tokenStore.hasTokenFor(bodyOrigin)
+    val credentialOrigin = authorizationOrigin ?: bodyOrigin
+    val hasStoredToken = tokenStore.hasTokenFor(credentialOrigin)
+
+    fun cancelActiveAdmission() {
+        val wasProbing = probing
+        cancelProbe?.invoke()
+        cancelProbe = null
+        probing = false
+        if (wasProbing) probeMessage = ProbeMessage.Cancelled
+    }
 
     BackNavigationHandler(
         state = BackNavigationState(
@@ -1448,9 +1647,12 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
         }
     }
 
-    DisposableEffect(discoveryClient) {
+    val currentCancelProbe by rememberUpdatedState(cancelProbe)
+    DisposableEffect(discoveryClient, admissionFence) {
         onDispose {
             discoveryClient.stop()
+            currentCancelProbe?.invoke()
+            admissionFence.cancelCurrent()
         }
     }
 
@@ -1472,8 +1674,11 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
                     }
                 },
                 onSelect = { body ->
+                    cancelActiveAdmission()
                     bodyOrigin = body.origin
                     bodyOrigins = body.origins
+                    authorizationOrigin = null
+                    bearerToken = ""
                     endpointMessage = endpointMessageFor(EndpointPolicy.validate(body.origin))
                     probeMessage = null
                     tokenMessage = null
@@ -1485,8 +1690,11 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
             ConnectionHistoryBlock(
                 entries = historyEntries,
                 onSelect = { entry ->
+                    cancelActiveAdmission()
                     bodyOrigin = entry.origin
                     bodyOrigins = listOf(entry.origin)
+                    authorizationOrigin = null
+                    bearerToken = ""
                     endpointMessage = endpointMessageFor(EndpointPolicy.validate(entry.origin))
                     probeMessage = null
                     tokenMessage = null
@@ -1507,8 +1715,11 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
             InputField(
                 value = bodyOrigin,
                 onValueChange = {
+                    cancelActiveAdmission()
                     bodyOrigin = it
                     bodyOrigins = listOf(it)
+                    authorizationOrigin = null
+                    bearerToken = ""
                     tokenMessage = null
                     confirmTokenClear = false
                 },
@@ -1526,66 +1737,116 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
                     enabled = true,
                     onClick = {
                         if (probing) {
-                            cancelProbe?.invoke()
-                            cancelProbe = null
-                            probing = false
-                            probeMessage = ProbeMessage.Cancelled
+                            cancelActiveAdmission()
                         } else {
                             endpointMessage = endpointMessageFor(EndpointPolicy.validate(bodyOrigin))
                             probeMessage = ProbeMessage.Running
                             probing = true
-                            val cancelFlag = AtomicBoolean(false)
-                            cancelProbe = { cancelFlag.set(true) }
                             val origin = bodyOrigin
                             val origins = bodyOrigins
                                 .takeIf { it.firstOrNull() == bodyOrigin }
                                 ?: listOf(bodyOrigin)
                             val typedToken = bearerToken.trim()
-                            scope.launch {
-                                val result = withContext(Dispatchers.IO) {
-                                    probeClient.probe(origins) { candidateOrigin ->
-                                        when {
-                                            typedToken.isNotBlank() && candidateOrigin == origin -> typedToken
-                                            typedToken.isBlank() -> tokenStore.load(candidateOrigin)
-                                            else -> null
-                                        }
+                            val candidates = buildAdmissionCandidates(
+                                origins = origins,
+                                primaryOrigin = origin,
+                                authorizationOrigin = authorizationOrigin,
+                                typedToken = typedToken,
+                                storedTokenForOrigin = tokenStore::load,
+                            )
+                            val attempt = admissionFence.begin(candidates)
+                            val transportCancellation = DeviceAdmissionCancellation()
+                            val admissionJob = scope.launch(start = CoroutineStart.LAZY) {
+                                try {
+                                    val result = withContext(Dispatchers.IO) {
+                                        admissionClient.admit(
+                                            candidates = attempt.candidates,
+                                            isAttemptCurrent = { admissionFence.isCurrent(attempt) },
+                                            cancellation = transportCancellation,
+                                        )
                                     }
-                                }
-                                if (cancelFlag.get()) {
-                                    return@launch
-                                }
-                                probing = false
-                                cancelProbe = null
-                                probeMessage = probeMessageFor(result)
-                                if (result is ProbeResult.Verified) {
-                                    historyStore.record(
-                                        origin = result.connection.origin,
-                                        deviceLabel = result.connection.descriptor.deviceLabel,
-                                        deviceId = result.connection.descriptor.deviceId,
-                                    )
-                                    val savedToken = if (typedToken.isBlank()) {
-                                        tokenStore.load(result.connection.origin).orEmpty()
-                                    } else {
-                                        ""
+                                    if (!admissionFence.isCurrent(attempt)) return@launch
+                                    val verifiedAdmission =
+                                        (result as? DeviceAdmissionResult.Verified)?.admission
+                                    if (verifiedAdmission != null &&
+                                        !admissionFence.canPublish(attempt, verifiedAdmission.connection)
+                                    ) {
+                                        probeMessage = ProbeMessage.InvalidResponse(
+                                            "connection identity changed during admission",
+                                        )
+                                        return@launch
                                     }
-                                    val shouldBindSavedTokenToBody = savedToken.isNotBlank()
-                                    if (shouldBindSavedTokenToBody) {
-                                        tokenMessage = when (
-                                            tokenStore.saveForVerifiedBody(
-                                                origin = result.connection.origin,
-                                                deviceId = result.connection.descriptor.deviceId,
-                                                token = savedToken,
+
+                                    when (result) {
+                                        is DeviceAdmissionResult.AuthenticationRequired -> {
+                                            bearerToken = typedTokenAfterAuthorizationTargetChange(
+                                                currentAuthorizationOrigin = authorizationOrigin,
+                                                nextAuthorizationOrigin = result.origin,
+                                                typedToken = bearerToken,
                                             )
-                                        ) {
-                                            SecureTokenStore.StoreResult.Saved -> TokenMessage.Saved
-                                            is SecureTokenStore.StoreResult.Failed -> TokenMessage.Failed
+                                            authorizationOrigin = result.origin
                                         }
+                                        is DeviceAdmissionResult.Forbidden -> {
+                                            bearerToken = typedTokenAfterAuthorizationTargetChange(
+                                                currentAuthorizationOrigin = authorizationOrigin,
+                                                nextAuthorizationOrigin = result.origin,
+                                                typedToken = bearerToken,
+                                            )
+                                            authorizationOrigin = result.origin
+                                        }
+                                        is DeviceAdmissionResult.Verified -> authorizationOrigin = null
+                                        else -> Unit
                                     }
-                                    historyEntries = historyStore.load()
-                                    bearerToken = ""
-                                    onConnected(result.connection)
+                                    probeMessage = probeMessageFor(result)
+                                    if (verifiedAdmission != null) {
+                                        val connection = verifiedAdmission.connection
+                                        historyStore.record(
+                                            origin = connection.origin,
+                                            deviceLabel = connection.descriptor.deviceLabel,
+                                            deviceId = connection.descriptor.deviceId,
+                                        )
+                                        val savedToken = if (typedToken.isBlank()) {
+                                            tokenStore.load(connection.origin).orEmpty()
+                                        } else {
+                                            ""
+                                        }
+                                        if (savedToken.isNotBlank()) {
+                                            tokenMessage = when (
+                                                tokenStore.saveForVerifiedBody(
+                                                    origin = connection.origin,
+                                                    deviceId = connection.descriptor.deviceId,
+                                                    token = savedToken,
+                                                )
+                                            ) {
+                                                SecureTokenStore.StoreResult.Saved -> TokenMessage.Saved
+                                                is SecureTokenStore.StoreResult.Failed -> TokenMessage.Failed
+                                            }
+                                        }
+                                        historyEntries = historyStore.load()
+                                        bearerToken = ""
+                                        onConnected(verifiedAdmission)
+                                    }
+                                } catch (exception: CancellationException) {
+                                    throw exception
+                                } catch (_: Exception) {
+                                    if (admissionFence.isCurrent(attempt)) {
+                                        probeMessage = ProbeMessage.NetworkFailure(
+                                            "connection verification failed",
+                                        )
+                                    }
+                                } finally {
+                                    if (admissionFence.cancel(attempt)) {
+                                        probing = false
+                                        cancelProbe = null
+                                    }
                                 }
                             }
+                            cancelProbe = {
+                                admissionFence.cancel(attempt)
+                                transportCancellation.cancel()
+                                admissionJob.cancel()
+                            }
+                            admissionJob.start()
                         }
                     },
                     modifier = Modifier.weight(1f),
@@ -1599,16 +1860,20 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
             }
             InfoBlock(
                 title = stringResource(R.string.access_token),
-                body = if (hasStoredToken) {
-                    stringResource(R.string.token_saved_for_origin)
-                } else {
-                    stringResource(R.string.token_not_saved)
-                },
+                body = stringResource(R.string.token_target_origin, credentialOrigin) + "\n" +
+                    if (hasStoredToken) {
+                        stringResource(R.string.token_saved_for_origin)
+                    } else {
+                        stringResource(R.string.token_not_saved)
+                    },
                 accent = if (hasStoredToken) EchoColors.Permit else EchoColors.Caution,
             )
             InputField(
                 value = bearerToken,
-                onValueChange = { bearerToken = it },
+                onValueChange = {
+                    cancelActiveAdmission()
+                    bearerToken = it
+                },
                 label = stringResource(R.string.access_token_session_only),
                 secret = true,
             )
@@ -1623,7 +1888,7 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
                     enabled = bearerToken.isNotBlank() && !probing,
                     disabledReason = stringResource(R.string.token_save_disabled),
                     onClick = {
-                        tokenMessage = when (val result = tokenStore.save(bodyOrigin, bearerToken)) {
+                        tokenMessage = when (val result = tokenStore.save(credentialOrigin, bearerToken)) {
                             SecureTokenStore.StoreResult.Saved -> {
                                 bearerToken = ""
                                 TokenMessage.Saved
@@ -1648,7 +1913,7 @@ private fun ConnectionPanel(onConnected: (DeviceConnection) -> Unit) {
                     confirmLabel = stringResource(R.string.token_clear_confirm_action),
                     onCancel = { confirmTokenClear = false },
                     onConfirm = {
-                        tokenStore.clear(bodyOrigin)
+                        tokenStore.clear(credentialOrigin)
                         tokenMessage = TokenMessage.Cleared
                         confirmTokenClear = false
                     },
@@ -1882,15 +2147,20 @@ private fun SessionsScreen(
         }
         sessionMessage?.let { SessionMessageBlock(it) }
         sessionPage?.let { page ->
-            if (page.diagnosticsCount > 0) {
+            page.readOnlyDiagnosticPresentations().forEach { presentation ->
                 Panel(
                     modifier = Modifier.fillMaxWidth(),
                     background = EchoColors.Caution.copy(alpha = 0.10f),
                     border = EchoColors.Caution.copy(alpha = 0.48f),
                 ) {
                     InfoBlock(
-                        title = stringResource(R.string.diagnostics),
-                        body = stringResource(R.string.session_diagnostics_count, page.diagnosticsCount),
+                        title = presentation.code,
+                        body = stringResource(
+                            R.string.session_diagnostic_detail,
+                            presentation.message,
+                            presentation.observedAt,
+                            presentation.quarantineId,
+                        ),
                         accent = EchoColors.Caution,
                         modifier = Modifier.padding(12.dp),
                     )
@@ -3848,21 +4118,6 @@ private const val SESSION_FILTER_ALL = "all"
 private const val SESSION_FILTER_AVAILABLE = "available"
 private const val SESSION_FILTER_UNSUCCESSFUL = "unsuccessful"
 
-private fun appendSessionPage(
-    current: SessionListPage,
-    next: SessionListPage,
-): SessionListPage {
-    val bySessionId = LinkedHashMap<String, SessionSummary>()
-    (current.items + next.items).forEach { summary ->
-        bySessionId[summary.sessionId] = summary
-    }
-    return SessionListPage(
-        items = bySessionId.values.toList(),
-        diagnosticsCount = current.diagnosticsCount + next.diagnosticsCount,
-        nextCursor = next.nextCursor,
-    )
-}
-
 private fun sessionMatchesFilter(summary: SessionSummary, filter: String): Boolean {
     return when (filter) {
         SESSION_FILTER_AVAILABLE -> summary.verificationVerdict == "usable"
@@ -3871,26 +4126,12 @@ private fun sessionMatchesFilter(summary: SessionSummary, filter: String): Boole
     }
 }
 
-private fun mergeSessionRefresh(
-    current: SessionListPage?,
-    refreshed: SessionListPage,
-): SessionListPage {
-    current ?: return refreshed
-    val bySessionId = LinkedHashMap<String, SessionSummary>()
-    (refreshed.items + current.items).forEach { summary ->
-        bySessionId[summary.sessionId] = summary
-    }
-    val shouldPreserveLoadedTail = current.items.size > refreshed.items.size
-    return refreshed.copy(
-        items = bySessionId.values.toList(),
-        diagnosticsCount = maxOf(current.diagnosticsCount, refreshed.diagnosticsCount),
-        nextCursor = if (shouldPreserveLoadedTail) current.nextCursor else refreshed.nextCursor,
-    )
-}
-
 private fun sessionMessageFor(result: SessionListResult): SessionMessage? {
     return when (result) {
         is SessionListResult.Page -> null
+        is SessionListResult.CatalogChanged -> {
+            SessionMessage.InvalidResponse("catalog_changed requires a fresh session request")
+        }
         SessionListResult.AuthenticationRequired -> SessionMessage.AuthRequired
         SessionListResult.Forbidden -> SessionMessage.Forbidden
         is SessionListResult.HttpFailure -> SessionMessage.HttpFailure(result.statusCode)
@@ -4584,14 +4825,14 @@ private fun ProbeMessageText(message: ProbeMessage) {
             stringResource(R.string.probe_cancelled),
             EchoColors.Caution,
         )
-        ProbeMessage.AuthRequired -> Triple(
+        is ProbeMessage.AuthRequired -> Triple(
             stringResource(R.string.access_token),
-            stringResource(R.string.probe_auth_required),
+            stringResource(R.string.probe_auth_required, message.origin),
             EchoColors.Caution,
         )
-        ProbeMessage.Forbidden -> Triple(
+        is ProbeMessage.Forbidden -> Triple(
             stringResource(R.string.access_token),
-            stringResource(R.string.probe_forbidden),
+            stringResource(R.string.probe_forbidden, message.origin),
             EchoColors.Caution,
         )
         is ProbeMessage.InvalidResponse -> Triple(
@@ -5264,18 +5505,21 @@ private fun endpointMessageFor(decision: EndpointPolicy.Decision): EndpointMessa
     }
 }
 
-private fun probeMessageFor(result: ProbeResult): ProbeMessage {
+private fun probeMessageFor(result: DeviceAdmissionResult): ProbeMessage {
     return when (result) {
-        ProbeResult.AuthenticationRequired -> ProbeMessage.AuthRequired
-        ProbeResult.Forbidden -> ProbeMessage.Forbidden
-        is ProbeResult.HttpFailure -> ProbeMessage.HttpFailure(
+        is DeviceAdmissionResult.AuthenticationRequired -> ProbeMessage.AuthRequired(result.origin)
+        is DeviceAdmissionResult.Forbidden -> ProbeMessage.Forbidden(result.origin)
+        DeviceAdmissionResult.Cancelled -> ProbeMessage.Cancelled
+        is DeviceAdmissionResult.HttpFailure -> ProbeMessage.HttpFailure(
             statusCode = result.statusCode,
             errorCode = result.errorCode,
         )
-        is ProbeResult.InvalidResponse -> ProbeMessage.InvalidResponse(result.message)
-        is ProbeResult.NetworkFailure -> ProbeMessage.NetworkFailure(result.message)
-        is ProbeResult.RejectedEndpoint -> ProbeMessage.RejectedEndpoint(result.reason.toStringResource())
-        is ProbeResult.Verified -> ProbeMessage.Verified(result.connection.descriptor.deviceLabel)
+        is DeviceAdmissionResult.InvalidResponse -> ProbeMessage.InvalidResponse(result.message)
+        is DeviceAdmissionResult.NetworkFailure -> ProbeMessage.NetworkFailure(result.message)
+        is DeviceAdmissionResult.RejectedEndpoint -> ProbeMessage.RejectedEndpoint(result.reason.toStringResource())
+        is DeviceAdmissionResult.Verified -> {
+            ProbeMessage.Verified(result.admission.connection.descriptor.deviceLabel)
+        }
     }
 }
 
@@ -5325,8 +5569,8 @@ private sealed interface TokenMessage {
 private sealed interface ProbeMessage {
     data object Running : ProbeMessage
     data object Cancelled : ProbeMessage
-    data object AuthRequired : ProbeMessage
-    data object Forbidden : ProbeMessage
+    data class AuthRequired(val origin: String) : ProbeMessage
+    data class Forbidden(val origin: String) : ProbeMessage
     data class RejectedEndpoint(@param:StringRes val reasonString: Int) : ProbeMessage
     data class InvalidResponse(val detail: String) : ProbeMessage
     data class NetworkFailure(val detail: String) : ProbeMessage
@@ -5346,6 +5590,10 @@ internal class ReconciliationGate(
     private val minimumIntervalMs: Long,
 ) {
     private var lastRequestAtMs: Long? = null
+
+    fun recordAuthoritativeSnapshot(nowMs: Long) {
+        lastRequestAtMs = nowMs
+    }
 
     fun tryAcquire(nowMs: Long, force: Boolean = false): Boolean {
         val lastRequest = lastRequestAtMs

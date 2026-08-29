@@ -93,7 +93,7 @@
 
 ### 3.3 Phase 0 必须解除的契约风险
 
-移动端已从 `openaria-score/contracts/openapi/ylx-device-v4.openapi.yaml` 接入当前 Device API v4 OpenAPI，路径为 `openapi/ylx-device-v4.openapi.yaml`，SHA-256 为 `f1185da08f50857d1f231701d14dfc42ab5cf3f6abce65d5d6d5c90510a52210`，大小为 120760 字节，`info.version` 为 `4.0.0`。移动端不得从 TypeScript 类型反向拼出契约。
+移动端已从 `openaria-score/contracts/openapi/ylx-device-v4.openapi.yaml` 接入当前 Device API v4 OpenAPI，路径为 `openapi/ylx-device-v4.openapi.yaml`，SHA-256 为 `b6f3c677c038e55c03581c587973811b0aa2dc91cfb8b602a95128fbac225827`，大小为 124739 字节，`info.version` 为 `4.0.0`。移动端不得从 TypeScript 类型反向拼出契约。
 
 当前需要注意：移动端已切到包含网络状态、扫描、credential_ref、apply/retry/forget、事务 SSE、mDNS `_ylx-capture._tcp` 和 `calibration_capture` 的中央契约。Web support manifest 若仍记录旧 SHA，需要在 Web 仓库单独同步。移动端生产 Adapter 只打开已由 DTO、fixture 和 validator 覆盖的 v4 操作。
 

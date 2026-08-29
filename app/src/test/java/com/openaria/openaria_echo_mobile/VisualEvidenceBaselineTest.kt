@@ -3,35 +3,80 @@ package com.openaria.openaria_echo_mobile
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertContains
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VisualEvidenceBaselineTest {
     @Test
-    fun `dogfood report and screenshots remain available for visual regression review`() {
-        val report = File("../dogfood-output/report.md")
-        val screenshots = listOf(
-            "initial.png",
-            "issue-003-result.png",
-            "issue-004-nav-shift-comparison.png",
-            "issue-007-font-overlap-annotated.png",
-            "issue-007-net-overlap-annotated.png",
-            "issue-008-font-scale.png",
-        ).map { File("../dogfood-output/screenshots/$it") }
+    fun `current APK visual gate renders and archives every required system profile`() {
+        val instrumentation = File(
+            "src/androidTest/java/com/openaria/openaria_echo_mobile/CurrentUiVisualGateTest.kt",
+        )
+        val runner = File("../scripts/android-current-ui-gate.sh")
+        val runnerBehaviorTests = File("../scripts/test_android_current_ui_gate.py")
+        val ci = File("../.github/workflows/mobile-ci.yml").readText()
+        val release = File("../.github/workflows/mobile-release.yml").readText()
 
-        assertTrue(report.isFile && report.length() > 4_000L, "dogfood visual report is missing or too small")
-        screenshots.forEach { screenshot ->
-            assertTrue(
-                screenshot.isFile && screenshot.length() > 100_000L,
-                "visual baseline screenshot is missing or empty: ${screenshot.path}",
+        assertTrue(instrumentation.isFile, "Current APK visual instrumentation gate must be versioned.")
+        assertTrue(runner.isFile, "Current APK visual profile runner must be versioned.")
+        assertTrue(runnerBehaviorTests.isFile, "Current APK visual runner behavior tests must be versioned.")
+
+        val testSource = instrumentation.readText()
+        val runnerSource = runner.readText()
+        listOf(
+            "small_gesture",
+            "small_three_button",
+            "landscape_gesture",
+            "cutout_three_button",
+        ).forEach { profile ->
+            assertContains(testSource, profile)
+            assertContains(runnerSource, profile)
+        }
+        assertContains(testSource, "createAndroidComposeRule<MainActivity>")
+        assertContains(testSource, "WindowInsetsCompat.Type.displayCutout()")
+        assertContains(testSource, "config_navBarInteractionMode")
+        assertContains(testSource, "assertRectInside")
+        assertContains(testSource, "assertNoPositiveOverlap")
+        assertContains(testSource, "takeScreenshot()")
+        assertContains(testSource, "Bitmap.CompressFormat.PNG")
+        assertContains(testSource, "BitmapFactory.decodeFile")
+        assertContains(testSource, "assertBitmapsHaveIdenticalPixels")
+        assertContains(testSource, "screenshotPngSha256")
+        assertContains(testSource, "run-as \$PACKAGE_NAME cat")
+        assertContains(testSource, "/data/local/tmp/openaria-current-ui")
+        assertContains(testSource, "hasWindowFocus()")
+        assertContains(testSource, "expectedWindowWidthPx")
+        assertContains(testSource, "must explicitly have no display cutout")
+        assertFalse(testSource.contains("screencap -p"), "An unvalidated second screencap must never be uploaded.")
+        assertContains(runnerSource, "\"\$adb_bin\" pull")
+        assertContains(runnerSource, "android.testInstrumentationRunnerArguments.visualProfile")
+        assertContains(runnerSource, "android.testInstrumentationRunnerArguments.expectedDensityDpi")
+        assertContains(runnerSource, "wait_for_state_convergence")
+        assertContains(runnerSource, "capture_profile_evidence")
+        assertContains(runnerSource, "verify_pulled_evidence")
+        assertContains(runnerSource, "pulled PNG does not match the Bitmap hash")
+        assertContains(runnerSource, "snapshot_initial_state")
+        assertContains(runnerSource, "restore_initial_state")
+        assertContains(runnerSource, "trap cleanup_on_exit EXIT")
+        assertContains(runnerSource, "original_exit_status")
+        assertFalse(runnerSource.contains("sleep 3"), "Profile setup must use bounded state convergence, not a fixed delay.")
+
+        listOf(ci, release).forEach { workflow ->
+            assertContains(workflow, "bash scripts/android-current-ui-gate.sh android-current-ui-evidence")
+            assertContains(workflow, "python3 -m unittest scripts/test_android_current_ui_gate.py")
+            assertContains(workflow, "Upload current Android UI evidence")
+            assertContains(workflow, "android-current-ui-evidence/**")
+            assertFalse(
+                workflow.contains("dogfood-output"),
+                "Historical dogfood files must not satisfy the current APK visual gate.",
             )
         }
 
-        val body = report.readText()
-        assertContains(body, "顶部/底部导航")
-        assertContains(body, "摄像头开孔")
-        assertContains(body, "底部导航相差")
-        assertContains(body, "默认界面中英混排")
-        assertContains(body, "放大字体")
-        assertContains(body, "无障碍")
+        val releaseJob = release.substringAfter("\n  release:").substringBefore("\n  android_in_app_upgrade:")
+        assertContains(
+            releaseJob,
+            "needs: [android]",
+            message = "Release publication must remain blocked on the Android job that runs every current UI gate.",
+        )
     }
 }

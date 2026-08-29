@@ -11,6 +11,10 @@ key.properties
 .idea/
 .vscode/
 
+# Python test tooling
+__pycache__/
+*.py[cod]
+
 # OS / editor
 .DS_Store
 *.swp

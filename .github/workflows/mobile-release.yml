@@ -1,29 +1,41 @@
 name: Mobile Release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git ref to build, for example main or v1.0.0."
+        description: "Exact 40-character source commit verified by the local release operator."
         required: true
-        default: "main"
       release_tag:
-        description: "Release tag/name to create or update after a successful build."
+        description: "Unused vX.Y.Z Release tag bound to the exact source commit."
+        required: true
+      allow_legacy_baseline_bootstrap:
+        description: "One-time authorization for exact v0.1.7+10 from the frozen mutable v0.1.6 baseline."
+        required: true
+        type: boolean
+        default: false
+      immutable_releases_preflight:
+        description: >-
+          Trusted JSON evidence from an immediate local admin-read GET
+          /repos/{owner}/{repo}/immutable-releases check, including the raw
+          response as base64 and its SHA-256. The default GITHUB_TOKEN cannot
+          prove this setting; dispatch immediately because a residual race
+          remains between the external check and irreversible publication.
         required: true
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
-  group: mobile-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  group: openaria-mobile-release-publication
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-  CHECKOUT_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  CHECKOUT_REF: ${{ inputs.ref }}
+  IMMUTABLE_RELEASES_PREFLIGHT: ${{ inputs.immutable_releases_preflight }}
+  ALLOW_LEGACY_BASELINE_BOOTSTRAP: ${{ inputs.allow_legacy_baseline_bootstrap }}
 
 jobs:
   android:
@@ -37,6 +49,8 @@ jobs:
       previous_version_name: ${{ steps.release_metadata.outputs.previous_version_name }}
       previous_version_code: ${{ steps.release_metadata.outputs.previous_version_code }}
       previous_apk_name: ${{ steps.release_metadata.outputs.previous_apk_name }}
+      source_commit: ${{ steps.release_metadata.outputs.source_commit }}
+      preflight_run_created_at: ${{ steps.release_metadata.outputs.preflight_run_created_at }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -56,10 +70,66 @@ jobs:
 
           version_name="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
           version_code="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -n 1)"
+          source_commit="$(git rev-parse HEAD)"
           if [ -z "$version_name" ] || [ -z "$version_code" ]; then
             echo "::error::Could not read versionName/versionCode from app/build.gradle.kts."
             exit 1
           fi
+          if [[ ! "${CHECKOUT_REF}" =~ ^[0-9a-f]{40}$ ]] || [ "${source_commit}" != "${CHECKOUT_REF}" ]; then
+            echo "::error::Release checkout must equal the exact dispatch source commit."
+            exit 1
+          fi
+          if [ "${GITHUB_ACTOR}" != "${GITHUB_REPOSITORY_OWNER}" ]; then
+            echo "::error::Only the repository owner may dispatch the trusted immutable-release preflight."
+            exit 1
+          fi
+
+          if [ "${GITHUB_RUN_ATTEMPT}" != "1" ]; then
+            echo "::error::Release reruns cannot reuse immutable-release preflight evidence; perform a new admin GET and fresh workflow_dispatch."
+            exit 1
+          fi
+          preflight="$(jq -c . <<<"${IMMUTABLE_RELEASES_PREFLIGHT}")"
+          checked_at="$(jq -er '.checked_at | strings' <<<"${preflight}")"
+          response_sha256="$(jq -er '.response_sha256 | strings' <<<"${preflight}")"
+          response_raw_base64="$(jq -er '.response_raw_base64 | strings' <<<"${preflight}")"
+          mkdir -p release-preflight
+          printf '%s' "${response_raw_base64}" \
+            | base64 --decode > release-preflight/immutable-releases-response.json
+          computed_response_sha256="$(sha256sum release-preflight/immutable-releases-response.json | cut -d ' ' -f 1)"
+          canonical_raw_response="$(jq -Sc . release-preflight/immutable-releases-response.json)"
+          canonical_recorded_response="$(jq -Sc '.response' <<<"${preflight}")"
+          if [ "$(jq -r '.schema' <<<"${preflight}")" != "openaria.github.immutable-releases-preflight.v1" ] \
+            || [ "$(jq -r '.repository' <<<"${preflight}")" != "${GITHUB_REPOSITORY}" ] \
+            || [ "$(jq -r '.actor' <<<"${preflight}")" != "${GITHUB_ACTOR}" ] \
+            || [ "$(jq -r '.source_commit' <<<"${preflight}")" != "${source_commit}" ] \
+            || [ "$(jq -r '.release_tag' <<<"${preflight}")" != "${RELEASE_TAG}" ] \
+            || [ "$(jq -r '.allow_legacy_baseline_bootstrap' <<<"${preflight}")" != "${ALLOW_LEGACY_BASELINE_BOOTSTRAP}" ] \
+            || [ "$(jq -r '.endpoint' <<<"${preflight}")" != "GET /repos/${GITHUB_REPOSITORY}/immutable-releases" ] \
+            || [ "$(jq -r '.api_version' <<<"${preflight}")" != "2026-03-10" ] \
+            || [ "$(jq -r '.enabled' <<<"${preflight}")" != "true" ] \
+            || ! jq -e '.response as $response |
+              ($response | type) == "object" and
+              ($response | keys) == ["enabled", "enforced_by_owner"] and
+              $response.enabled == true and
+              ($response.enforced_by_owner | type) == "boolean"' <<<"${preflight}" >/dev/null \
+            || ! jq -e '.allow_legacy_baseline_bootstrap | type == "boolean"' <<<"${preflight}" >/dev/null \
+            || [ "${computed_response_sha256}" != "${response_sha256}" ] \
+            || [ "${canonical_raw_response}" != "${canonical_recorded_response}" ] \
+            || [[ ! "${response_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Immutable-release preflight evidence is not bound to this owner dispatch, repository, source, and tag."
+            exit 1
+          fi
+          run_created_at="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at)"
+          checked_epoch="$(date -u -d "${checked_at}" +%s)"
+          run_created_epoch="$(date -u -d "${run_created_at}" +%s)"
+          dispatch_delay="$((run_created_epoch - checked_epoch))"
+          if [ "${dispatch_delay}" -lt -60 ] || [ "${dispatch_delay}" -gt 300 ]; then
+            echo "::error::Immutable-release admin preflight must be followed by dispatch within five minutes."
+            exit 1
+          fi
+          jq -S --arg run_created_at "${run_created_at}" \
+            '. + {run_created_at: $run_created_at}' <<<"${preflight}" \
+            > release-preflight/immutable-releases-preflight.json
 
           expected_tag="v${version_name}"
           if [ "$RELEASE_TAG" != "$expected_tag" ]; then
@@ -67,47 +137,149 @@ jobs:
             exit 1
           fi
 
-          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
-          if [ -n "$latest_tag" ]; then
-            latest_dir="$(mktemp -d)"
-            gh release download "$latest_tag" --pattern android-update.json --dir "$latest_dir"
-            latest_version_code="$(jq -er '.versionCode | numbers' "$latest_dir/android-update.json")"
-            if [ "$latest_tag" = "$RELEASE_TAG" ]; then
-              if [ "$version_code" -ne "$latest_version_code" ]; then
-                echo "::error::Existing release ${latest_tag} uses versionCode ${latest_version_code}, not ${version_code}."
-                exit 1
-              fi
-            elif [ "$version_code" -le "$latest_version_code" ]; then
-              echo "::error::versionCode must increase beyond ${latest_version_code}; got ${version_code}."
+          semver_greater_than() {
+            local candidate="$1"
+            local baseline="$2"
+            local candidate_major candidate_minor candidate_patch
+            local baseline_major baseline_minor baseline_patch
+            IFS=. read -r candidate_major candidate_minor candidate_patch <<<"${candidate}"
+            IFS=. read -r baseline_major baseline_minor baseline_patch <<<"${baseline}"
+            if ((10#${candidate_major} != 10#${baseline_major})); then
+              ((10#${candidate_major} > 10#${baseline_major}))
+              return
+            fi
+            if ((10#${candidate_minor} != 10#${baseline_minor})); then
+              ((10#${candidate_minor} > 10#${baseline_minor}))
+              return
+            fi
+            ((10#${candidate_patch} > 10#${baseline_patch}))
+          }
+
+          latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest")"
+          latest_tag="$(jq -er '.tag_name | strings' <<<"${latest_release}")"
+          latest_release_id="$(jq -er '.id | numbers' <<<"${latest_release}")"
+          latest_immutable="$(jq -r '.immutable' <<<"${latest_release}")"
+          if [ "${latest_immutable}" != "true" ]; then
+            latest_tag_state="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${latest_tag}")"
+            latest_tag_commit="$(jq -er '.object.sha | strings' <<<"${latest_tag_state}")"
+            latest_asset_identity="$(jq -Sc '[.assets[] | {name, size, digest}] | sort_by(.name)' <<<"${latest_release}")"
+            frozen_bootstrap_assets="$(jq -Sc 'sort_by(.name)' <<< '[{"name":"SHA256SUMS.txt","size":312,"digest":"sha256:5e8f1a50138099d39c309bc81557833e94fb5973004dbd811586fa584184670d"},{"name":"android-update.json","size":874,"digest":"sha256:d9861e88ffcc9146e50804c80968fc182ef31df14c5a3ec6651423e92d5b6149"},{"name":"openaria-echo-mobile-v0.1.6-android-signed.aab","size":6852421,"digest":"sha256:ddd6f8db7283fdfbfe37171361aa863309d5cfe8eda69229a2a46aba89868db7"},{"name":"openaria-echo-mobile-v0.1.6-android-signed.apk","size":7198796,"digest":"sha256:e818d40f1050bc86c650600a05a28f189b7501f6744c904968562307946e376f"}]')"
+            if [ "${ALLOW_LEGACY_BASELINE_BOOTSTRAP}" != "true" ] \
+              || [ "${RELEASE_TAG}" != "v0.1.7" ] \
+              || [ "${version_name}" != "0.1.7" ] \
+              || [ "${version_code}" != "10" ] \
+              || [ "${latest_tag}" != "v0.1.6" ] \
+              || [ "${latest_release_id}" != "378776133" ] \
+              || [ "$(jq -r '.object.type' <<<"${latest_tag_state}")" != "commit" ] \
+              || [ "${latest_tag_commit}" != "807277e66d9922dc179f00d85ddcdcb5244c7ded" ] \
+              || [ "${latest_asset_identity}" != "${frozen_bootstrap_assets}" ]; then
+              echo "::error::The only mutable latest baseline path is explicit exact v0.1.7+10 from the frozen v0.1.6 Release tuple."
               exit 1
             fi
+          elif [ "${ALLOW_LEGACY_BASELINE_BOOTSTRAP}" = "true" ]; then
+            echo "::error::Legacy bootstrap authorization cannot be used after an immutable Release is latest."
+            exit 1
+          fi
+          latest_dir="$(mktemp -d)"
+          gh release download "$latest_tag" --pattern android-update.json --dir "$latest_dir"
+          latest_version_code="$(jq -er '.versionCode | numbers' "$latest_dir/android-update.json")"
+          if [ "$latest_tag" = "$RELEASE_TAG" ]; then
+            if [ "$version_code" -ne "$latest_version_code" ]; then
+              echo "::error::Existing release ${latest_tag} uses versionCode ${latest_version_code}, not ${version_code}."
+              exit 1
+            fi
+            echo "::error::Release ${RELEASE_TAG} is already public; retry with a new SemVer and versionCode."
+            exit 1
+          fi
+          if [ "$version_code" -le "$latest_version_code" ]; then
+            echo "::error::versionCode must increase beyond ${latest_version_code}; got ${version_code}."
+            exit 1
           fi
 
-          previous_tag="$(
+          public_android_release_closure="$(
             gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-              | jq -sr --arg candidate "$RELEASE_TAG" '
-                  [.[][] | select(
-                    .draft == false and
-                    .prerelease == false and
-                    .tag_name != $candidate
-                  )]
-                  | sort_by(.published_at)
-                  | reverse
-                  | .[0].tag_name // empty
-                '
+              | jq -sSce -f scripts/public-android-release-closure.jq
           )"
-          if [ -z "$previous_tag" ]; then
+          mapfile -t public_android_releases < <(
+            jq -r '.[] | @base64' <<<"${public_android_release_closure}"
+          )
+          if [ "${#public_android_releases[@]}" -eq 0 ]; then
             echo "::error::A previous production Android Release is required for in-app upgrade acceptance."
             exit 1
           fi
-          baseline_dir="$(mktemp -d)"
-          gh release download "$previous_tag" --pattern android-update.json --dir "$baseline_dir"
+          max_public_version_code=0
+          max_public_version_name=0.0.0
+          max_public_tag=""
+          for encoded_release in "${public_android_releases[@]}"; do
+            public_release="$(base64 --decode <<<"${encoded_release}")"
+            public_release_id="$(jq -er '.release_id | numbers' <<<"${public_release}")"
+            public_tag="$(jq -er '.tag | strings' <<<"${public_release}")"
+            if [ "$(jq '.manifest_assets | length' <<<"${public_release}")" -ne 1 ] \
+              || ! jq -e '.manifest_assets[0] |
+                (.size | type) == "number" and .size > 0 and
+                (.digest | type) == "string" and
+                (.digest | test("^sha256:[0-9a-f]{64}$"))' <<<"${public_release}" >/dev/null; then
+              echo "::error::Public Android Release ${public_tag} (${public_release_id}) has an ambiguous update manifest asset closure."
+              exit 1
+            fi
+            public_manifest_asset_id="$(jq -er '.manifest_assets[0].id | numbers' <<<"${public_release}")"
+            public_manifest_asset_size="$(jq -er '.manifest_assets[0].size | numbers' <<<"${public_release}")"
+            public_manifest_asset_digest="$(jq -er '.manifest_assets[0].digest | strings' <<<"${public_release}")"
+            public_dir="$(mktemp -d)"
+            gh api -H "Accept: application/octet-stream" \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${public_manifest_asset_id}" \
+              > "$public_dir/android-update.json"
+            if [ "$(wc -c < "$public_dir/android-update.json" | tr -d ' ')" != "${public_manifest_asset_size}" ] \
+              || [ "sha256:$(sha256sum "$public_dir/android-update.json" | cut -d ' ' -f 1)" != "${public_manifest_asset_digest}" ]; then
+              echo "::error::Public Android Release ${public_tag} manifest bytes do not match its version-floor closure."
+              exit 1
+            fi
+            if ! jq -e '
+              .schema == "openaria.echo.mobile.android-update.v1" and
+              .packageName == "com.openaria.openaria_echo_mobile"
+            ' "$public_dir/android-update.json" >/dev/null; then
+              echo "::error::Public Android Release ${public_tag} (${public_release_id}) does not contain a closed Android update manifest."
+              exit 1
+            fi
+            public_version_name="$(jq -er '.version | strings' "$public_dir/android-update.json")"
+            public_version_code="$(jq -er '.versionCode | numbers' "$public_dir/android-update.json")"
+            if [ "$public_tag" != "v${public_version_name}" ] || [ "$public_version_code" -le 0 ]; then
+              echo "::error::Public Android Release ${public_tag} has an invalid update manifest identity."
+              exit 1
+            fi
+            if [ "$public_version_code" -gt "$max_public_version_code" ]; then
+              max_public_version_code="$public_version_code"
+              max_public_tag="$public_tag"
+            fi
+            if semver_greater_than "$public_version_name" "$max_public_version_name"; then
+              max_public_version_name="$public_version_name"
+            fi
+          done
+          if [ "$version_code" -le "$max_public_version_code" ]; then
+            echo "::error::Candidate versionCode must exceed every public Android manifest; ${max_public_tag} already uses ${max_public_version_code}."
+            exit 1
+          fi
+          if ! semver_greater_than "$version_name" "$max_public_version_name"; then
+            echo "::error::Candidate SemVer must exceed every public Android Release; highest observed is ${max_public_version_name}."
+            exit 1
+          fi
+
+          previous_tag="$latest_tag"
+          baseline_dir="$latest_dir"
           previous_version_name="$(jq -er '.version | strings' "$baseline_dir/android-update.json")"
           previous_version_code="$(jq -er '.versionCode | numbers' "$baseline_dir/android-update.json")"
           previous_apk_url="$(jq -er '.android.apk.url | strings' "$baseline_dir/android-update.json")"
           previous_apk_name="$(basename "$previous_apk_url")"
+          if [ "$version_code" -le "$previous_version_code" ]; then
+            echo "::error::Candidate versionCode must increase beyond previous production ${previous_version_code}; got ${version_code}."
+            exit 1
+          fi
           if [ "$previous_tag" != "v${previous_version_name}" ]; then
             echo "::error::Previous production tag and manifest version disagree."
+            exit 1
+          fi
+          if ! semver_greater_than "$version_name" "$previous_version_name"; then
+            echo "::error::Candidate SemVer must increase beyond latest production ${previous_version_name}; got ${version_name}."
             exit 1
           fi
           if [ "$previous_version_code" -le 0 ] || [[ ! "$previous_apk_name" =~ \.apk$ ]]; then
@@ -121,6 +293,16 @@ jobs:
           echo "previous_version_name=$previous_version_name" >> "$GITHUB_OUTPUT"
           echo "previous_version_code=$previous_version_code" >> "$GITHUB_OUTPUT"
           echo "previous_apk_name=$previous_apk_name" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "preflight_run_created_at=$run_created_at" >> "$GITHUB_OUTPUT"
+
+      - name: Upload immutable-release preflight evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: immutable-release-preflight-${{ env.RELEASE_TAG }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-preflight/
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -149,6 +331,17 @@ jobs:
       - name: Test in-app upgrade acceptance script
         run: python3 -m unittest scripts/test_android_in_app_update_acceptance.py
 
+      - name: Test closed staged update TLS server
+        run: |
+          python3 -m unittest scripts/test_android_staged_update_server.py
+          python3 -m unittest scripts/test_dispatch_android_release.py
+          python3 -m unittest scripts/test_public_android_release_closure.py
+          bash -n scripts/android-staged-update-acceptance.sh
+          bash -n scripts/dispatch-android-release.sh
+
+      - name: Test current Android UI gate runner
+        run: python3 -m unittest scripts/test_android_current_ui_gate.py
+
       - name: Compile Android UI tests
         run: ./gradlew assembleDebugAndroidTest
 
@@ -167,7 +360,17 @@ jobs:
           profile: pixel_2
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: ./gradlew connectedDebugAndroidTest
+          script: >-
+            ./gradlew connectedDebugAndroidTest &&
+            bash scripts/android-current-ui-gate.sh android-current-ui-evidence
+
+      - name: Upload current Android UI evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-current-ui-${{ env.RELEASE_TAG }}
+          path: android-current-ui-evidence/**
+          if-no-files-found: error
 
       - name: Configure Android signing
         id: android_signing
@@ -363,17 +566,24 @@ jobs:
     runs-on: ubuntu-latest
     needs: [android]
     steps:
+      - name: Reject stale release rerun preflight
+        run: |
+          if [ "${GITHUB_RUN_ATTEMPT}" != "1" ]; then
+            echo "::error::Release job reruns cannot reuse immutable-release preflight evidence; perform a new admin GET and fresh workflow_dispatch."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          ref: ${{ env.CHECKOUT_REF }}
+          ref: ${{ needs.android.outputs.source_commit }}
           fetch-depth: 0
 
       - name: Download release artifacts
         uses: actions/download-artifact@v8
         with:
+          name: android-release-${{ env.RELEASE_TAG }}
           path: release-dist
-          merge-multiple: true
 
       - name: Set up Java for published APK verification
         uses: actions/setup-java@v5
@@ -385,7 +595,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install APK verification tools
-        run: sdkmanager "build-tools;36.0.0"
+        run: sdkmanager "build-tools;36.0.0" "emulator" "platform-tools" "system-images;android-33;google_apis;x86_64"
 
       - name: Verify staged update manifest and generate checksums
         env:
@@ -473,10 +683,15 @@ jobs:
             release-dist/android-update.json
           if-no-files-found: error
 
-      - name: Publish GitHub Release
+      - name: Prepare owned never-public GitHub Release
+        id: release_ownership
         env:
           GH_TOKEN: ${{ github.token }}
           ANDROID_SIGNED: ${{ needs.android.outputs.signed }}
+          PREVIOUS_TAG: ${{ needs.android.outputs.previous_tag }}
+          PREVIOUS_APK_NAME: ${{ needs.android.outputs.previous_apk_name }}
+          VERSION_NAME: ${{ needs.android.outputs.version_name }}
+          VERSION_CODE: ${{ needs.android.outputs.version_code }}
         run: |
           set -euo pipefail
 
@@ -485,37 +700,557 @@ jobs:
             exit 1
           fi
 
+          mapfile -t release_files < <(find release-dist -maxdepth 1 -type f -print | sort)
+          if [ "${#release_files[@]}" -ne 4 ]; then
+            echo "::error::Expected exactly four closed Android Release assets; found ${#release_files[@]}."
+            exit 1
+          fi
+
+          baseline_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest")"
+          baseline_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PREVIOUS_TAG}")"
+          baseline_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${PREVIOUS_TAG}")"
+          baseline_release_id="$(jq -er '.id | numbers' <<<"${baseline_release}")"
+          baseline_tag_commit="$(jq -er '.object.sha | strings' <<<"${baseline_tag}")"
+          baseline_assets="$(jq -Sc '[.assets[] | {name, size, digest, browser_download_url}] | sort_by(.name)' <<<"${baseline_release}")"
+          baseline_apk_matches="$(jq -c --arg name "${PREVIOUS_APK_NAME}" '[.[] | select(.name == $name)]' <<<"${baseline_assets}")"
+          if [ "$(jq 'length' <<<"${baseline_apk_matches}")" -ne 1 ]; then
+            echo "::error::The latest baseline does not contain its exact manifest-bound APK asset."
+            exit 1
+          fi
+          baseline_apk_sha256="$(jq -er '.[0].digest | strings | sub("^sha256:"; "")' <<<"${baseline_apk_matches}")"
+          baseline_immutable="$(jq -r '.immutable' <<<"${baseline_release}")"
+          legacy_bootstrap=false
+          legacy_bootstrap_assets="$(jq -Sc 'sort_by(.name)' <<< '[{"name":"SHA256SUMS.txt","size":312,"digest":"sha256:5e8f1a50138099d39c309bc81557833e94fb5973004dbd811586fa584184670d"},{"name":"android-update.json","size":874,"digest":"sha256:d9861e88ffcc9146e50804c80968fc182ef31df14c5a3ec6651423e92d5b6149"},{"name":"openaria-echo-mobile-v0.1.6-android-signed.aab","size":6852421,"digest":"sha256:ddd6f8db7283fdfbfe37171361aa863309d5cfe8eda69229a2a46aba89868db7"},{"name":"openaria-echo-mobile-v0.1.6-android-signed.apk","size":7198796,"digest":"sha256:e818d40f1050bc86c650600a05a28f189b7501f6744c904968562307946e376f"}]')"
+          baseline_asset_identity="$(jq -Sc '[.[] | {name, size, digest}] | sort_by(.name)' <<<"${baseline_assets}")"
+          if [ "${baseline_immutable}" != "true" ]; then
+            if [ "${ALLOW_LEGACY_BASELINE_BOOTSTRAP}" != "true" ] \
+              || [ "${RELEASE_TAG}" != "v0.1.7" ] \
+              || [ "${VERSION_NAME}" != "0.1.7" ] \
+              || [ "${VERSION_CODE}" != "10" ] \
+              || [ "${PREVIOUS_TAG}" != "v0.1.6" ] \
+              || [ "${baseline_release_id}" != "378776133" ] \
+              || [ "${baseline_tag_commit}" != "807277e66d9922dc179f00d85ddcdcb5244c7ded" ] \
+              || [ "${baseline_asset_identity}" != "${legacy_bootstrap_assets}" ]; then
+              echo "::error::A mutable production baseline requires explicit authorization for exact v0.1.7+10 from the frozen v0.1.6 identity."
+              exit 1
+            fi
+            legacy_bootstrap=true
+          elif [ "${ALLOW_LEGACY_BASELINE_BOOTSTRAP}" = "true" ]; then
+            echo "::error::Legacy bootstrap authorization is valid only while the frozen mutable v0.1.6 Release is latest."
+            exit 1
+          fi
+          if [ "$(jq -r '.id' <<<"${baseline_latest}")" != "${baseline_release_id}" ] \
+            || [ "$(jq -r '.tag_name' <<<"${baseline_latest}")" != "${PREVIOUS_TAG}" ] \
+            || [ "$(jq -r '.tag_name' <<<"${baseline_release}")" != "${PREVIOUS_TAG}" ] \
+            || [ "$(jq -r '.draft' <<<"${baseline_release}")" != "false" ] \
+            || [ "$(jq -r '.prerelease' <<<"${baseline_release}")" != "false" ] \
+            || ! jq -e '.published_at | strings' <<<"${baseline_release}" >/dev/null \
+            || [ "$(jq -r '.object.type' <<<"${baseline_tag}")" != "commit" ] \
+            || [ "$(jq 'length' <<<"${baseline_assets}")" -ne 4 ] \
+            || [ "$(jq '[.[] | select(
+              (.digest | type) != "string" or
+              ((.digest | test("^sha256:[0-9a-f]{64}$")) | not)
+            )] | length' <<<"${baseline_assets}")" -ne 0 ]; then
+            echo "::error::The latest production baseline is not the exact four-asset Release expected by this run."
+            exit 1
+          fi
+
+          candidate_releases="$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq -s --arg tag "${RELEASE_TAG}" '[.[][] | select(.tag_name == $tag)]'
+          )"
+          candidate_count="$(jq 'length' <<<"${candidate_releases}")"
+          if [ "${candidate_count}" -gt 1 ]; then
+            echo "::error::Release tag ${RELEASE_TAG} has multiple candidate Release identities."
+            exit 1
+          fi
+
+          if [ "${candidate_count}" -eq 1 ]; then
+            existing_release="$(jq -c '.[0]' <<<"${candidate_releases}")"
+            if [ "$(jq -r '.draft' <<<"${existing_release}")" != "true" ] \
+              || [ "$(jq -r '.prerelease' <<<"${existing_release}")" != "false" ] \
+              || [ "$(jq -r '.published_at' <<<"${existing_release}")" != "null" ]; then
+              echo "::error::Release ${RELEASE_TAG} is or was public and is immutable; retry with a new version."
+              exit 1
+            fi
+            echo "::error::Release ${RELEASE_TAG} already has a never-public draft. This workflow will not adopt, edit, or delete an unowned draft; inspect it manually and use a fresh admin preflight dispatch."
+            exit 1
+          fi
+
           git fetch --tags --force
           head_commit="$(git rev-parse HEAD)"
+          if [ "${head_commit}" != "${{ needs.android.outputs.source_commit }}" ]; then
+            echo "::error::Release checkout drifted from the exact Android build commit."
+            exit 1
+          fi
           if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
-            tag_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+            tag_type="$(git cat-file -t "refs/tags/${RELEASE_TAG}")"
+            if [ "${tag_type}" != "commit" ]; then
+              echo "::error::Release tag ${RELEASE_TAG} must be a lightweight tag; observed ${tag_type}."
+              exit 1
+            fi
+            tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}")"
             if [ "$tag_commit" != "$head_commit" ]; then
               echo "::error::Release tag ${RELEASE_TAG} already exists at ${tag_commit}, but this build checked out ${head_commit}."
               exit 1
             fi
           else
             git tag "$RELEASE_TAG" "$head_commit"
-            git push origin "refs/tags/${RELEASE_TAG}"
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${RELEASE_TAG}" \
+              -f sha="${head_commit}" >/dev/null
           fi
 
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" \
-              --title "Open Aria Echo Mobile ${RELEASE_TAG}" \
-              --notes-file RELEASE_NOTES.md \
-              --latest
-            gh release upload "$RELEASE_TAG" release-dist/* --clobber
-          else
-            gh release create "$RELEASE_TAG" release-dist/* \
-              --title "Open Aria Echo Mobile ${RELEASE_TAG}" \
-              --notes-file RELEASE_NOTES.md \
-              --verify-tag \
-              --latest
+          release_notes="$(cat RELEASE_NOTES.md)"
+          owned_release="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+            -f tag_name="${RELEASE_TAG}" \
+            -f target_commitish="${head_commit}" \
+            -f name="Open Aria Echo Mobile ${RELEASE_TAG}" \
+            -f body="${release_notes}" \
+            -F draft=true \
+            -F prerelease=false)"
+          existing_release_id="$(jq -er '.id | numbers' <<<"${owned_release}")"
+          upload_url="$(jq -er '.upload_url | strings | sub("\\{.*$"; "")' <<<"${owned_release}")"
+          if [ "$(jq '.assets | length' <<<"${owned_release}")" -ne 0 ]; then
+            echo "::error::The newly created numeric draft did not start with an empty asset closure."
+            exit 1
           fi
+          for local_asset in "${release_files[@]}"; do
+            asset_name="$(basename "${local_asset}")"
+            encoded_asset_name="$(jq -nr --arg value "${asset_name}" '$value | @uri')"
+            upload_response="$(mktemp)"
+            curl --fail-with-body --silent --show-error --request POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${local_asset}" \
+              --output "${upload_response}" \
+              "${upload_url}?name=${encoded_asset_name}"
+            if [ "$(jq -r '.name' "${upload_response}")" != "${asset_name}" ]; then
+              echo "::error::Numeric draft upload returned the wrong asset identity."
+              exit 1
+            fi
+          done
+
+          draft_assets_converged=false
+          for attempt in $(seq 1 10); do
+            if owned_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${existing_release_id}")"; then
+              remote_assets="$(jq -Sc '[.assets[] | {name, size, digest, browser_download_url}] | sort_by(.name)' <<<"${owned_release}")"
+              if [ "$(jq -r '.tag_name' <<<"${owned_release}")" = "${RELEASE_TAG}" ] \
+                && [ "$(jq -r '.draft' <<<"${owned_release}")" = "true" ] \
+                && [ "$(jq -r '.prerelease' <<<"${owned_release}")" = "false" ] \
+                && [ "$(jq -r '.published_at' <<<"${owned_release}")" = "null" ] \
+                && [ "$(jq 'length' <<<"${remote_assets}")" -eq 4 ] \
+                && [ "$(jq '[.[] | select(
+                  (.digest | type) != "string" or
+                  ((.digest | test("^sha256:[0-9a-f]{64}$")) | not)
+                )] | length' <<<"${remote_assets}")" -eq 0 ]; then
+                draft_assets_converged=true
+                break
+              fi
+            fi
+            sleep 2
+          done
+          if [ "${draft_assets_converged}" != "true" ]; then
+            echo "::error::The Android draft does not expose the exact four-asset digest closure."
+            exit 1
+          fi
+          for local_asset in "${release_files[@]}"; do
+            asset_name="$(basename "${local_asset}")"
+            asset_bytes="$(wc -c < "${local_asset}" | tr -d ' ')"
+            asset_digest="sha256:$(sha256sum "${local_asset}" | cut -d ' ' -f 1)"
+            match_count="$(jq \
+              --arg name "${asset_name}" \
+              --argjson size "${asset_bytes}" \
+              --arg digest "${asset_digest}" \
+              '[.[] | select(.name == $name and .size == $size and .digest == $digest)] | length' \
+              <<<"${remote_assets}")"
+            if [ "${match_count}" -ne 1 ]; then
+              echo "::error::Draft asset ${asset_name} does not match the staged bytes and SHA-256."
+              exit 1
+            fi
+          done
+
+          live_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          if [ "$(jq -r '.object.type' <<<"${live_tag}")" != "commit" ] \
+            || [ "$(jq -r '.object.sha' <<<"${live_tag}")" != "${head_commit}" ]; then
+            echo "::error::The live candidate tag changed before ownership capture."
+            exit 1
+          fi
+
+          current_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest")"
+          current_baseline="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${baseline_release_id}")"
+          current_baseline_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${PREVIOUS_TAG}")"
+          current_baseline_assets="$(jq -Sc '[.assets[] | {name, size, digest, browser_download_url}] | sort_by(.name)' <<<"${current_baseline}")"
+          if [ "$(jq -r '.id' <<<"${current_latest}")" != "${baseline_release_id}" ] \
+            || [ "$(jq -r '.tag_name' <<<"${current_latest}")" != "${PREVIOUS_TAG}" ] \
+            || [ "$(jq -r '.id' <<<"${current_baseline}")" != "${baseline_release_id}" ] \
+            || [ "$(jq -r '.tag_name' <<<"${current_baseline}")" != "${PREVIOUS_TAG}" ] \
+            || [ "$(jq -r '.draft' <<<"${current_baseline}")" != "false" ] \
+            || [ "$(jq -r '.prerelease' <<<"${current_baseline}")" != "false" ] \
+            || [ "$(jq -r '.immutable' <<<"${current_baseline}")" != "${baseline_immutable}" ] \
+            || [ "$(jq -r '.object.type' <<<"${current_baseline_tag}")" != "commit" ] \
+            || [ "$(jq -r '.object.sha' <<<"${current_baseline_tag}")" != "${baseline_tag_commit}" ] \
+            || [ "${current_baseline_assets}" != "${baseline_assets}" ]; then
+            echo "::error::The production baseline changed before ownership capture."
+            exit 1
+          fi
+
+          mkdir -p release-transition
+          immutable_preflight="$(jq -c \
+            --arg run_created_at "${{ needs.android.outputs.preflight_run_created_at }}" \
+            '. + {run_created_at: $run_created_at}' <<<"${IMMUTABLE_RELEASES_PREFLIGHT}")"
+          jq -n \
+            --arg schema "openaria.mobile.release-ownership.v1" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg target_tag "${RELEASE_TAG}" \
+            --arg source_commit "${head_commit}" \
+            --argjson target_release_id "${existing_release_id}" \
+            --argjson target_assets "${remote_assets}" \
+            --arg baseline_tag "${PREVIOUS_TAG}" \
+            --argjson baseline_release_id "${baseline_release_id}" \
+            --arg baseline_tag_commit "${baseline_tag_commit}" \
+            --argjson baseline_assets "${baseline_assets}" \
+            --argjson baseline_immutable "${baseline_immutable}" \
+            --argjson legacy_bootstrap "${legacy_bootstrap}" \
+            --argjson legacy_bootstrap_authorized "${ALLOW_LEGACY_BASELINE_BOOTSTRAP}" \
+            --arg baseline_apk_sha256 "${baseline_apk_sha256}" \
+            --argjson immutable_preflight "${immutable_preflight}" \
+            --argjson draft_created_by_run true \
+            '{schema: $schema, repository: $repository, run_id: $run_id,
+              run_attempt: $run_attempt, draft_never_public: true,
+              draft_created_by_run: $draft_created_by_run,
+              target: {tag: $target_tag, source_commit: $source_commit,
+                release_id: $target_release_id, assets: $target_assets},
+              baseline: {tag: $baseline_tag, release_id: $baseline_release_id,
+                tag_commit: $baseline_tag_commit, assets: $baseline_assets,
+                apk_sha256: $baseline_apk_sha256,
+                immutable_at_capture: $baseline_immutable,
+                legacy_bootstrap: $legacy_bootstrap,
+                legacy_bootstrap_authorized: $legacy_bootstrap_authorized},
+              immutable_releases_preflight: $immutable_preflight}' \
+            > release-transition/release-ownership.json
+          echo "baseline_release_id=${baseline_release_id}" >> "${GITHUB_OUTPUT}"
+          echo "baseline_apk_sha256=${baseline_apk_sha256}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload exact-run pre-publish ownership receipt
+        id: prepublish_ownership
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-release-ownership-${{ env.RELEASE_TAG }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-transition/release-ownership.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enable KVM for staged updater acceptance
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Prepare staged updater acceptance evidence
+        run: mkdir -p android-upgrade-evidence
+
+      - name: Upgrade previous production through the staged production updater
+        id: staged_upgrade
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        env:
+          EXPECTED_VERSION_NAME: ${{ needs.android.outputs.version_name }}
+          EXPECTED_VERSION_CODE: ${{ needs.android.outputs.version_code }}
+          BASELINE_TAG: ${{ needs.android.outputs.previous_tag }}
+          BASELINE_VERSION_NAME: ${{ needs.android.outputs.previous_version_name }}
+          BASELINE_VERSION_CODE: ${{ needs.android.outputs.previous_version_code }}
+          BASELINE_APK_NAME: ${{ needs.android.outputs.previous_apk_name }}
+          BASELINE_RELEASE_ID: ${{ steps.release_ownership.outputs.baseline_release_id }}
+          BASELINE_APK_SHA256: ${{ steps.release_ownership.outputs.baseline_apk_sha256 }}
+          SOURCE_COMMIT: ${{ needs.android.outputs.source_commit }}
+          LEGACY_BOOTSTRAP_AUTHORIZED: ${{ inputs.allow_legacy_baseline_bootstrap }}
+        with:
+          # API 33 is intentional: Android 14+ Conscrypt ignores additions made only
+          # to /system/etc/security/cacerts in favor of the APEX certificate store.
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader -no-snapshot -noaudio -no-boot-anim -camera-back none -writable-system
+          script: >-
+            export PATH="${ANDROID_SDK_ROOT}/build-tools/36.0.0:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}" &&
+            bash scripts/android-staged-update-acceptance.sh
+            --candidate-manifest release-dist/android-update.json
+            --candidate-apk "release-dist/openaria-echo-mobile-${RELEASE_TAG}-android-signed.apk"
+            --repository "${GITHUB_REPOSITORY}"
+            --release-tag "${RELEASE_TAG}"
+            --source-commit "${SOURCE_COMMIT}"
+            --baseline-tag "${BASELINE_TAG}"
+            --baseline-version-name "${BASELINE_VERSION_NAME}"
+            --baseline-version-code "${BASELINE_VERSION_CODE}"
+            --baseline-apk-name "${BASELINE_APK_NAME}"
+            --baseline-release-id "${BASELINE_RELEASE_ID}"
+            --baseline-apk-sha256 "${BASELINE_APK_SHA256}"
+            --legacy-bootstrap-authorized "${LEGACY_BOOTSTRAP_AUTHORIZED}"
+            --expected-version-name "${EXPECTED_VERSION_NAME}"
+            --expected-version-code "${EXPECTED_VERSION_CODE}"
+            --run-id "${GITHUB_RUN_ID}"
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+            --evidence-dir android-upgrade-evidence
+
+      - name: Upload pre-publish in-app upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-staged-in-app-upgrade-${{ env.RELEASE_TAG }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: android-upgrade-evidence/*
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish the receipt-owned GitHub Release
+        id: publish_release
+        if: success() && steps.prepublish_ownership.outcome == 'success' && steps.staged_upgrade.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ needs.android.outputs.previous_tag }}
+          SOURCE_COMMIT: ${{ needs.android.outputs.source_commit }}
+          VERSION_NAME: ${{ needs.android.outputs.version_name }}
+          VERSION_CODE: ${{ needs.android.outputs.version_code }}
+        run: |
+          set -euo pipefail
+
+          semver_greater_than() {
+            local candidate="$1"
+            local baseline="$2"
+            local candidate_major candidate_minor candidate_patch
+            local baseline_major baseline_minor baseline_patch
+            IFS=. read -r candidate_major candidate_minor candidate_patch <<<"${candidate}"
+            IFS=. read -r baseline_major baseline_minor baseline_patch <<<"${baseline}"
+            if ((10#${candidate_major} != 10#${baseline_major})); then
+              ((10#${candidate_major} > 10#${baseline_major}))
+              return
+            fi
+            if ((10#${candidate_minor} != 10#${baseline_minor})); then
+              ((10#${candidate_minor} > 10#${baseline_minor}))
+              return
+            fi
+            ((10#${candidate_patch} > 10#${baseline_patch}))
+          }
+
+          public_android_release_closure() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq -sSce -f scripts/public-android-release-closure.jq
+          }
+
+          ownership="release-transition/release-ownership.json"
+          owned_schema="$(jq -er '.schema | strings' "${ownership}")"
+          owned_repository="$(jq -er '.repository | strings' "${ownership}")"
+          owned_run_id="$(jq -er '.run_id | strings' "${ownership}")"
+          owned_run_attempt="$(jq -er '.run_attempt | strings' "${ownership}")"
+          owned_target_tag="$(jq -er '.target.tag | strings' "${ownership}")"
+          owned_source_commit="$(jq -er '.target.source_commit | strings' "${ownership}")"
+          owned_release_id="$(jq -er '.target.release_id | numbers' "${ownership}")"
+          owned_assets="$(jq -Sc '.target.assets' "${ownership}")"
+          owned_baseline_tag="$(jq -er '.baseline.tag | strings' "${ownership}")"
+          owned_baseline_release_id="$(jq -er '.baseline.release_id | numbers' "${ownership}")"
+          owned_baseline_commit="$(jq -er '.baseline.tag_commit | strings' "${ownership}")"
+          owned_baseline_assets="$(jq -Sc '.baseline.assets' "${ownership}")"
+          owned_baseline_immutable="$(jq -r '.baseline.immutable_at_capture' "${ownership}")"
+          owned_legacy_bootstrap="$(jq -r '.baseline.legacy_bootstrap' "${ownership}")"
+          owned_legacy_bootstrap_authorized="$(jq -r '.baseline.legacy_bootstrap_authorized' "${ownership}")"
+          owned_immutable_preflight="$(jq -Sc '.immutable_releases_preflight' "${ownership}")"
+          dispatch_immutable_preflight="$(jq -Sc \
+            --arg run_created_at "${{ needs.android.outputs.preflight_run_created_at }}" \
+            '. + {run_created_at: $run_created_at}' <<<"${IMMUTABLE_RELEASES_PREFLIGHT}")"
+          if [ "${owned_schema}" != "openaria.mobile.release-ownership.v1" ] \
+            || [ "${owned_repository}" != "${GITHUB_REPOSITORY}" ] \
+            || [ "${owned_run_id}" != "${GITHUB_RUN_ID}" ] \
+            || [ "${owned_run_attempt}" != "${GITHUB_RUN_ATTEMPT}" ] \
+            || [ "${owned_target_tag}" != "${RELEASE_TAG}" ] \
+            || [ "${owned_source_commit}" != "${SOURCE_COMMIT}" ] \
+            || [ "${owned_baseline_tag}" != "${PREVIOUS_TAG}" ] \
+            || [ "${owned_immutable_preflight}" != "${dispatch_immutable_preflight}" ] \
+            || [ "$(jq -r '.draft_never_public' "${ownership}")" != "true" ] \
+            || ! jq -e '.baseline.immutable_at_capture | type == "boolean"' "${ownership}" >/dev/null \
+            || ! jq -e '.baseline.legacy_bootstrap | type == "boolean"' "${ownership}" >/dev/null \
+            || ! jq -e '.baseline.legacy_bootstrap_authorized | type == "boolean"' "${ownership}" >/dev/null \
+            || [ "${owned_legacy_bootstrap_authorized}" != "${ALLOW_LEGACY_BASELINE_BOOTSTRAP}" ] \
+            || [ "$(jq 'length' <<<"${owned_assets}")" -ne 4 ]; then
+            echo "::error::The durable ownership receipt does not bind this run, target, and baseline."
+            exit 1
+          fi
+          owned_baseline_asset_identity="$(jq -Sc '[.[] | {name, size, digest}] | sort_by(.name)' <<<"${owned_baseline_assets}")"
+          legacy_bootstrap_assets="$(jq -Sc 'sort_by(.name)' <<< '[{"name":"SHA256SUMS.txt","size":312,"digest":"sha256:5e8f1a50138099d39c309bc81557833e94fb5973004dbd811586fa584184670d"},{"name":"android-update.json","size":874,"digest":"sha256:d9861e88ffcc9146e50804c80968fc182ef31df14c5a3ec6651423e92d5b6149"},{"name":"openaria-echo-mobile-v0.1.6-android-signed.aab","size":6852421,"digest":"sha256:ddd6f8db7283fdfbfe37171361aa863309d5cfe8eda69229a2a46aba89868db7"},{"name":"openaria-echo-mobile-v0.1.6-android-signed.apk","size":7198796,"digest":"sha256:e818d40f1050bc86c650600a05a28f189b7501f6744c904968562307946e376f"}]')"
+          if [ "${owned_legacy_bootstrap}" = "true" ]; then
+            if [ "${owned_legacy_bootstrap_authorized}" != "true" ] \
+              || [ "${RELEASE_TAG}" != "v0.1.7" ] \
+              || [ "${VERSION_NAME}" != "0.1.7" ] \
+              || [ "${VERSION_CODE}" != "10" ] \
+              || [ "${owned_baseline_tag}" != "v0.1.6" ] \
+              || [ "${owned_baseline_release_id}" != "378776133" ] \
+              || [ "${owned_baseline_commit}" != "807277e66d9922dc179f00d85ddcdcb5244c7ded" ] \
+              || [ "${owned_baseline_immutable}" != "false" ] \
+              || [ "${owned_baseline_asset_identity}" != "${legacy_bootstrap_assets}" ]; then
+              echo "::error::The receipt does not contain the frozen one-time legacy bootstrap identity."
+              exit 1
+            fi
+          elif [ "${owned_legacy_bootstrap_authorized}" = "true" ]; then
+            echo "::error::Legacy bootstrap authorization cannot be reused after an immutable Release becomes latest."
+            exit 1
+          elif [ "${owned_baseline_immutable}" != "true" ]; then
+            echo "::error::All post-bootstrap production baselines must be immutable."
+            exit 1
+          fi
+
+          live_target="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${owned_release_id}")"
+          live_target_assets="$(jq -Sc '[.assets[] | {name, size, digest, browser_download_url}] | sort_by(.name)' <<<"${live_target}")"
+          if [ "$(jq -r '.id' <<<"${live_target}")" != "${owned_release_id}" ] \
+            || [ "$(jq -r '.tag_name' <<<"${live_target}")" != "${RELEASE_TAG}" ] \
+            || [ "$(jq -r '.draft' <<<"${live_target}")" != "true" ] \
+            || [ "$(jq -r '.prerelease' <<<"${live_target}")" != "false" ] \
+            || [ "$(jq -r '.published_at' <<<"${live_target}")" != "null" ] \
+            || [ "${live_target_assets}" != "${owned_assets}" ]; then
+            echo "::error::The owned never-public target changed after the receipt was uploaded."
+            exit 1
+          fi
+
+          live_target_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          if [ "$(jq -r '.object.type' <<<"${live_target_tag}")" != "commit" ] \
+            || [ "$(jq -r '.object.sha' <<<"${live_target_tag}")" != "${SOURCE_COMMIT}" ]; then
+            echo "::error::The target tag changed after the receipt was uploaded."
+            exit 1
+          fi
+
+          live_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest")"
+          live_baseline="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${owned_baseline_release_id}")"
+          live_baseline_by_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PREVIOUS_TAG}")"
+          live_baseline_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${PREVIOUS_TAG}")"
+          live_baseline_assets="$(jq -Sc '[.assets[] | {name, size, digest, browser_download_url}] | sort_by(.name)' <<<"${live_baseline}")"
+          if [ "$(jq -r '.id' <<<"${live_latest}")" != "${owned_baseline_release_id}" ] \
+            || [ "$(jq -r '.tag_name' <<<"${live_latest}")" != "${PREVIOUS_TAG}" ] \
+            || [ "$(jq -r '.id' <<<"${live_baseline}")" != "${owned_baseline_release_id}" ] \
+            || [ "$(jq -r '.id' <<<"${live_baseline_by_tag}")" != "${owned_baseline_release_id}" ] \
+            || [ "$(jq -r '.tag_name' <<<"${live_baseline}")" != "${PREVIOUS_TAG}" ] \
+            || [ "$(jq -r '.draft' <<<"${live_baseline}")" != "false" ] \
+            || [ "$(jq -r '.prerelease' <<<"${live_baseline}")" != "false" ] \
+            || [ "$(jq -r '.immutable' <<<"${live_baseline}")" != "${owned_baseline_immutable}" ] \
+            || [ "$(jq -r '.object.type' <<<"${live_baseline_tag}")" != "commit" ] \
+            || [ "$(jq -r '.object.sha' <<<"${live_baseline_tag}")" != "${owned_baseline_commit}" ] \
+            || [ "${live_baseline_assets}" != "${owned_baseline_assets}" ]; then
+            echo "::error::The latest baseline changed after the receipt was uploaded."
+            exit 1
+          fi
+
+          # Recompute the global floor after the long build/emulator window. A
+          # public prerelease can raise installed versionCode without becoming latest.
+          live_public_android_release_closure="$(public_android_release_closure)"
+          mapfile -t live_public_android_releases < <(
+            jq -r '.[] | @base64' <<<"${live_public_android_release_closure}"
+          )
+          live_max_public_version_code=0
+          live_max_public_version_name=0.0.0
+          live_max_public_tag=""
+          for encoded_release in "${live_public_android_releases[@]}"; do
+            public_release="$(base64 --decode <<<"${encoded_release}")"
+            public_release_id="$(jq -er '.release_id | numbers' <<<"${public_release}")"
+            public_tag="$(jq -er '.tag | strings' <<<"${public_release}")"
+            if [ "$(jq '.manifest_assets | length' <<<"${public_release}")" -ne 1 ] \
+              || ! jq -e '.manifest_assets[0] |
+                (.size | type) == "number" and .size > 0 and
+                (.digest | type) == "string" and
+                (.digest | test("^sha256:[0-9a-f]{64}$"))' <<<"${public_release}" >/dev/null; then
+              echo "::error::Public Android Release ${public_tag} (${public_release_id}) has an ambiguous update manifest asset closure."
+              exit 1
+            fi
+            manifest_asset_id="$(jq -er '.manifest_assets[0].id | numbers' <<<"${public_release}")"
+            manifest_asset_size="$(jq -er '.manifest_assets[0].size | numbers' <<<"${public_release}")"
+            manifest_asset_digest="$(jq -er '.manifest_assets[0].digest | strings' <<<"${public_release}")"
+            public_manifest="$(mktemp)"
+            gh api -H "Accept: application/octet-stream" \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${manifest_asset_id}" \
+              > "${public_manifest}"
+            if [ "$(wc -c < "${public_manifest}" | tr -d ' ')" != "${manifest_asset_size}" ] \
+              || [ "sha256:$(sha256sum "${public_manifest}" | cut -d ' ' -f 1)" != "${manifest_asset_digest}" ]; then
+              echo "::error::Public Android Release ${public_tag} manifest bytes do not match its version-floor closure."
+              exit 1
+            fi
+            if ! jq -e '
+              .schema == "openaria.echo.mobile.android-update.v1" and
+              .packageName == "com.openaria.openaria_echo_mobile"
+            ' "${public_manifest}" >/dev/null; then
+              echo "::error::Public Android Release ${public_tag} (${public_release_id}) does not contain a closed Android update manifest."
+              exit 1
+            fi
+            public_version_name="$(jq -er '.version | strings' "${public_manifest}")"
+            public_version_code="$(jq -er '.versionCode | numbers' "${public_manifest}")"
+            if [ "${public_tag}" != "v${public_version_name}" ] || [ "${public_version_code}" -le 0 ]; then
+              echo "::error::Public Android Release ${public_tag} has an invalid update manifest identity."
+              exit 1
+            fi
+            if [ "${public_version_code}" -gt "${live_max_public_version_code}" ]; then
+              live_max_public_version_code="${public_version_code}"
+              live_max_public_tag="${public_tag}"
+            fi
+            if semver_greater_than "${public_version_name}" "${live_max_public_version_name}"; then
+              live_max_public_version_name="${public_version_name}"
+            fi
+          done
+          if [ "${VERSION_CODE}" -le "${live_max_public_version_code}" ]; then
+            echo "::error::Candidate versionCode no longer exceeds every public Android manifest; ${live_max_public_tag} uses ${live_max_public_version_code}."
+            exit 1
+          fi
+          if ! semver_greater_than "${VERSION_NAME}" "${live_max_public_version_name}"; then
+            echo "::error::Candidate SemVer no longer exceeds every public Android Release; highest observed is ${live_max_public_version_name}."
+            exit 1
+          fi
+
+          # Close the ownership checks once more after the paginated floor scan.
+          final_target="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${owned_release_id}")"
+          final_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest")"
+          final_target_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          final_baseline="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${owned_baseline_release_id}")"
+          final_baseline_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${PREVIOUS_TAG}")"
+          final_target_assets="$(jq -Sc '[.assets[] | {name, size, digest, browser_download_url}] | sort_by(.name)' <<<"${final_target}")"
+          final_baseline_assets="$(jq -Sc '[.assets[] | {name, size, digest, browser_download_url}] | sort_by(.name)' <<<"${final_baseline}")"
+          final_public_android_release_closure="$(public_android_release_closure)"
+          if [ "$(jq -r '.id' <<<"${final_target}")" != "${owned_release_id}" ] \
+            || [ "$(jq -r '.tag_name' <<<"${final_target}")" != "${RELEASE_TAG}" ] \
+            || [ "$(jq -r '.draft' <<<"${final_target}")" != "true" ] \
+            || [ "$(jq -r '.published_at' <<<"${final_target}")" != "null" ] \
+            || [ "${final_target_assets}" != "${owned_assets}" ] \
+            || [ "$(jq -r '.id' <<<"${final_latest}")" != "${owned_baseline_release_id}" ] \
+            || [ "$(jq -r '.tag_name' <<<"${final_latest}")" != "${PREVIOUS_TAG}" ] \
+            || [ "$(jq -r '.id' <<<"${final_baseline}")" != "${owned_baseline_release_id}" ] \
+            || [ "$(jq -r '.tag_name' <<<"${final_baseline}")" != "${PREVIOUS_TAG}" ] \
+            || [ "$(jq -r '.draft' <<<"${final_baseline}")" != "false" ] \
+            || [ "$(jq -r '.prerelease' <<<"${final_baseline}")" != "false" ] \
+            || [ "$(jq -r '.immutable' <<<"${final_baseline}")" != "${owned_baseline_immutable}" ] \
+            || [ "${final_baseline_assets}" != "${owned_baseline_assets}" ] \
+            || [ "$(jq -r '.object.type' <<<"${final_target_tag}")" != "commit" ] \
+            || [ "$(jq -r '.object.sha' <<<"${final_target_tag}")" != "${SOURCE_COMMIT}" ] \
+            || [ "$(jq -r '.object.type' <<<"${final_baseline_tag}")" != "commit" ] \
+            || [ "$(jq -r '.object.sha' <<<"${final_baseline_tag}")" != "${owned_baseline_commit}" ] \
+            || [ "${final_public_android_release_closure}" != "${live_public_android_release_closure}" ]; then
+            echo "::error::Target, baseline, or public Android version-floor closure changed during the final scan."
+            exit 1
+          fi
+
+          release_notes="$(cat RELEASE_NOTES.md)"
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${owned_release_id}" \
+            -f name="Open Aria Echo Mobile ${RELEASE_TAG}" \
+            -f body="${release_notes}" \
+            -F draft=false \
+            -F prerelease=false \
+            -f make_latest=true >/dev/null
 
       - name: Post-publish verification
+        if: always() && steps.prepublish_ownership.outcome == 'success' && steps.staged_upgrade.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           ANDROID_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}
+          PUBLISH_CLI_OUTCOME: ${{ steps.publish_release.outcome }}
         run: |
           set -euo pipefail
           export PATH="${ANDROID_SDK_ROOT}/build-tools/36.0.0:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}"
@@ -523,12 +1258,13 @@ jobs:
           verify_dir="$(mktemp -d)"
           latest_manifest_url="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/android-update.json"
           for attempt in $(seq 1 10); do
-            curl --fail --location --retry 3 --output "$verify_dir/android-update.json" "$latest_manifest_url"
-            if cmp --silent release-dist/android-update.json "$verify_dir/android-update.json"; then
+            if curl --fail --location --retry 3 --retry-all-errors \
+              --output "$verify_dir/android-update.json" "$latest_manifest_url" \
+              && cmp --silent release-dist/android-update.json "$verify_dir/android-update.json"; then
               break
             fi
             if [ "$attempt" -eq 10 ]; then
-              echo "::error::Latest Release manifest did not converge to ${RELEASE_TAG}."
+              echo "::error::Latest Release manifest did not become reachable with the exact ${RELEASE_TAG} bytes."
               exit 1
             fi
             sleep 2
@@ -536,8 +1272,18 @@ jobs:
 
           apk_url="$(jq -er '.android.apk.url' "$verify_dir/android-update.json")"
           apk_name="$(basename "$apk_url")"
-          curl --fail --location --retry 5 --output "$verify_dir/$apk_name" "$apk_url"
-          cmp --silent "release-dist/$apk_name" "$verify_dir/$apk_name"
+          for attempt in $(seq 1 10); do
+            if curl --fail --location --retry 3 --retry-all-errors \
+              --output "$verify_dir/$apk_name" "$apk_url" \
+              && cmp --silent "release-dist/$apk_name" "$verify_dir/$apk_name"; then
+              break
+            fi
+            if [ "$attempt" -eq 10 ]; then
+              echo "::error::Published APK did not become reachable with the exact staged bytes."
+              exit 1
+            fi
+            sleep 2
+          done
 
           downloaded_sha256="$(sha256sum "$verify_dir/$apk_name" | cut -d ' ' -f 1)"
           downloaded_bytes="$(wc -c < "$verify_dir/$apk_name" | tr -d ' ')"
@@ -559,8 +1305,18 @@ jobs:
 
           aab_url="$(jq -er '.android.aab.url' "$verify_dir/android-update.json")"
           aab_name="$(basename "$aab_url")"
-          curl --fail --location --retry 5 --output "$verify_dir/$aab_name" "$aab_url"
-          cmp --silent "release-dist/$aab_name" "$verify_dir/$aab_name"
+          for attempt in $(seq 1 10); do
+            if curl --fail --location --retry 3 --retry-all-errors \
+              --output "$verify_dir/$aab_name" "$aab_url" \
+              && cmp --silent "release-dist/$aab_name" "$verify_dir/$aab_name"; then
+              break
+            fi
+            if [ "$attempt" -eq 10 ]; then
+              echo "::error::Published AAB did not become reachable with the exact staged bytes."
+              exit 1
+            fi
+            sleep 2
+          done
           LC_ALL=C jarsigner -verify -verbose -certs "$verify_dir/$aab_name" > "$verify_dir/jarsigner.txt" 2>&1
           grep -Fx 'jar verified.' "$verify_dir/jarsigner.txt" >/dev/null
           LC_ALL=C keytool -printcert -jarfile "$verify_dir/$aab_name" > "$verify_dir/aab-certificate.txt"
@@ -574,74 +1330,70 @@ jobs:
           test "$(sha256sum "$verify_dir/$aab_name" | cut -d ' ' -f 1)" = "$(jq -er '.android.aab.sha256' "$verify_dir/android-update.json")"
           test "$(wc -c < "$verify_dir/$aab_name" | tr -d ' ')" = "$(jq -er '.android.aab.bytes' "$verify_dir/android-update.json")"
 
-          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
-          test "$latest_tag" = "$RELEASE_TAG"
+          ownership="release-transition/release-ownership.json"
+          owned_release_id="$(jq -er '.target.release_id | numbers' "${ownership}")"
+          owned_source_commit="$(jq -er '.target.source_commit | strings' "${ownership}")"
+          owned_assets="$(jq -Sc '.target.assets' "${ownership}")"
+          owned_legacy_bootstrap_authorized="$(jq -r '.baseline.legacy_bootstrap_authorized' "${ownership}")"
+          if [ "${owned_legacy_bootstrap_authorized}" != "${ALLOW_LEGACY_BASELINE_BOOTSTRAP}" ]; then
+            echo "::error::Post-publish evidence does not match the dispatch bootstrap authorization."
+            exit 1
+          fi
+          api_state_verified=false
+          for attempt in $(seq 1 10); do
+            if latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest")" \
+              && published_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${owned_release_id}")" \
+              && published_by_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")" \
+              && published_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"; then
+              published_assets="$(jq -Sc '[.assets[] | {name, size, digest, browser_download_url}] | sort_by(.name)' <<<"${published_release}")"
+              if [ "$(jq -r '.tag_name' <<<"${latest_release}")" = "${RELEASE_TAG}" ] \
+                && [ "$(jq -r '.id' <<<"${latest_release}")" = "${owned_release_id}" ] \
+                && [ "$(jq -r '.id' <<<"${published_release}")" = "${owned_release_id}" ] \
+                && [ "$(jq -r '.id' <<<"${published_by_tag}")" = "${owned_release_id}" ] \
+                && [ "$(jq -r '.tag_name' <<<"${published_release}")" = "${RELEASE_TAG}" ] \
+                && [ "$(jq -r '.draft' <<<"${published_release}")" = "false" ] \
+                && [ "$(jq -r '.prerelease' <<<"${published_release}")" = "false" ] \
+                && [ "$(jq -r '.immutable' <<<"${published_release}")" = "true" ] \
+                && [ "${published_assets}" = "${owned_assets}" ] \
+                && [ "$(jq -r '.object.type' <<<"${published_tag}")" = "commit" ] \
+                && [ "$(jq -r '.object.sha' <<<"${published_tag}")" = "${owned_source_commit}" ]; then
+                api_state_verified=true
+                break
+              fi
+            fi
+            sleep 2
+          done
+          if [ "${api_state_verified}" != "true" ]; then
+            echo "::error::Published Release API state did not converge to the exact immutable receipt-owned target."
+            exit 1
+          fi
 
-  android_in_app_upgrade:
-    name: Upgrade previous production through the app
-    runs-on: ubuntu-latest
-    needs: [android, release]
-    timeout-minutes: 30
-    steps:
-      - name: Checkout published release
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ env.RELEASE_TAG }}
+          jq -n \
+            --arg schema "openaria.mobile.release-post-publish-verification.v1" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg source_commit "${owned_source_commit}" \
+            --arg target_tag "${RELEASE_TAG}" \
+            --argjson target_release_id "${owned_release_id}" \
+            --argjson target_assets "${published_assets}" \
+            --arg publish_cli_outcome "${PUBLISH_CLI_OUTCOME}" \
+            --argjson legacy_bootstrap_authorized "${owned_legacy_bootstrap_authorized}" \
+            '{schema: $schema, repository: $repository, run_id: $run_id,
+              run_attempt: $run_attempt, source_commit: $source_commit,
+              publish_cli_outcome: $publish_cli_outcome,
+              legacy_bootstrap_authorized: $legacy_bootstrap_authorized,
+              target: {tag: $target_tag, release_id: $target_release_id,
+                immutable: true, latest: true, assets: $target_assets},
+              verification: {api_state: "exact", anonymous_bytes: "exact",
+                apk_identity_and_signer: "exact", aab_signer: "exact"}}' \
+            > release-transition/post-publish-verification.json
 
-      - name: Set up Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android verification tools
-        run: sdkmanager "build-tools;36.0.0"
-
-      - name: Enable KVM for Android emulator
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Prepare acceptance evidence directory
-        run: mkdir -p android-upgrade-evidence
-
-      - name: Run previous production in-app upgrade
-        uses: ReactiveCircus/android-emulator-runner@v2.38.0
-        env:
-          EXPECTED_VERSION_NAME: ${{ needs.android.outputs.version_name }}
-          EXPECTED_VERSION_CODE: ${{ needs.android.outputs.version_code }}
-          BASELINE_TAG: ${{ needs.android.outputs.previous_tag }}
-          BASELINE_VERSION_NAME: ${{ needs.android.outputs.previous_version_name }}
-          BASELINE_VERSION_CODE: ${{ needs.android.outputs.previous_version_code }}
-          BASELINE_APK_NAME: ${{ needs.android.outputs.previous_apk_name }}
-        with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
-          profile: pixel_2
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: >-
-            export PATH="${ANDROID_SDK_ROOT}/build-tools/36.0.0:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}" &&
-            python3 scripts/android-in-app-update-acceptance.py
-            --repository "${GITHUB_REPOSITORY}"
-            --release-tag "${RELEASE_TAG}"
-            --expected-version-name "${EXPECTED_VERSION_NAME}"
-            --expected-version-code "${EXPECTED_VERSION_CODE}"
-            --baseline-tag "${BASELINE_TAG}"
-            --baseline-version-name "${BASELINE_VERSION_NAME}"
-            --baseline-version-code "${BASELINE_VERSION_CODE}"
-            --baseline-apk-name "${BASELINE_APK_NAME}"
-            --evidence-dir android-upgrade-evidence
-
-      - name: Upload in-app upgrade evidence
-        if: always()
+      - name: Upload post-publish verification evidence
+        if: always() && steps.prepublish_ownership.outcome == 'success' && steps.staged_upgrade.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
-          name: android-in-app-upgrade-${{ env.RELEASE_TAG }}
-          path: android-upgrade-evidence/*
+          name: android-release-post-publish-${{ env.RELEASE_TAG }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-transition/post-publish-verification.json
           if-no-files-found: warn
+          retention-days: 30

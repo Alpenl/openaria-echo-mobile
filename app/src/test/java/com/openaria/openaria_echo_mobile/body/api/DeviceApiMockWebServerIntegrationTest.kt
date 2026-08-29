@@ -147,6 +147,117 @@ class DeviceApiMockWebServerIntegrationTest {
     }
 
     @Test
+    fun `v2 session cursor remains first-page-only and sends no continuation request`() {
+        withMockWebServer { server ->
+            server.enqueue(jsonResponse(200, fixtureText("session-list-v2.json")))
+            val repository = SessionLedgerRepository()
+            val request = requireNotNull(repository.beginRefresh())
+
+            val result = DeviceHttpClient().listSessions(connection(server))
+            val applied = repository.complete(request, result)
+
+            assertIs<SessionLedgerApplyResult.Applied>(applied)
+            assertNull(repository.beginLoadMore())
+            assertEquals(1, server.requestCount)
+            assertEquals("/api/v4/sessions?limit=50", server.takeRecordedRequest().path)
+        }
+    }
+
+    @Test
+    fun `MockWebServer decodes authoritative v3 unusable verification diagnostics`() {
+        withMockWebServer { server ->
+            server.enqueue(jsonResponse(200, fixtureText("session-list-v3-unusable.json")))
+
+            val result = DeviceHttpClient().listSessions(connection(server))
+
+            val request = server.takeRecordedRequest()
+            val page = assertIs<SessionListResult.Page>(result).value
+            assertEquals("/api/v4/sessions?limit=50", request.path)
+            assertEquals(SessionListContract.V3, page.contract)
+            assertEquals("unusable", page.items.single().verificationVerdict)
+            assertEquals("unusable test take", page.items.single().displayName)
+        }
+    }
+
+    @Test
+    fun `MockWebServer preserves quarantine diagnostics outside downloadable sessions`() {
+        withMockWebServer { server ->
+            server.enqueue(jsonResponse(200, fixtureText("session-list-v3-quarantine.json")))
+
+            val result = DeviceHttpClient().listSessions(connection(server), limit = 1)
+
+            val request = server.takeRecordedRequest()
+            val page = assertIs<SessionListResult.Page>(result).value
+            assertEquals("/api/v4/sessions?limit=1", request.path)
+            assertEquals(emptyList(), page.items)
+            val diagnostic = page.diagnostics.single()
+            assertEquals("manifest_invalid", diagnostic.code)
+            assertEquals("2026-08-28T04:00:00Z", diagnostic.observedAt)
+            assertEquals("56005c52-31f1-4dac-91cd-d8eafd737d1c", diagnostic.quarantineId)
+        }
+    }
+
+    @Test
+    fun `catalog recovery sends the original take filter without a cursor`() {
+        withMockWebServer { server ->
+            server.enqueue(jsonResponse(200, fixtureText("session-list-v3.json")))
+            server.enqueue(jsonResponse(409, fixtureText("catalog-changed.json")))
+            server.enqueue(jsonResponse(200, fixtureText("session-list-v3-unusable.json")))
+            val repository = SessionLedgerRepository()
+            val client = DeviceHttpClient()
+            val connection = connection(server)
+
+            val first = requireNotNull(repository.beginRefresh(takeId = TAKE_ID))
+            assertIs<SessionLedgerApplyResult.Applied>(
+                repository.complete(
+                    first,
+                    client.listSessions(connection, takeId = first.takeId),
+                ),
+            )
+            val append = requireNotNull(repository.beginLoadMore())
+            val refreshRequired = assertIs<SessionLedgerApplyResult.RefreshRequired>(
+                repository.complete(
+                    append,
+                    client.listSessions(
+                        connection = connection,
+                        cursor = append.cursor,
+                        takeId = append.takeId,
+                    ),
+                ),
+            )
+            val recovery = requireNotNull(
+                repository.beginRefresh(
+                    takeId = refreshRequired.takeId,
+                    limit = refreshRequired.limit,
+                    catalogRecovery = true,
+                ),
+            )
+            assertIs<SessionLedgerApplyResult.Applied>(
+                repository.complete(
+                    recovery,
+                    client.listSessions(connection, takeId = recovery.takeId),
+                ),
+            )
+
+            assertEquals(TAKE_ID, refreshRequired.takeId)
+            assertNull(recovery.cursor)
+            assertEquals(TAKE_ID, recovery.takeId)
+            assertEquals(
+                "/api/v4/sessions?limit=50&take_id=$TAKE_ID",
+                server.takeRecordedRequest().path,
+            )
+            assertEquals(
+                "/api/v4/sessions?limit=50&cursor=opaque-page-2&take_id=$TAKE_ID",
+                server.takeRecordedRequest().path,
+            )
+            assertEquals(
+                "/api/v4/sessions?limit=50&take_id=$TAKE_ID",
+                server.takeRecordedRequest().path,
+            )
+        }
+    }
+
+    @Test
     fun `MockWebServer verifies artifact HEAD metadata and resumed Range download`() {
         withMockWebServer { server ->
             val payload = "hello".toByteArray(Charsets.UTF_8)
@@ -242,6 +353,11 @@ class DeviceApiMockWebServerIntegrationTest {
             previewCapable = true,
             rangeDownloadCapable = true,
             networkMutationCapable = true,
+            sessionListCapable = true,
+            sessionDetailCapable = true,
+            artifactDownloadCapable = true,
+            captureStatusCapable = true,
+            sessionDeletionCapable = false,
             volumeId = "56005c52-31f1-4dac-91cd-d8eafd737d1c",
             totalBytes = 1024L,
             availableBytes = 512L,
@@ -311,7 +427,7 @@ class DeviceApiMockWebServerIntegrationTest {
               "schema": "ylx.device.v4",
               "device": {
                 "device_id": "56005c52-31f1-4dac-91cd-d8eafd737d1c",
-                "device_label": "rp-ylx-a13f"
+                "device_label": "YLX-00ABCDEF"
               },
               "hardware_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "api_version": "4.0",
@@ -326,6 +442,11 @@ class DeviceApiMockWebServerIntegrationTest {
                 "preview": true,
                 "range_download": true,
                 "network_mutation": true,
+                "session_list": true,
+                "session_detail": true,
+                "artifact_download": true,
+                "capture_status": true,
+                "session_deletion": false,
                 "calibration_capture": {
                   "supported": true,
                   "enabled": false,
@@ -362,5 +483,6 @@ class DeviceApiMockWebServerIntegrationTest {
     private companion object {
         const val AUTHORITY_EPOCH = "e989c6e5-14cc-4faa-9715-5abdb6b0355d"
         const val SESSION_ID = "01991b70-7c88-7123-9234-123456789abc"
+        const val TAKE_ID = "01991b70-7c88-7456-9234-123456789abc"
     }
 }

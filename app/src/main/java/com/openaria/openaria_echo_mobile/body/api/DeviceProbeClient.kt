@@ -36,6 +36,22 @@ class DeviceProbeClient {
     }
 
     fun probe(origin: String, bearerToken: String?): ProbeResult {
+        return probeWithCancellation(origin, bearerToken, cancellation = null)
+    }
+
+    internal fun probe(
+        origin: String,
+        bearerToken: String?,
+        cancellation: DeviceAdmissionCancellation,
+    ): ProbeResult {
+        return probeWithCancellation(origin, bearerToken, cancellation)
+    }
+
+    private fun probeWithCancellation(
+        origin: String,
+        bearerToken: String?,
+        cancellation: DeviceAdmissionCancellation?,
+    ): ProbeResult {
         val endpointDecision = EndpointPolicy.validate(origin)
         if (endpointDecision is EndpointPolicy.Decision.Rejected) {
             return ProbeResult.RejectedEndpoint(endpointDecision.reason)
@@ -56,6 +72,9 @@ class DeviceProbeClient {
         } catch (exception: IOException) {
             return ProbeResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
         }
+        if (cancellation != null && !cancellation.register(connection)) {
+            return ProbeResult.NetworkFailure("admission cancelled")
+        }
 
         return try {
             val status = connection.responseCode
@@ -72,6 +91,7 @@ class DeviceProbeClient {
         } catch (exception: IOException) {
             ProbeResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
         } finally {
+            cancellation?.clear(connection)
             connection.disconnect()
         }
     }

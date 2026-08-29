@@ -40,6 +40,7 @@ CI 会通过 `ReactiveCircus/android-emulator-runner@v2.38.0` 创建 Pixel 2 / A
 
 ## Development
 
+- [Android 发布流程](docs/ANDROID_RELEASE.md)
 - [下一步开发计划](docs/DEVELOPMENT_PLAN.md)
 - [领域上下文与统一术语](CONTEXT.md)
 - [界面与功能审查](dogfood-output/report.md)

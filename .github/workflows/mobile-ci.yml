@@ -43,6 +43,9 @@ jobs:
       - name: Test in-app upgrade acceptance script
         run: python3 -m unittest scripts/test_android_in_app_update_acceptance.py
 
+      - name: Test current Android UI gate runner
+        run: python3 -m unittest scripts/test_android_current_ui_gate.py
+
       - name: Build debug APK
         run: ./gradlew assembleDebug
 
@@ -64,4 +67,14 @@ jobs:
           profile: pixel_2
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: ./gradlew connectedDebugAndroidTest
+          script: >-
+            ./gradlew connectedDebugAndroidTest &&
+            bash scripts/android-current-ui-gate.sh android-current-ui-evidence
+
+      - name: Upload current Android UI evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-current-ui-${{ github.sha }}
+          path: android-current-ui-evidence/**
+          if-no-files-found: error

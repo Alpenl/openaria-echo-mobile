@@ -1,0 +1,346 @@
+package com.openaria.openaria_echo_mobile.body.api
+
+import java.time.OffsetDateTime
+
+class SessionLedgerRepository {
+    private var nextRequestId = 0L
+    private var chainGeneration = 0L
+    private var activeRefresh: SessionLedgerRequest? = null
+    private var activeAppend: SessionLedgerRequest? = null
+    private var pendingRefresh: PendingSessionRefresh? = null
+    private var takeId: String? = null
+    private val consumedCursors = mutableSetOf<String>()
+
+    var page: SessionListPage? = null
+        private set
+
+    val isRefreshing: Boolean
+        get() = activeRefresh != null
+
+    val isLoadingMore: Boolean
+        get() = activeAppend != null
+
+    fun reset() {
+        chainGeneration += 1L
+        activeRefresh = null
+        activeAppend = null
+        pendingRefresh = null
+        takeId = null
+        consumedCursors.clear()
+        page = null
+    }
+
+    fun beginRefresh(
+        takeId: String? = null,
+        limit: Int = 50,
+        catalogRecovery: Boolean = false,
+    ): SessionLedgerRequest? {
+        require(limit in 1..200) { "limit must be in 1..200" }
+        if (activeRefresh != null) {
+            pendingRefresh = PendingSessionRefresh(
+                takeId = takeId,
+                limit = limit,
+                catalogRecovery = catalogRecovery,
+            )
+            return null
+        }
+
+        chainGeneration += 1L
+        activeAppend = null
+        pendingRefresh = null
+        return newRequest(
+            kind = SessionLedgerRequestKind.REFRESH,
+            limit = limit,
+            cursor = null,
+            catalogRevision = null,
+            takeId = takeId,
+            catalogRecovery = catalogRecovery,
+        ).also { activeRefresh = it }
+    }
+
+    fun beginLoadMore(): SessionLedgerRequest? {
+        if (activeRefresh != null || activeAppend != null) return null
+        val current = page ?: return null
+        if (current.contract != SessionListContract.V3) return null
+        val catalogRevision = current.catalogRevision ?: return null
+        val cursor = current.nextCursor ?: return null
+
+        return newRequest(
+            kind = SessionLedgerRequestKind.APPEND,
+            limit = current.requestIdentity.limit,
+            cursor = cursor,
+            catalogRevision = catalogRevision,
+            takeId = takeId,
+            catalogRecovery = false,
+        ).also { activeAppend = it }
+    }
+
+    fun complete(
+        request: SessionLedgerRequest,
+        result: SessionListResult,
+    ): SessionLedgerApplyResult {
+        return when (request.kind) {
+            SessionLedgerRequestKind.REFRESH -> completeRefresh(request, result)
+            SessionLedgerRequestKind.APPEND -> completeAppend(request, result)
+        }
+    }
+
+    fun cancel(request: SessionLedgerRequest) {
+        when (request.kind) {
+            SessionLedgerRequestKind.REFRESH -> {
+                if (activeRefresh === request) {
+                    activeRefresh = null
+                    pendingRefresh = null
+                }
+            }
+            SessionLedgerRequestKind.APPEND -> {
+                if (activeAppend === request) activeAppend = null
+            }
+        }
+    }
+
+    fun cancelInFlight() {
+        if (activeRefresh == null && activeAppend == null) return
+        chainGeneration += 1L
+        activeRefresh = null
+        activeAppend = null
+        pendingRefresh = null
+    }
+
+    fun cancelLoadMore() {
+        if (activeAppend == null) return
+        chainGeneration += 1L
+        activeAppend = null
+    }
+
+    private fun completeRefresh(
+        request: SessionLedgerRequest,
+        result: SessionListResult,
+    ): SessionLedgerApplyResult {
+        if (activeRefresh !== request || request.chainGeneration != chainGeneration) {
+            return SessionLedgerApplyResult.Ignored
+        }
+        activeRefresh = null
+        pendingRefresh?.let { pending ->
+            pendingRefresh = null
+            return SessionLedgerApplyResult.RefreshRequired(
+                takeId = pending.takeId,
+                limit = pending.limit,
+                catalogRecovery = pending.catalogRecovery,
+            )
+        }
+
+        return when (result) {
+            is SessionListResult.Page -> {
+                if (!result.value.matches(request)) {
+                    return SessionLedgerApplyResult.Failed(
+                        SessionListResult.InvalidResponse("session page request identity mismatch"),
+                    )
+                }
+                page = normalizeFirstPage(result.value)
+                takeId = request.takeId
+                consumedCursors.clear()
+                SessionLedgerApplyResult.Applied
+            }
+            is SessionListResult.CatalogChanged -> {
+                discardChain(request.takeId)
+                if (request.catalogRecovery) {
+                    SessionLedgerApplyResult.Failed(
+                        SessionListResult.InvalidResponse(
+                            "catalog_changed repeated for a request without cursor",
+                        ),
+                    )
+                } else {
+                    SessionLedgerApplyResult.RefreshRequired(
+                        takeId = request.takeId,
+                        limit = request.limit,
+                        catalogRecovery = true,
+                    )
+                }
+            }
+            else -> SessionLedgerApplyResult.Failed(result)
+        }
+    }
+
+    private fun completeAppend(
+        request: SessionLedgerRequest,
+        result: SessionListResult,
+    ): SessionLedgerApplyResult {
+        if (activeAppend !== request || request.chainGeneration != chainGeneration) {
+            return SessionLedgerApplyResult.Ignored
+        }
+        activeAppend = null
+
+        val current = page
+        if (current == null ||
+            current.contract != SessionListContract.V3 ||
+            current.catalogRevision != request.catalogRevision ||
+            current.nextCursor != request.cursor ||
+            takeId != request.takeId
+        ) {
+            return SessionLedgerApplyResult.Ignored
+        }
+
+        return when (result) {
+            is SessionListResult.Page -> {
+                val next = result.value
+                if (!next.matches(request)) {
+                    SessionLedgerApplyResult.Failed(
+                        SessionListResult.InvalidResponse("session page request identity mismatch"),
+                    )
+                } else if (next.contract != SessionListContract.V3 ||
+                    next.catalogRevision != request.catalogRevision
+                ) {
+                    discardChain(request.takeId)
+                    SessionLedgerApplyResult.RefreshRequired(
+                        takeId = request.takeId,
+                        limit = request.limit,
+                        catalogRecovery = true,
+                    )
+                } else if (next.nextCursor != null &&
+                    (next.nextCursor == request.cursor || next.nextCursor in consumedCursors)
+                ) {
+                    SessionLedgerApplyResult.Failed(
+                        SessionListResult.InvalidResponse("session page cursor did not advance"),
+                    )
+                } else if (hasCrossPageDuplicate(current, next)) {
+                    SessionLedgerApplyResult.Failed(
+                        SessionListResult.InvalidResponse("session page repeats an accumulated identity"),
+                    )
+                } else if (hasBoundaryInversion(current, next)) {
+                    SessionLedgerApplyResult.Failed(
+                        SessionListResult.InvalidResponse("session page boundary is not newest-first"),
+                    )
+                } else {
+                    request.cursor?.let(consumedCursors::add)
+                    page = appendSameRevision(current, next)
+                    SessionLedgerApplyResult.Applied
+                }
+            }
+            is SessionListResult.CatalogChanged -> {
+                discardChain(request.takeId)
+                SessionLedgerApplyResult.RefreshRequired(
+                    takeId = request.takeId,
+                    limit = request.limit,
+                    catalogRecovery = true,
+                )
+            }
+            else -> SessionLedgerApplyResult.Failed(result)
+        }
+    }
+
+    private fun normalizeFirstPage(value: SessionListPage): SessionListPage {
+        return if (value.contract == SessionListContract.V2) {
+            value.copy(catalogRevision = null, nextCursor = null)
+        } else {
+            value
+        }
+    }
+
+    private fun appendSameRevision(
+        current: SessionListPage,
+        next: SessionListPage,
+    ): SessionListPage {
+        return current.copy(
+            items = current.items + next.items,
+            diagnostics = current.diagnostics + next.diagnostics,
+            nextCursor = next.nextCursor,
+            requestIdentity = next.requestIdentity,
+        )
+    }
+
+    private fun hasCrossPageDuplicate(
+        current: SessionListPage,
+        next: SessionListPage,
+    ): Boolean {
+        val sessionIds = current.items.mapTo(mutableSetOf()) { it.sessionId }
+        val quarantineIds = current.diagnostics.mapTo(mutableSetOf()) { it.quarantineId }
+        return next.items.any { !sessionIds.add(it.sessionId) } ||
+            next.diagnostics.any { !quarantineIds.add(it.quarantineId) }
+    }
+
+    private fun hasBoundaryInversion(
+        current: SessionListPage,
+        next: SessionListPage,
+    ): Boolean {
+        val accumulatedOldest = current.items.lastOrNull() ?: return false
+        val nextNewest = next.items.firstOrNull() ?: return false
+        val currentTime = OffsetDateTime.parse(accumulatedOldest.startedAt).toInstant()
+        val nextTime = OffsetDateTime.parse(nextNewest.startedAt).toInstant()
+        val timeComparison = currentTime.compareTo(nextTime)
+        return timeComparison < 0 ||
+            (timeComparison == 0 && accumulatedOldest.sessionId <= nextNewest.sessionId)
+    }
+
+    private fun SessionListPage.matches(request: SessionLedgerRequest): Boolean {
+        return requestIdentity == SessionListRequestIdentity(
+            limit = request.limit,
+            cursor = request.cursor,
+            takeId = request.takeId,
+        )
+    }
+
+    private fun discardChain(nextTakeId: String?) {
+        chainGeneration += 1L
+        activeRefresh = null
+        activeAppend = null
+        pendingRefresh = null
+        takeId = nextTakeId
+        consumedCursors.clear()
+        page = null
+    }
+
+    private fun newRequest(
+        kind: SessionLedgerRequestKind,
+        limit: Int,
+        cursor: String?,
+        catalogRevision: String?,
+        takeId: String?,
+        catalogRecovery: Boolean,
+    ): SessionLedgerRequest {
+        nextRequestId += 1L
+        return SessionLedgerRequest(
+            requestId = nextRequestId,
+            chainGeneration = chainGeneration,
+            kind = kind,
+            limit = limit,
+            cursor = cursor,
+            catalogRevision = catalogRevision,
+            takeId = takeId,
+            catalogRecovery = catalogRecovery,
+        )
+    }
+}
+
+class SessionLedgerRequest internal constructor(
+    val requestId: Long,
+    internal val chainGeneration: Long,
+    val kind: SessionLedgerRequestKind,
+    val limit: Int,
+    val cursor: String?,
+    val catalogRevision: String?,
+    val takeId: String?,
+    internal val catalogRecovery: Boolean,
+)
+
+enum class SessionLedgerRequestKind {
+    REFRESH,
+    APPEND,
+}
+
+sealed interface SessionLedgerApplyResult {
+    data object Applied : SessionLedgerApplyResult
+    data object Ignored : SessionLedgerApplyResult
+    data class RefreshRequired(
+        val takeId: String?,
+        val limit: Int,
+        val catalogRecovery: Boolean,
+    ) : SessionLedgerApplyResult
+    data class Failed(val result: SessionListResult) : SessionLedgerApplyResult
+}
+
+private data class PendingSessionRefresh(
+    val takeId: String?,
+    val limit: Int,
+    val catalogRecovery: Boolean,
+)

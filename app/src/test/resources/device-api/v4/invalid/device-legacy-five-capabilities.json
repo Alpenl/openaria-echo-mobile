@@ -17,11 +17,6 @@
     "preview": true,
     "range_download": true,
     "network_mutation": false,
-    "session_list": true,
-    "session_detail": true,
-    "artifact_download": true,
-    "capture_status": true,
-    "session_deletion": false,
     "calibration_capture": {
       "supported": true,
       "enabled": false,

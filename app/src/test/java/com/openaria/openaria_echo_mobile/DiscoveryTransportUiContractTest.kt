@@ -6,11 +6,30 @@ import kotlin.test.assertContains
 
 class DiscoveryTransportUiContractTest {
     @Test
-    fun `verified probe records device identity in connection history`() {
+    fun `verified admission records device identity in connection history`() {
         val source = echoAppSource()
 
         assertContains(source, "historyStore.record(")
-        assertContains(source, "deviceId = result.connection.descriptor.deviceId")
+        assertContains(source, "deviceId = connection.descriptor.deviceId")
+    }
+
+    @Test
+    fun `workspace admission requires and consumes an initial capture snapshot`() {
+        val source = echoAppSource()
+
+        assertContains(source, "DeviceAdmissionClient()")
+        assertContains(source, "candidates = attempt.candidates")
+        assertContains(source, "isAttemptCurrent = { admissionFence.isCurrent(attempt) }")
+        assertContains(source, "cancellation = transportCancellation")
+        assertContains(source, "admittedCaptureStatus = admission.initialCaptureStatus")
+        assertContains(source, "CaptureProjection.applyHttpSnapshot(")
+        assertContains(source, "captureReconciliationGate.recordAuthoritativeSnapshot")
+        assertContains(
+            source,
+            "val usingAdmissionSnapshot = skipInitialReconciliationGeneration == generation",
+        )
+        assertContains(source, "if (!usingAdmissionSnapshot)")
+        assertContains(source, "admissionFence.canPublish(attempt, verifiedAdmission.connection)")
     }
 
     @Test

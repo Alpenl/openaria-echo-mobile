@@ -318,6 +318,48 @@ class UiShellSourceTest {
     }
 
     @Test
+    fun `session ledger UI delegates refresh and pagination ordering to revision-aware repository`() {
+        val uiSource = echoAppSource()
+
+        assertContains(uiSource, "SessionLedgerRepository()")
+        assertContains(uiSource, "sessionLedgerRepository.beginRefresh")
+        assertContains(uiSource, "sessionLedgerRepository.beginLoadMore()")
+        assertContains(uiSource, "SessionLedgerApplyResult.RefreshRequired")
+        assertContains(uiSource, "takeId = applied.takeId")
+        assertContains(uiSource, "takeId = request.takeId")
+        assertContains(uiSource, "limit = applied.limit")
+        assertContains(uiSource, "catalogRecovery = applied.catalogRecovery")
+        assertContains(uiSource, "sessionLedgerRepository.cancelInFlight()")
+        assertContains(uiSource, "sessionLedgerRepository.cancelLoadMore()")
+        assertContains(uiSource, "sessionRefreshTransportCancellation?.cancel()")
+        assertContains(uiSource, "sessionLoadMoreTransportCancellation?.cancel()")
+        assertContains(uiSource, "sessionLoadMoreJob?.cancel()")
+        assertContains(uiSource, "cancellation = transportCancellation")
+        assertContains(uiSource, "resetSessionLedgerForConnectionChange()")
+        assertContains(uiSource, "page.readOnlyDiagnosticPresentations()")
+        assertFalse(uiSource.contains("mergeSessionRefresh"))
+        assertFalse(uiSource.contains("appendSessionPage"))
+    }
+
+    @Test
+    fun `session ledger lifecycle synchronously fences paused and replaced requests`() {
+        val uiSource = echoAppSource()
+        val lifecyclePauseBlock = uiSource
+            .substringAfter("Lifecycle.Event.ON_PAUSE,")
+            .substringBefore("else -> Unit")
+        val replaceConnectionBlock = uiSource
+            .substringAfter("fun replaceBodyConnection")
+            .substringBefore("fun admitBody")
+        val admitConnectionBlock = uiSource
+            .substringAfter("fun admitBody")
+            .substringBefore("fun isCurrentConnection")
+
+        assertContains(lifecyclePauseBlock, "cancelSessionLedgerInFlight()")
+        assertContains(replaceConnectionBlock, "resetSessionLedgerForConnectionChange()")
+        assertContains(admitConnectionBlock, "resetSessionLedgerForConnectionChange()")
+    }
+
+    @Test
     fun `connection panel uses real nsd discovery for ylx capture service`() {
         val uiSource = echoAppSource()
         val discoverySource =

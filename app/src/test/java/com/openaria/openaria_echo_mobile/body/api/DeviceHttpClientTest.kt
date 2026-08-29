@@ -95,6 +95,17 @@ class DeviceHttpClientTest {
     }
 
     @Test
+    fun `classifies capture SSE clean EOF without events as unavailable`() {
+        val origin = startServer { exchange ->
+            exchange.respondBytes(200, "text/event-stream", ByteArray(0))
+        }
+
+        val result = DeviceHttpClient().readCaptureEvents(connection(origin))
+
+        assertIs<CaptureEventsResult.NoEvents>(result)
+    }
+
+    @Test
     fun `marks capture SSE source revision gap for HTTP reconciliation`() {
         val origin = startServer { exchange ->
             exchange.respondBytes(
@@ -350,6 +361,21 @@ class DeviceHttpClientTest {
         assertEquals("208", batch.lastEventId)
         assertEquals("committed", event.transaction?.status)
         assertEquals(false, event.requiresHttpReconciliation)
+    }
+
+    @Test
+    fun `classifies network SSE heartbeat EOF without events as unavailable`() {
+        val origin = startServer { exchange ->
+            exchange.respondBytes(
+                200,
+                "text/event-stream",
+                sse(": heartbeat"),
+            )
+        }
+
+        val result = DeviceHttpClient().readNetworkEvents(connection(origin))
+
+        assertIs<NetworkEventsResult.NoEvents>(result)
     }
 
     @Test

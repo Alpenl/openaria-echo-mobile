@@ -1,5 +1,7 @@
 package com.openaria.openaria_echo_mobile.body.api
 
+import java.time.OffsetDateTime
+
 object DeviceApiValidators {
     fun validateDeviceDescriptor(value: Map<String, Any?>): Validation<DeviceDescriptor> {
         value.exactKeys(
@@ -17,10 +19,13 @@ object DeviceApiValidators {
         value.constString("api_version", "4.0")?.let { return it.invalid() }
 
         val device = value.objectAt("device") ?: return "device must be an object".invalid()
+        device.exactKeys("device_id", "device_label")?.let { return "device.$it".invalid() }
         val deviceId = device.stringAt("device_id") ?: return "device.device_id is required".invalid()
         val deviceLabel = device.stringAt("device_label") ?: return "device.device_label is required".invalid()
         if (!isUuidV4(deviceId)) return "device.device_id must be a UUID v4".invalid()
-        if (deviceLabel.isBlank()) return "device.device_label must be non-empty".invalid()
+        if (!deviceLabel.matches(Regex("^YLX-[0-9A-F]{8}$"))) {
+            return "device.device_label must match YLX-<8 uppercase hex>".invalid()
+        }
 
         val hardwareFingerprint = value.stringAt("hardware_fingerprint")
             ?: return "hardware_fingerprint is required".invalid()
@@ -34,9 +39,11 @@ object DeviceApiValidators {
             ?: return "build.package_version is required".invalid()
         val commit = build.stringAt("commit") ?: return "build.commit is required".invalid()
         val buildId = build.stringAt("build_id") ?: return "build.build_id is required".invalid()
-        if (packageVersion.isBlank()) return "build.package_version must be non-empty".invalid()
+        if (packageVersion.length !in 1..64) {
+            return "build.package_version must contain 1..64 characters".invalid()
+        }
         if (!commit.matches(Regex("^[0-9a-f]{40,64}$"))) return "build.commit must be a hex Git commit".invalid()
-        if (buildId.isBlank()) return "build.build_id must be non-empty".invalid()
+        if (buildId.length !in 1..128) return "build.build_id must contain 1..128 characters".invalid()
 
         val securityProfile = value.stringAt("security_profile")
             ?: return "security_profile is required".invalid()
@@ -45,17 +52,48 @@ object DeviceApiValidators {
         }
 
         val capabilities = value.objectAt("capabilities") ?: return "capabilities must be an object".invalid()
-        capabilities.exactKeys("capture", "preview", "range_download", "network_mutation", "calibration_capture")
+        capabilities.exactKeys(
+            "capture",
+            "preview",
+            "range_download",
+            "network_mutation",
+            "session_list",
+            "session_detail",
+            "artifact_download",
+            "capture_status",
+            "session_deletion",
+            "calibration_capture",
+        )
             ?.let { return it.invalid() }
         val capture = capabilities.booleanAt("capture") ?: return "capabilities.capture must be boolean".invalid()
         val preview = capabilities.booleanAt("preview") ?: return "capabilities.preview must be boolean".invalid()
+        val rangeDownload = capabilities.booleanAt("range_download")
+            ?: return "capabilities.range_download must be boolean".invalid()
         val networkMutation = capabilities.booleanAt("network_mutation")
             ?: return "capabilities.network_mutation must be boolean".invalid()
+        val sessionList = capabilities.booleanAt("session_list")
+            ?: return "capabilities.session_list must be boolean".invalid()
+        val sessionDetail = capabilities.booleanAt("session_detail")
+            ?: return "capabilities.session_detail must be boolean".invalid()
+        val artifactDownload = capabilities.booleanAt("artifact_download")
+            ?: return "capabilities.artifact_download must be boolean".invalid()
+        val captureStatus = capabilities.booleanAt("capture_status")
+            ?: return "capabilities.capture_status must be boolean".invalid()
+        val sessionDeletion = capabilities.booleanAt("session_deletion")
+            ?: return "capabilities.session_deletion must be boolean".invalid()
         val calibrationCapture = validateCalibrationCaptureCapability(
             capabilities.objectAt("calibration_capture")
                 ?: return "capabilities.calibration_capture must be an object".invalid(),
         ).valueOrReturn { return "capabilities.calibration_capture.$it".invalid() }
-        if (capabilities["range_download"] != true) return "capabilities.range_download must be true".invalid()
+        if (!rangeDownload) return "capabilities.range_download must be true".invalid()
+        if (!sessionList) return "capabilities.session_list must be true".invalid()
+        if (!sessionDetail) return "capabilities.session_detail must be true".invalid()
+        if (!artifactDownload) return "capabilities.artifact_download must be true".invalid()
+        if (!captureStatus) return "capabilities.capture_status must be true".invalid()
+        if (sessionDeletion) return "capabilities.session_deletion must be false".invalid()
+        if (securityProfile == "lab" && networkMutation) {
+            return "capabilities.network_mutation must be false for lab security_profile".invalid()
+        }
 
         val storage = value.objectAt("storage") ?: return "storage must be an object".invalid()
         storage.exactKeys("volume_id", "total_bytes", "available_bytes", "writable")
@@ -82,8 +120,13 @@ object DeviceApiValidators {
                 securityProfile = securityProfile,
                 captureCapable = capture,
                 previewCapable = preview,
-                rangeDownloadCapable = true,
+                rangeDownloadCapable = rangeDownload,
                 networkMutationCapable = networkMutation,
+                sessionListCapable = sessionList,
+                sessionDetailCapable = sessionDetail,
+                artifactDownloadCapable = artifactDownload,
+                captureStatusCapable = captureStatus,
+                sessionDeletionCapable = sessionDeletion,
                 calibrationCapture = calibrationCapture,
                 volumeId = volumeId,
                 totalBytes = totalBytes,
@@ -233,36 +276,150 @@ object DeviceApiValidators {
         )
     }
 
-    fun validateSessionList(value: Map<String, Any?>): Validation<SessionListPage> {
+    fun validateSessionList(
+        value: Map<String, Any?>,
+        requestIdentity: SessionListRequestIdentity = SessionListRequestIdentity(
+            limit = 200,
+            cursor = null,
+            takeId = null,
+        ),
+    ): Validation<SessionListPage> {
+        if (requestIdentity.limit !in 1..200) return "request limit must be in 1..200".invalid()
+        if (requestIdentity.cursor != null && requestIdentity.cursor.isBlank()) {
+            return "request cursor must be null or non-empty".invalid()
+        }
+        if (requestIdentity.takeId != null && !isUuidV7(requestIdentity.takeId)) {
+            return "request take_id must be null or UUID v7".invalid()
+        }
+        return when (value["schema"]) {
+            "ylx.session-list.v2" -> validateSessionListV2(value, requestIdentity)
+            "ylx.session-list.v3" -> validateSessionListV3(value, requestIdentity)
+            else -> "schema must be ylx.session-list.v2 or ylx.session-list.v3".invalid()
+        }
+    }
+
+    private fun validateSessionListV2(
+        value: Map<String, Any?>,
+        requestIdentity: SessionListRequestIdentity,
+    ): Validation<SessionListPage> {
         value.exactKeys("schema", "items", "diagnostics", "next_cursor")?.let { return it.invalid() }
-        value.constString("schema", "ylx.session-list.v2")?.let { return it.invalid() }
+        if (requestIdentity.cursor != null) {
+            return "ylx.session-list.v2 cannot satisfy a cursor request".invalid()
+        }
+        return validateSessionListContents(
+            value = value,
+            contract = SessionListContract.V2,
+            catalogRevision = null,
+            allowNextCursor = false,
+            requestIdentity = requestIdentity,
+        )
+    }
+
+    private fun validateSessionListV3(
+        value: Map<String, Any?>,
+        requestIdentity: SessionListRequestIdentity,
+    ): Validation<SessionListPage> {
+        value.exactKeys("schema", "catalog_revision", "items", "diagnostics", "next_cursor")
+            ?.let { return it.invalid() }
+        val catalogRevision = value.stringAt("catalog_revision")
+            ?: return "catalog_revision is required".invalid()
+        if (!isCatalogRevision(catalogRevision)) {
+            return "catalog_revision must be sha256:<64 lowercase hex>".invalid()
+        }
+        return validateSessionListContents(
+            value = value,
+            contract = SessionListContract.V3,
+            catalogRevision = catalogRevision,
+            allowNextCursor = true,
+            requestIdentity = requestIdentity,
+        )
+    }
+
+    private fun validateSessionListContents(
+        value: Map<String, Any?>,
+        contract: SessionListContract,
+        catalogRevision: String?,
+        allowNextCursor: Boolean,
+        requestIdentity: SessionListRequestIdentity,
+    ): Validation<SessionListPage> {
         val rawItems = value["items"] as? List<*> ?: return "items must be an array".invalid()
         val rawDiagnostics = value["diagnostics"] as? List<*> ?: return "diagnostics must be an array".invalid()
+        if (rawItems.size + rawDiagnostics.size > requestIdentity.limit) {
+            return "items and diagnostics exceed the request limit".invalid()
+        }
         val cursor = value["next_cursor"]
         if (cursor != null && (cursor !is String || cursor.isBlank())) {
             return "next_cursor must be null or a non-empty string".invalid()
         }
         val nextCursor = cursor
+        if (contract == SessionListContract.V3 &&
+            requestIdentity.cursor != null &&
+            nextCursor == requestIdentity.cursor
+        ) {
+            return "next_cursor must advance beyond the request cursor".invalid()
+        }
 
         val items = rawItems.mapIndexed { index, item ->
             val summary = item as? Map<*, *> ?: return "items[$index] must be an object".invalid()
             @Suppress("UNCHECKED_CAST")
-            validateSessionSummary(summary as Map<String, Any?>)
+            validateSessionSummary(
+                value = summary as Map<String, Any?>,
+                contract = contract,
+                requestedTakeId = requestIdentity.takeId,
+            )
                 .valueOrReturn { return "items[$index].$it".invalid() }
         }
-        rawDiagnostics.forEachIndexed { index, diagnostic ->
+        if (items.map { it.sessionId }.toSet().size != items.size) {
+            return "items must not repeat session_id".invalid()
+        }
+        if (!items.zipWithNext().all { (newer, older) -> isStrictlyNewer(newer, older) }) {
+            return "items must be ordered newest-first by started_at and session_id".invalid()
+        }
+        val diagnostics = rawDiagnostics.mapIndexed { index, diagnostic ->
             val entry = diagnostic as? Map<*, *> ?: return "diagnostics[$index] must be an object".invalid()
             @Suppress("UNCHECKED_CAST")
             validateSessionDiscoveryDiagnostic(entry as Map<String, Any?>)
                 .valueOrReturn { return "diagnostics[$index].$it".invalid() }
         }
+        if (diagnostics.map { it.quarantineId }.toSet().size != diagnostics.size) {
+            return "diagnostics must not repeat quarantine_id".invalid()
+        }
         return Validation.Valid(
             SessionListPage(
+                contract = contract,
+                catalogRevision = catalogRevision,
                 items = items,
-                diagnosticsCount = rawDiagnostics.size,
-                nextCursor = nextCursor,
+                diagnostics = diagnostics,
+                // v2 predates catalog-bound cursors. Accept its wire field for compatibility,
+                // but never expose it as a requestable continuation.
+                nextCursor = nextCursor.takeIf { allowNextCursor },
+                requestIdentity = requestIdentity,
             ),
         )
+    }
+
+    fun validateCatalogChangedError(value: Map<String, Any?>): Validation<CatalogChangedError> {
+        value.exactKeys("schema", "error")?.let { return it.invalid() }
+        value.constString("schema", "ylx.api-error.v2")?.let { return it.invalid() }
+        val error = value.objectAt("error") ?: return "error must be an object".invalid()
+        error.exactKeys("code", "message", "request_id", "retryable", "details")
+            ?.let { return "error.$it".invalid() }
+        error.constString("code", "catalog_changed")?.let { return "error.$it".invalid() }
+        val message = error.stringAt("message") ?: return "error.message is required".invalid()
+        if (message.isBlank() || message.length > 1024) {
+            return "error.message must contain 1..1024 characters".invalid()
+        }
+        val requestId = error.stringAt("request_id") ?: return "error.request_id is required".invalid()
+        if (!isUuid(requestId)) return "error.request_id must be a UUID".invalid()
+        if (error["retryable"] != true) return "error.retryable must be true".invalid()
+        val details = error.objectAt("details") ?: return "error.details must be an object".invalid()
+        details.exactKeys("catalog_revision")?.let { return "error.details.$it".invalid() }
+        val catalogRevision = details.stringAt("catalog_revision")
+            ?: return "error.details.catalog_revision is required".invalid()
+        if (!isCatalogRevision(catalogRevision)) {
+            return "error.details.catalog_revision must be sha256:<64 lowercase hex>".invalid()
+        }
+        return Validation.Valid(CatalogChangedError(catalogRevision))
     }
 
     fun validateErrorResponse(value: Map<String, Any?>): Validation<ApiError> {
@@ -675,9 +832,14 @@ object DeviceApiValidators {
         val method = value.stringAt("connection_method") ?: return "runtime.connection_method is required".invalid()
         val temperature = value.numberAt("temperature_celsius")
             ?: return "runtime.temperature_celsius must be number".invalid()
-        if (observedAt.isBlank()) return "runtime.observed_at must be non-empty".invalid()
+        if (parseDateTime(observedAt) == null) {
+            return "runtime.observed_at must be an RFC 3339 date-time".invalid()
+        }
         if (method !in setOf("wifi_ap", "wifi_client", "ethernet_direct", "ethernet_lan", "offline")) {
             return "runtime.connection_method is not in the v4 enum".invalid()
+        }
+        if (temperature !in -40.0..125.0) {
+            return "runtime.temperature_celsius must be in -40..125".invalid()
         }
         val network = validateNetworkRuntimeStatus(
             value.objectAt("network") ?: return "runtime.network must be an object".invalid(),
@@ -1290,7 +1452,11 @@ object DeviceApiValidators {
         return Validation.Valid(Unit)
     }
 
-    private fun validateSessionSummary(value: Map<String, Any?>): Validation<SessionSummary> {
+    private fun validateSessionSummary(
+        value: Map<String, Any?>,
+        contract: SessionListContract,
+        requestedTakeId: String?,
+    ): Validation<SessionSummary> {
         value.exactKeys(
             "session_id",
             "producer_outcome",
@@ -1312,6 +1478,9 @@ object DeviceApiValidators {
         if (!isUuidV7(sessionId)) return "session_id must be a UUID v7".invalid()
         val takeId = value.stringAt("take_id") ?: return "take_id is required".invalid()
         if (!isUuidV7(takeId)) return "take_id must be a UUID v7".invalid()
+        if (requestedTakeId != null && takeId != requestedTakeId) {
+            return "take_id does not match the request filter".invalid()
+        }
         val sequence = value.longAt("take_sequence") ?: return "take_sequence must be integer".invalid()
         if (sequence < 1L) return "take_sequence must be positive".invalid()
         val continuation = value["continuation_of"]
@@ -1319,7 +1488,9 @@ object DeviceApiValidators {
             return "continuation_of must be null or UUID v7".invalid()
         }
         val displayName = value.stringAt("display_name") ?: return "display_name is required".invalid()
-        if (displayName.isBlank()) return "display_name must be non-empty".invalid()
+        if (displayName.isBlank() || displayName.length > 160) {
+            return "display_name must contain 1..160 characters".invalid()
+        }
         val device = value.objectAt("device") ?: return "device must be an object".invalid()
         device.exactKeys("device_id", "device_label")?.let { return "device.$it".invalid() }
         val deviceId = device.stringAt("device_id") ?: return "device.device_id is required".invalid()
@@ -1330,17 +1501,20 @@ object DeviceApiValidators {
         }
         val startedAt = value.stringAt("started_at") ?: return "started_at is required".invalid()
         val endedAt = value.stringAt("ended_at") ?: return "ended_at is required".invalid()
-        if (startedAt.isBlank() || endedAt.isBlank()) return "session timestamps must be non-empty".invalid()
+        if (parseDateTime(startedAt) == null || parseDateTime(endedAt) == null) {
+            return "session timestamps must be RFC 3339 date-times".invalid()
+        }
         val duration = value.numberAt("duration_seconds") ?: return "duration_seconds must be number".invalid()
         if (duration < 0.0) return "duration_seconds must be non-negative".invalid()
         val totalBytes = value.longAt("total_bytes") ?: return "total_bytes must be integer".invalid()
         if (totalBytes < 0L) return "total_bytes must be non-negative".invalid()
         val verification = value["verification"]
-        val verdict = when (verification) {
+        val gatewayVerification = when (verification) {
             null -> null
             is Map<*, *> -> {
                 @Suppress("UNCHECKED_CAST")
-                validateGatewayVerification(verification as Map<String, Any?>).valueOrReturn { return "verification.$it".invalid() }
+                validateGatewayVerification(verification as Map<String, Any?>, contract)
+                    .valueOrReturn { return "verification.$it".invalid() }
             }
             else -> return "verification must be null or object".invalid()
         }
@@ -1349,18 +1523,22 @@ object DeviceApiValidators {
             SessionSummary(
                 sessionId = sessionId,
                 producerOutcome = producerOutcome,
+                takeId = takeId,
                 displayName = displayName,
                 deviceLabel = deviceLabel,
                 startedAt = startedAt,
                 endedAt = endedAt,
                 durationSeconds = duration,
                 totalBytes = totalBytes,
-                verificationVerdict = verdict,
+                verification = gatewayVerification,
             ),
         )
     }
 
-    private fun validateGatewayVerification(value: Map<String, Any?>): Validation<String> {
+    private fun validateGatewayVerification(
+        value: Map<String, Any?>,
+        contract: SessionListContract,
+    ): Validation<GatewayVerification> {
         value.exactKeys("actor", "validator", "manifest_sha256", "verified_at", "verdict", "diagnostics")
             ?.let { return it.invalid() }
         value.constString("actor", "gateway")?.let { return it.invalid() }
@@ -1369,26 +1547,81 @@ object DeviceApiValidators {
         val validatorName = validator.stringAt("name") ?: return "validator.name is required".invalid()
         val validatorVersion = validator.stringAt("version") ?: return "validator.version is required".invalid()
         val validatorBuild = validator.stringAt("build_sha256") ?: return "validator.build_sha256 is required".invalid()
-        if (validatorName.isBlank()) return "validator.name must be non-empty".invalid()
-        if (validatorVersion.isBlank()) return "validator.version must be non-empty".invalid()
+        if (validatorName.isBlank() || validatorName.length > 128) {
+            return "validator.name must contain 1..128 characters".invalid()
+        }
+        if (validatorVersion.isBlank() || validatorVersion.length > 64) {
+            return "validator.version must contain 1..64 characters".invalid()
+        }
         if (!isSha256(validatorBuild)) return "validator.build_sha256 must be SHA-256".invalid()
         val manifestSha256 = value.stringAt("manifest_sha256") ?: return "manifest_sha256 is required".invalid()
         if (!isSha256(manifestSha256)) return "manifest_sha256 must be SHA-256".invalid()
         val verifiedAt = value.stringAt("verified_at") ?: return "verified_at is required".invalid()
-        if (verifiedAt.isBlank()) return "verified_at must be non-empty".invalid()
+        if (parseDateTime(verifiedAt) == null) return "verified_at must be an RFC 3339 date-time".invalid()
         val verdict = value.stringAt("verdict") ?: return "verdict is required".invalid()
         if (verdict !in setOf("usable", "unusable")) return "verdict must be usable or unusable".invalid()
-        val diagnostics = value["diagnostics"] as? List<*> ?: return "diagnostics must be an array".invalid()
-        if (verdict == "unusable" && diagnostics.isEmpty()) {
+        val rawDiagnostics = value["diagnostics"] as? List<*> ?: return "diagnostics must be an array".invalid()
+        if (verdict == "unusable" && rawDiagnostics.isEmpty()) {
             return "unusable verification requires diagnostics".invalid()
         }
-        if (diagnostics.any { it !is String || it.isBlank() }) {
-            return "diagnostics entries must be non-empty strings".invalid()
+        val diagnostics = when (contract) {
+            SessionListContract.V2 -> {
+                if (rawDiagnostics.any { it !is String || it.isBlank() || it.length > 512 }) {
+                    return "diagnostics entries must be strings containing 1..512 characters".invalid()
+                }
+                rawDiagnostics.map { rawDiagnostic ->
+                    GatewayVerificationDiagnostic.Legacy(rawDiagnostic as String)
+                }
+            }
+            SessionListContract.V3 -> {
+                rawDiagnostics.mapIndexed { index, rawDiagnostic ->
+                    val diagnostic = rawDiagnostic as? Map<*, *>
+                        ?: return "diagnostics[$index] must be an object".invalid()
+                    @Suppress("UNCHECKED_CAST")
+                    validateGatewayVerificationDiagnostic(diagnostic as Map<String, Any?>)
+                        .valueOrReturn { return "diagnostics[$index].$it".invalid() }
+                }
+            }
         }
-        return Validation.Valid(verdict)
+        return Validation.Valid(
+            GatewayVerification(
+                actor = "gateway",
+                validator = GatewayValidatorIdentity(
+                    name = validatorName,
+                    version = validatorVersion,
+                    buildSha256 = validatorBuild,
+                ),
+                manifestSha256 = manifestSha256,
+                verifiedAt = verifiedAt,
+                verdict = GatewayVerificationVerdict.fromWireValue(verdict),
+                diagnostics = diagnostics,
+            ),
+        )
     }
 
-    private fun validateSessionDiscoveryDiagnostic(value: Map<String, Any?>): Validation<Unit> {
+    private fun validateGatewayVerificationDiagnostic(
+        value: Map<String, Any?>,
+    ): Validation<GatewayVerificationDiagnostic.Current> {
+        value.exactKeys("code", "summary")?.let { return it.invalid() }
+        val code = value["code"] as? String ?: return "code must be a string".invalid()
+        if (code !in setOf("artifact_digest_mismatch", "artifact_invalid", "manifest_invalid", "verification_failed")) {
+            return "code is not in the v3 enum".invalid()
+        }
+        val summary = value["summary"] as? String ?: return "summary must be a string".invalid()
+        if (summary.isBlank() || summary.length > 512) {
+            return "summary must contain 1..512 characters".invalid()
+        }
+        return Validation.Valid(
+            GatewayVerificationDiagnostic.Current(
+                code = GatewayVerificationDiagnosticCode.fromWireValue(code),
+                summary = summary,
+            ),
+        )
+    }
+
+    private fun validateSessionDiscoveryDiagnostic(
+        value: Map<String, Any?>,
+    ): Validation<SessionDiscoveryDiagnostic> {
         value.exactKeys("quarantine_id", "code", "observed_at", "message")?.let { return it.invalid() }
         val quarantineId = value.stringAt("quarantine_id") ?: return "quarantine_id is required".invalid()
         if (!isUuidV4(quarantineId)) return "quarantine_id must be a UUID v4".invalid()
@@ -1398,60 +1631,286 @@ object DeviceApiValidators {
         }
         val observedAt = value.stringAt("observed_at") ?: return "observed_at is required".invalid()
         val message = value.stringAt("message") ?: return "message is required".invalid()
-        if (observedAt.isBlank()) return "observed_at must be non-empty".invalid()
-        if (message.isBlank()) return "message must be non-empty".invalid()
-        return Validation.Valid(Unit)
+        if (parseDateTime(observedAt) == null) return "observed_at must be an RFC 3339 date-time".invalid()
+        if (message.isBlank() || message.length > 512) {
+            return "message must contain 1..512 characters".invalid()
+        }
+        return Validation.Valid(
+            SessionDiscoveryDiagnostic(
+                quarantineId = quarantineId,
+                code = code,
+                observedAt = observedAt,
+                message = message,
+            ),
+        )
+    }
+
+    private fun isStrictlyNewer(newer: SessionSummary, older: SessionSummary): Boolean {
+        val newerStartedAt = requireNotNull(parseDateTime(newer.startedAt))
+        val olderStartedAt = requireNotNull(parseDateTime(older.startedAt))
+        val timeComparison = newerStartedAt.compareTo(olderStartedAt)
+        return timeComparison > 0 || (timeComparison == 0 && newer.sessionId > older.sessionId)
+    }
+
+    private fun parseDateTime(value: String) = try {
+        OffsetDateTime.parse(value).toInstant()
+    } catch (_: RuntimeException) {
+        null
     }
 
     private fun collectSessionArtifacts(value: Map<String, Any?>): Validation<List<ArtifactDescriptor>> {
         val artifacts = mutableListOf<ArtifactDescriptor>()
 
-        fun collectArtifact(container: Map<String, Any?>, key: String, label: String): Validation.Invalid? {
-            val candidate = container[key] ?: return null
-            val artifact = candidate as? Map<*, *> ?: return "$label must be an object".invalid()
-            @Suppress("UNCHECKED_CAST")
-            when (val result = validateArtifactDescriptor(artifact as Map<String, Any?>)) {
-                is Validation.Valid -> artifacts.add(result.value)
-                is Validation.Invalid -> return "$label.${result.message}".invalid()
-            }
-            return null
-        }
-
         val imu = value.objectAt("imu") ?: return "imu must be an object".invalid()
-        collectArtifact(imu, "artifact", "imu.artifact")?.let { return it }
+        imu.exactKeys("artifact", "sample_count", "units", "coordinate_frame")
+            ?.let { return "imu.$it".invalid() }
+        val sampleCount = imu.longAt("sample_count") ?: return "imu.sample_count must be integer".invalid()
+        if (sampleCount < 0L) return "imu.sample_count must be non-negative".invalid()
+        if (imu["units"] != "raw_int16") return "imu.units must be raw_int16".invalid()
+        if (imu["coordinate_frame"] != "raw_device_axes") {
+            return "imu.coordinate_frame must be raw_device_axes".invalid()
+        }
+        artifacts += validateRequiredSessionArtifact(
+            container = imu,
+            key = "artifact",
+            expectedRole = "imu.samples",
+            expectedMediaType = "application/x-ndjson",
+        ).valueOrReturn { return "imu.$it".invalid() }
 
         val frames = value.objectAt("frames") ?: return "frames must be an object".invalid()
-        collectArtifact(frames, "artifact", "frames.artifact")?.let { return it }
+        frames.exactKeys("artifact", "count")?.let { return "frames.$it".invalid() }
+        val frameCount = frames.longAt("count") ?: return "frames.count must be integer".invalid()
+        if (frameCount < 0L) return "frames.count must be non-negative".invalid()
+        artifacts += validateRequiredSessionArtifact(
+            container = frames,
+            key = "artifact",
+            expectedRole = "frames.index",
+            expectedMediaType = "application/x-ndjson",
+        ).valueOrReturn { return "frames.$it".invalid() }
 
         val video = value.objectAt("video") ?: return "video must be an object".invalid()
-        collectArtifact(video, "artifact", "video.artifact")?.let { return it }
-        val segments = video["segments"]
-        if (segments != null) {
-            val segmentList = segments as? List<*> ?: return "video.segments must be an array".invalid()
-            segmentList.forEachIndexed { index, rawSegment ->
-                val segment = rawSegment as? Map<*, *> ?: return "video.segments[$index] must be an object".invalid()
-                @Suppress("UNCHECKED_CAST")
-                val artifactsByEye = (segment as Map<String, Any?>).objectAt("artifacts")
-                    ?: return "video.segments[$index].artifacts must be an object".invalid()
-                collectArtifact(artifactsByEye, "left", "video.segments[$index].artifacts.left")?.let { return it }
-                collectArtifact(artifactsByEye, "right", "video.segments[$index].artifacts.right")?.let { return it }
-            }
-        }
+        artifacts += validateCurrentSessionVideo(video)
+            .valueOrReturn { return "video.$it".invalid() }
 
         val audio = value.objectAt("audio") ?: return "audio must be an object".invalid()
-        collectArtifact(audio, "artifact", "audio.artifact")?.let { return it }
+        artifacts += validateCurrentSessionAudio(audio)
+            .valueOrReturn { return "audio.$it".invalid() }
 
         val logs = value["logs"] as? List<*> ?: return "logs must be an array".invalid()
         logs.forEachIndexed { index, rawLog ->
             val log = rawLog as? Map<*, *> ?: return "logs[$index] must be an object".invalid()
             @Suppress("UNCHECKED_CAST")
             when (val result = validateArtifactDescriptor(log as Map<String, Any?>)) {
-                is Validation.Valid -> artifacts.add(result.value)
+                is Validation.Valid -> {
+                    if (!result.value.role.matches(Regex("^log(?:[._-][a-z0-9]+)+$"))) {
+                        return "logs[$index].role is not a log artifact role".invalid()
+                    }
+                    artifacts.add(result.value)
+                }
                 is Validation.Invalid -> return "logs[$index].${result.message}".invalid()
             }
         }
 
         return Validation.Valid(artifacts)
+    }
+
+    private fun validateCurrentSessionVideo(
+        value: Map<String, Any?>,
+    ): Validation<List<ArtifactDescriptor>> {
+        if (value["layout"] != "split-eyes") return "layout must be split-eyes".invalid()
+        value.exactKeys("layout", "codec", "container", "segments")?.let { return it.invalid() }
+        if (value["codec"] != "h264") return "codec must be h264".invalid()
+        if (value["container"] != "mp4") return "container must be mp4".invalid()
+        val segments = value["segments"] as? List<*> ?: return "segments must be an array".invalid()
+        if (segments.isEmpty()) return "segments must contain at least one entry".invalid()
+        if (segments.distinct().size != segments.size) return "segments must contain unique entries".invalid()
+
+        val artifacts = mutableListOf<ArtifactDescriptor>()
+        segments.forEachIndexed { index, rawSegment ->
+            val untypedSegment = rawSegment as? Map<*, *>
+                ?: return "segments[$index] must be an object".invalid()
+            @Suppress("UNCHECKED_CAST")
+            val segment = untypedSegment as Map<String, Any?>
+            segment.exactKeys(
+                "index",
+                "start_frame",
+                "end_frame",
+                "start_time_seconds",
+                "end_time_seconds",
+                "artifacts",
+            )?.let { return "segments[$index].$it".invalid() }
+            val segmentIndex = segment.longAt("index")
+                ?: return "segments[$index].index must be integer".invalid()
+            val startFrame = segment.longAt("start_frame")
+                ?: return "segments[$index].start_frame must be integer".invalid()
+            val endFrame = segment.longAt("end_frame")
+                ?: return "segments[$index].end_frame must be integer".invalid()
+            val startTime = segment.numberAt("start_time_seconds")
+                ?: return "segments[$index].start_time_seconds must be number".invalid()
+            val endTime = segment.numberAt("end_time_seconds")
+                ?: return "segments[$index].end_time_seconds must be number".invalid()
+            if (segmentIndex < 0L) return "segments[$index].index must be non-negative".invalid()
+            if (startFrame < 0L) return "segments[$index].start_frame must be non-negative".invalid()
+            if (endFrame < 1L) return "segments[$index].end_frame must be positive".invalid()
+            if (startTime < 0.0) return "segments[$index].start_time_seconds must be non-negative".invalid()
+            if (endTime <= 0.0) return "segments[$index].end_time_seconds must be positive".invalid()
+            val byEye = segment.objectAt("artifacts")
+                ?: return "segments[$index].artifacts must be an object".invalid()
+            byEye.exactKeys("left", "right")
+                ?.let { return "segments[$index].artifacts.$it".invalid() }
+            artifacts += validateRequiredSessionArtifact(
+                container = byEye,
+                key = "left",
+                expectedRole = "video.left",
+                expectedMediaType = "video/mp4",
+            ).valueOrReturn { return "segments[$index].artifacts.$it".invalid() }
+            artifacts += validateRequiredSessionArtifact(
+                container = byEye,
+                key = "right",
+                expectedRole = "video.right",
+                expectedMediaType = "video/mp4",
+            ).valueOrReturn { return "segments[$index].artifacts.$it".invalid() }
+        }
+        return Validation.Valid(artifacts)
+    }
+
+    private fun validateCurrentSessionAudio(
+        value: Map<String, Any?>,
+    ): Validation<List<ArtifactDescriptor>> {
+        val state = value.stringAt("state") ?: return "state is required".invalid()
+        return when (state) {
+            "not_recorded" -> {
+                value.exactKeys("state", "requested_mode", "resolved_mode", "reason")
+                    ?.let { return it.invalid() }
+                if (value["requested_mode"] !in setOf("device_default", "disabled")) {
+                    return "requested_mode must be device_default or disabled".invalid()
+                }
+                if (value["resolved_mode"] != "disabled") {
+                    return "resolved_mode must be disabled".invalid()
+                }
+                if (value["reason"] !in setOf("user_disabled", "device_default_disabled")) {
+                    return "reason is not in the not_recorded enum".invalid()
+                }
+                Validation.Valid(emptyList())
+            }
+            "recorded" -> validateRecordedSessionAudio(value)
+            else -> "state must be recorded or not_recorded".invalid()
+        }
+    }
+
+    private fun validateRecordedSessionAudio(
+        value: Map<String, Any?>,
+    ): Validation<List<ArtifactDescriptor>> {
+        value.exactKeys(
+            "state",
+            "requested_mode",
+            "resolved_mode",
+            "codec",
+            "container",
+            "sample_format",
+            "sample_rate",
+            "channels",
+            "sample_count",
+            "sync",
+            "segments",
+        )?.let { return it.invalid() }
+        if (value["requested_mode"] !in setOf("device_default", "enabled")) {
+            return "requested_mode must be device_default or enabled".invalid()
+        }
+        if (value["resolved_mode"] != "enabled") return "resolved_mode must be enabled".invalid()
+        if (value["codec"] != "pcm_s16le") return "codec must be pcm_s16le".invalid()
+        if (value["container"] != "wav") return "container must be wav".invalid()
+        if (value["sample_format"] != "S16_LE") return "sample_format must be S16_LE".invalid()
+        val sampleRate = value.longAt("sample_rate") ?: return "sample_rate must be integer".invalid()
+        val channels = value.longAt("channels") ?: return "channels must be integer".invalid()
+        val sampleCount = value.longAt("sample_count") ?: return "sample_count must be integer".invalid()
+        if (sampleRate !in 8_000L..384_000L) return "sample_rate must be in 8000..384000".invalid()
+        if (channels !in 1L..8L) return "channels must be in 1..8".invalid()
+        if (sampleCount < 1L) return "sample_count must be positive".invalid()
+
+        val sync = value.objectAt("sync") ?: return "sync must be an object".invalid()
+        sync.exactKeys("time_base", "start_time_seconds", "end_time_seconds", "video_time_reference")
+            ?.let { return "sync.$it".invalid() }
+        if (sync["time_base"] != "host_monotonic") return "sync.time_base must be host_monotonic".invalid()
+        val startTime = sync.numberAt("start_time_seconds")
+            ?: return "sync.start_time_seconds must be number".invalid()
+        val endTime = sync.numberAt("end_time_seconds")
+            ?: return "sync.end_time_seconds must be number".invalid()
+        if (startTime < 0.0) return "sync.start_time_seconds must be non-negative".invalid()
+        if (endTime <= 0.0) return "sync.end_time_seconds must be positive".invalid()
+        if (sync["video_time_reference"] != "session_time_seconds") {
+            return "sync.video_time_reference must be session_time_seconds".invalid()
+        }
+
+        val segments = value["segments"] as? List<*> ?: return "segments must be an array".invalid()
+        if (segments.isEmpty()) return "segments must contain at least one entry".invalid()
+        if (segments.distinct().size != segments.size) return "segments must contain unique entries".invalid()
+        val artifacts = mutableListOf<ArtifactDescriptor>()
+        segments.forEachIndexed { index, rawSegment ->
+            val untypedSegment = rawSegment as? Map<*, *>
+                ?: return "segments[$index] must be an object".invalid()
+            @Suppress("UNCHECKED_CAST")
+            val segment = untypedSegment as Map<String, Any?>
+            segment.exactKeys(
+                "index",
+                "start_sample",
+                "end_sample",
+                "start_time_seconds",
+                "end_time_seconds",
+                "pcm_payload_bytes",
+                "wav_header_bytes",
+                "artifact",
+            )?.let { return "segments[$index].$it".invalid() }
+            val segmentIndex = segment.longAt("index")
+                ?: return "segments[$index].index must be integer".invalid()
+            val startSample = segment.longAt("start_sample")
+                ?: return "segments[$index].start_sample must be integer".invalid()
+            val endSample = segment.longAt("end_sample")
+                ?: return "segments[$index].end_sample must be integer".invalid()
+            val segmentStartTime = segment.numberAt("start_time_seconds")
+                ?: return "segments[$index].start_time_seconds must be number".invalid()
+            val segmentEndTime = segment.numberAt("end_time_seconds")
+                ?: return "segments[$index].end_time_seconds must be number".invalid()
+            val payloadBytes = segment.longAt("pcm_payload_bytes")
+                ?: return "segments[$index].pcm_payload_bytes must be integer".invalid()
+            val headerBytes = segment.longAt("wav_header_bytes")
+                ?: return "segments[$index].wav_header_bytes must be integer".invalid()
+            if (segmentIndex < 0L) return "segments[$index].index must be non-negative".invalid()
+            if (startSample < 0L) return "segments[$index].start_sample must be non-negative".invalid()
+            if (endSample < 1L) return "segments[$index].end_sample must be positive".invalid()
+            if (segmentStartTime < 0.0) {
+                return "segments[$index].start_time_seconds must be non-negative".invalid()
+            }
+            if (segmentEndTime <= 0.0) return "segments[$index].end_time_seconds must be positive".invalid()
+            if (payloadBytes < 1L) return "segments[$index].pcm_payload_bytes must be positive".invalid()
+            if (headerBytes !in 44L..65_536L) {
+                return "segments[$index].wav_header_bytes must be in 44..65536".invalid()
+            }
+            artifacts += validateRequiredSessionArtifact(
+                container = segment,
+                key = "artifact",
+                expectedRole = "audio.wav",
+                expectedMediaType = "audio/wav",
+            ).valueOrReturn { return "segments[$index].$it".invalid() }
+        }
+        return Validation.Valid(artifacts)
+    }
+
+    private fun validateRequiredSessionArtifact(
+        container: Map<String, Any?>,
+        key: String,
+        expectedRole: String,
+        expectedMediaType: String,
+    ): Validation<ArtifactDescriptor> {
+        val rawArtifact = container[key] as? Map<*, *> ?: return "$key must be an object".invalid()
+        @Suppress("UNCHECKED_CAST")
+        val artifact = validateArtifactDescriptor(rawArtifact as Map<String, Any?>)
+            .valueOrReturn { return "$key.$it".invalid() }
+        if (artifact.role != expectedRole) return "$key.role must be $expectedRole".invalid()
+        if (artifact.mediaType != expectedMediaType) {
+            return "$key.media_type must be $expectedMediaType".invalid()
+        }
+        return Validation.Valid(artifact)
     }
 
     private fun validateArtifactDescriptor(value: Map<String, Any?>): Validation<ArtifactDescriptor> {
@@ -1466,6 +1925,7 @@ object DeviceApiValidators {
         if (!role.matches(Regex("^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$"))) {
             return "role is not a stable artifact role".invalid()
         }
+        if (role.length > 96) return "role must contain at most 96 characters".invalid()
         if (!isRelativeArtifactPath(path)) return "path is not a safe relative artifact path".invalid()
         if (!mediaType.matches(Regex("^[a-z0-9!#\$&^_.+-]+/[a-z0-9!#\$&^_.+-]+$"))) {
             return "media_type is invalid".invalid()
@@ -1530,6 +1990,10 @@ object DeviceApiValidators {
         return value.matches(
             Regex("^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
         )
+    }
+
+    private fun isCatalogRevision(value: String): Boolean {
+        return value.matches(Regex("^sha256:[0-9a-f]{64}$"))
     }
 
     private fun isValidSsid(value: String): Boolean {
@@ -1620,6 +2084,11 @@ data class DeviceDescriptor(
     val previewCapable: Boolean,
     val rangeDownloadCapable: Boolean,
     val networkMutationCapable: Boolean,
+    val sessionListCapable: Boolean,
+    val sessionDetailCapable: Boolean,
+    val artifactDownloadCapable: Boolean,
+    val captureStatusCapable: Boolean,
+    val sessionDeletionCapable: Boolean,
     val calibrationCapture: CalibrationCaptureCapability = CalibrationCaptureCapability(
         supported = false,
         enabled = false,
@@ -1653,21 +2122,101 @@ data class CaptureEventPayload(
 )
 
 data class SessionListPage(
+    val contract: SessionListContract,
+    val catalogRevision: String?,
     val items: List<SessionSummary>,
-    val diagnosticsCount: Int,
+    val diagnostics: List<SessionDiscoveryDiagnostic>,
     val nextCursor: String?,
+    val requestIdentity: SessionListRequestIdentity,
+) {
+    val diagnosticsCount: Int
+        get() = diagnostics.size
+}
+
+data class SessionListRequestIdentity(
+    val limit: Int,
+    val cursor: String?,
+    val takeId: String?,
 )
+
+enum class SessionListContract {
+    V2,
+    V3,
+}
 
 data class SessionSummary(
     val sessionId: String,
     val producerOutcome: String,
+    val takeId: String,
     val displayName: String,
     val deviceLabel: String,
     val startedAt: String,
     val endedAt: String,
     val durationSeconds: Double,
     val totalBytes: Long,
-    val verificationVerdict: String?,
+    val verification: GatewayVerification?,
+) {
+    val verificationVerdict: String?
+        get() = verification?.verdict?.wireValue
+}
+
+data class GatewayVerification(
+    val actor: String,
+    val validator: GatewayValidatorIdentity,
+    val manifestSha256: String,
+    val verifiedAt: String,
+    val verdict: GatewayVerificationVerdict,
+    val diagnostics: List<GatewayVerificationDiagnostic>,
+)
+
+data class GatewayValidatorIdentity(
+    val name: String,
+    val version: String,
+    val buildSha256: String,
+)
+
+enum class GatewayVerificationVerdict(val wireValue: String) {
+    USABLE("usable"),
+    UNUSABLE("unusable");
+
+    companion object {
+        fun fromWireValue(value: String): GatewayVerificationVerdict {
+            return entries.single { it.wireValue == value }
+        }
+    }
+}
+
+sealed interface GatewayVerificationDiagnostic {
+    val summary: String
+
+    data class Legacy(
+        override val summary: String,
+    ) : GatewayVerificationDiagnostic
+
+    data class Current(
+        val code: GatewayVerificationDiagnosticCode,
+        override val summary: String,
+    ) : GatewayVerificationDiagnostic
+}
+
+enum class GatewayVerificationDiagnosticCode(val wireValue: String) {
+    ARTIFACT_DIGEST_MISMATCH("artifact_digest_mismatch"),
+    ARTIFACT_INVALID("artifact_invalid"),
+    MANIFEST_INVALID("manifest_invalid"),
+    VERIFICATION_FAILED("verification_failed");
+
+    companion object {
+        fun fromWireValue(value: String): GatewayVerificationDiagnosticCode {
+            return entries.single { it.wireValue == value }
+        }
+    }
+}
+
+data class SessionDiscoveryDiagnostic(
+    val quarantineId: String,
+    val code: String,
+    val observedAt: String,
+    val message: String,
 )
 
 data class SafeSwapReceiptSummary(
@@ -1764,4 +2313,8 @@ data class ApiError(
     val message: String,
     val requestId: String,
     val retryable: Boolean,
+)
+
+data class CatalogChangedError(
+    val catalogRevision: String,
 )

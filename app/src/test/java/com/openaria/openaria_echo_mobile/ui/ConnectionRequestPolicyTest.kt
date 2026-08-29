@@ -68,4 +68,15 @@ class ConnectionRequestPolicyTest {
         assertFalse(gate.tryAcquire(30_000L))
         assertTrue(gate.tryAcquire(32_000L))
     }
+
+    @Test
+    fun `admission snapshot seeds the normal reconciliation interval`() {
+        val gate = ReconciliationGate(ConnectionRequestPolicy.HEALTHY_RECONCILIATION_INTERVAL_MS)
+
+        gate.recordAuthoritativeSnapshot(1_000L)
+
+        assertFalse(gate.tryAcquire(1_000L))
+        assertFalse(gate.tryAcquire(30_999L))
+        assertTrue(gate.tryAcquire(31_000L))
+    }
 }

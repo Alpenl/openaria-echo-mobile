@@ -8,6 +8,33 @@ import kotlin.test.assertFalse
 
 class D049ProductBoundarySourceTest {
     @Test
+    fun `current capture projection has no safe swap product state or effect`() {
+        val projection = File(
+            "src/main/java/com/openaria/openaria_echo_mobile/body/CaptureProjection.kt",
+        ).readText()
+
+        assertFalse(projection.contains("SafeSwap"))
+        assertFalse(projection.contains("safeSwap"))
+        assertFalse(projection.contains("safe_swap"))
+        assertFalse(projection.contains("requiresSafeSwapReconciliation"))
+    }
+
+    @Test
+    fun `session child transport details stay in expandable diagnostics`() {
+        val source = File(
+            "src/main/java/com/openaria/openaria_echo_mobile/ui/EchoApp.kt",
+        ).readText()
+
+        assertContains(source, "message.toReadOnlyPresentation()?.let { presentation ->")
+        assertContains(source, "SessionDiagnosticPanel(presentation)")
+        assertFalse(source.contains("session_manifest_invalid_response, message.detail"))
+        assertFalse(source.contains("session_manifest_network_failure, message.detail"))
+        assertFalse(source.contains("unsuccessful_outcome_invalid_response, message.detail"))
+        assertFalse(source.contains("unsuccessful_outcome_network_failure, message.detail"))
+        assertFalse(source.contains("unsuccessfulOutcomeMessageBody(message)"))
+    }
+
+    @Test
     fun `network disconnect is terminal and explicit retry starts a new operation`() {
         val source = File(
             "src/main/java/com/openaria/openaria_echo_mobile/ui/EchoApp.kt",

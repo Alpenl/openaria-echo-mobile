@@ -490,23 +490,36 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, object]:
         raise AcceptanceError("Baseline APK name must identify one Release APK asset")
     if args.baseline_tag == args.release_tag or args.baseline_version_code >= args.expected_version_code:
         raise AcceptanceError("Baseline must be an older production Release than the candidate")
+    if not re.fullmatch(r"[0-9]+", args.baseline_release_id):
+        raise AcceptanceError("Baseline Release ID must be a positive decimal identity")
+    if int(args.baseline_release_id) <= 0 or HEX_64.fullmatch(args.baseline_apk_sha256) is None:
+        raise AcceptanceError("Baseline Release identity or APK digest is invalid")
+    if HEX_64.fullmatch(args.candidate_apk_sha256) is None:
+        raise AcceptanceError("Candidate APK digest is invalid")
+    if re.fullmatch(r"[0-9a-f]{40}", args.source_commit) is None:
+        raise AcceptanceError("Source commit must be an exact Git commit identity")
+    if not args.run_id.isdecimal() or not args.run_attempt.isdecimal():
+        raise AcceptanceError("Actions run identity is invalid")
+    if args.legacy_bootstrap_authorized not in {"true", "false"}:
+        raise AcceptanceError("Legacy bootstrap authorization must be a boolean identity")
+    legacy_bootstrap_authorized = args.legacy_bootstrap_authorized == "true"
 
-    manifest_url = f"https://github.com/{args.repository}/releases/latest/download/android-update.json"
+    candidate_manifest_path = Path(args.candidate_manifest_path).resolve()
+    if not candidate_manifest_path.is_file():
+        raise AcceptanceError("The exact staged candidate manifest is unavailable")
     baseline_apk_url = (
         f"https://github.com/{args.repository}/releases/download/"
         f"{args.baseline_tag}/{args.baseline_apk_name}"
     )
     with tempfile.TemporaryDirectory(prefix="openaria-android-upgrade-") as temporary:
         temp_dir = Path(temporary)
-        manifest_path = temp_dir / "android-update.json"
         baseline_apk = temp_dir / args.baseline_apk_name
         installed_apk = temp_dir / "installed-base.apk"
 
-        download(manifest_url, manifest_path)
         try:
-            manifest_json = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_json = json.loads(candidate_manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exception:
-            raise AcceptanceError("Published update manifest is not valid JSON") from exception
+            raise AcceptanceError("Staged update manifest is not valid JSON") from exception
         target = validate_manifest(
             manifest_json,
             args.repository,
@@ -514,6 +527,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, object]:
             args.expected_version_name,
             args.expected_version_code,
         )
+        if target["apkSha256"] != args.candidate_apk_sha256:
+            raise AcceptanceError("Staged manifest is not bound to the exact candidate APK digest")
 
         download(baseline_apk_url, baseline_apk)
         baseline_package, baseline_name, baseline_code = apk_identity(baseline_apk)
@@ -524,6 +539,9 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, object]:
         ):
             raise AcceptanceError("The published baseline APK does not have the expected production identity")
         baseline_signer = apk_signer(baseline_apk)
+        baseline_sha256 = sha256(baseline_apk)
+        if baseline_sha256 != args.baseline_apk_sha256:
+            raise AcceptanceError("Downloaded baseline APK does not match its frozen Release digest")
         if baseline_signer != target["certificate"]:
             raise AcceptanceError("The baseline and candidate release signing certificates do not match")
 
@@ -606,6 +624,11 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, object]:
             raise AcceptanceError("The installed APK certificate does not match the release chain")
 
         actions_run_id = os.environ.get("GITHUB_RUN_ID", "")
+        actions_run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+        if actions_run_id and actions_run_id != args.run_id:
+            raise AcceptanceError("Actions run ID differs from the staged acceptance authority")
+        if actions_run_attempt and actions_run_attempt != args.run_attempt:
+            raise AcceptanceError("Actions run attempt differs from the staged acceptance authority")
         actions_server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
         actions_run_url = (
             f"{actions_server}/{args.repository}/actions/runs/{actions_run_id}"
@@ -617,17 +640,22 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, object]:
             "completedAt": now_utc(),
             "repository": args.repository,
             "releaseTag": args.release_tag,
-            "actionsRunId": actions_run_id or None,
+            "actionsRunId": args.run_id,
+            "actionsRunAttempt": args.run_attempt,
             "actionsRunUrl": actions_run_url,
+            "sourceCommit": args.source_commit,
+            "publicationState": "prepublish_staged_candidate",
             "emulatorApiLevel": command(["adb", "shell", "getprop", "ro.build.version.sdk"]),
             "baseline": {
+                "releaseId": int(args.baseline_release_id),
                 "releaseTag": args.baseline_tag,
                 "versionName": old_name,
                 "versionCode": old_code,
                 "apkUrl": baseline_apk_url,
-                "apkSha256": sha256(baseline_apk),
+                "apkSha256": baseline_sha256,
                 "apkBytes": baseline_apk.stat().st_size,
                 "certificateMatchesManifest": baseline_signer == target["certificate"],
+                "legacyBootstrapAuthorized": legacy_bootstrap_authorized,
             },
             "candidate": {
                 "releaseTag": args.release_tag,
@@ -640,7 +668,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, object]:
                 "certificateMatchesBaseline": installed_signer == baseline_signer,
             },
             "flow": {
-                "publishedManifestAccessed": True,
+                "publishedManifestAccessed": False,
+                "stagedCandidateManifestAccessed": True,
                 "baselineReleaseApkInstalled": True,
                 "targetVersionDisplayedByOldApp": True,
                 "targetVersionDisplayedByBaselineApp": True,
@@ -679,6 +708,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-version-name", required=True)
     parser.add_argument("--baseline-version-code", required=True, type=int)
     parser.add_argument("--baseline-apk-name", required=True)
+    parser.add_argument("--baseline-release-id", required=True)
+    parser.add_argument("--baseline-apk-sha256", required=True)
+    parser.add_argument("--legacy-bootstrap-authorized", required=True)
+    parser.add_argument("--candidate-manifest-path", required=True)
+    parser.add_argument("--candidate-apk-sha256", required=True)
+    parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-attempt", required=True)
     parser.add_argument("--evidence-dir", default="android-upgrade-evidence")
     return parser.parse_args()
 

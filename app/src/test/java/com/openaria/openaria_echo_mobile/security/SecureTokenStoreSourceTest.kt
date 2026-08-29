@@ -15,8 +15,10 @@ class SecureTokenStoreSourceTest {
         assertContains(source, "bodyTokenPrefix")
         assertContains(source, "originTokenPrefix")
         assertContains(source, "normalizeDeviceId")
-        assertContains(uiSource, "shouldBindSavedTokenToBody")
-        assertContains(uiSource, "descriptor.deviceId")
-        assertContains(uiSource, "tokenStore.clear(bodyOrigin)")
+        assertContains(uiSource, "if (savedToken.isNotBlank())")
+        assertContains(uiSource, "tokenStore.saveForVerifiedBody(")
+        assertContains(uiSource, "origin = connection.origin")
+        assertContains(uiSource, "deviceId = connection.descriptor.deviceId")
+        assertContains(uiSource, "tokenStore.clear(credentialOrigin)")
     }
 }

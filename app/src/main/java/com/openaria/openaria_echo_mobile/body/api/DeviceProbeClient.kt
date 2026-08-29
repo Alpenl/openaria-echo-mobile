@@ -36,6 +36,22 @@ class DeviceProbeClient {
     }
 
     fun probe(origin: String, bearerToken: String?): ProbeResult {
+        return probeWithCancellation(origin, bearerToken, cancellation = null)
+    }
+
+    internal fun probe(
+        origin: String,
+        bearerToken: String?,
+        cancellation: DeviceAdmissionCancellation,
+    ): ProbeResult {
+        return probeWithCancellation(origin, bearerToken, cancellation)
+    }
+
+    private fun probeWithCancellation(
+        origin: String,
+        bearerToken: String?,
+        cancellation: DeviceAdmissionCancellation?,
+    ): ProbeResult {
         val endpointDecision = EndpointPolicy.validate(origin)
         if (endpointDecision is EndpointPolicy.Decision.Rejected) {
             return ProbeResult.RejectedEndpoint(endpointDecision.reason)
@@ -56,6 +72,9 @@ class DeviceProbeClient {
         } catch (exception: IOException) {
             return ProbeResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
         }
+        if (cancellation != null && !cancellation.register(connection)) {
+            return ProbeResult.NetworkFailure("admission cancelled")
+        }
 
         return try {
             val status = connection.responseCode
@@ -65,14 +84,29 @@ class DeviceProbeClient {
                     bearerToken = bearerToken,
                     body = connection.inputStream.readBytes().decodeToString(),
                 )
-                HttpURLConnection.HTTP_UNAUTHORIZED -> ProbeResult.AuthenticationRequired
+                // Keep the canonical endpoint identity with the challenge. A
+                // multi-address service may fail on one candidate and require
+                // credentials on another; callers must authorize that exact
+                // origin instead of guessing from the primary address.
+                HttpURLConnection.HTTP_UNAUTHORIZED -> {
+                    ProbeResult.AuthenticationRequired(target.origin.toString())
+                }
                 HttpURLConnection.HTTP_FORBIDDEN -> ProbeResult.Forbidden
                 else -> ProbeResult.HttpFailure(connection.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             ProbeResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
+        } catch (exception: RuntimeException) {
+            // A concurrent cancellation can surface as a JDK NPE while the
+            // connection is being disconnected; keep admission failure typed.
+            if (cancellation?.isCancelled() == true) {
+                ProbeResult.NetworkFailure("admission cancelled")
+            } else {
+                throw exception
+            }
         } finally {
-            connection.disconnect()
+            cancellation?.clear(connection)
+            runCatching { connection.disconnect() }
         }
     }
 
@@ -100,7 +134,7 @@ class DeviceProbeClient {
 
 sealed interface ProbeResult {
     data class Verified(val connection: DeviceConnection) : ProbeResult
-    data object AuthenticationRequired : ProbeResult
+    data class AuthenticationRequired(val origin: String) : ProbeResult
     data object Forbidden : ProbeResult
     data class RejectedEndpoint(val reason: EndpointPolicy.RejectReason) : ProbeResult
     data class InvalidResponse(val message: String) : ProbeResult

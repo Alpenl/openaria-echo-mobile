@@ -40,7 +40,7 @@ class DeviceProbeClientTest {
         assertEquals("Bearer local-token", authorization)
         assertEquals(origin, verified.connection.origin)
         assertEquals("local-token", verified.connection.bearerToken)
-        assertEquals("rp-ylx-a13f", verified.connection.descriptor.deviceLabel)
+        assertEquals("YLX-00ABCDEF", verified.connection.descriptor.deviceLabel)
     }
 
     @Test
@@ -51,7 +51,7 @@ class DeviceProbeClientTest {
 
         val result = DeviceProbeClient().probe(origin, null)
 
-        assertIs<ProbeResult.AuthenticationRequired>(result)
+        assertEquals(origin, assertIs<ProbeResult.AuthenticationRequired>(result).origin)
     }
 
     @Test
@@ -106,7 +106,7 @@ class DeviceProbeClientTest {
               "schema": "ylx.device.v4",
               "device": {
                 "device_id": "56005c52-31f1-4dac-91cd-d8eafd737d1c",
-                "device_label": "rp-ylx-a13f"
+                "device_label": "YLX-00ABCDEF"
               },
               "hardware_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "api_version": "4.0",
@@ -121,6 +121,11 @@ class DeviceProbeClientTest {
                 "preview": true,
                 "range_download": true,
                 "network_mutation": true,
+                "session_list": true,
+                "session_detail": true,
+                "artifact_download": true,
+                "capture_status": true,
+                "session_deletion": false,
                 "calibration_capture": {
                   "supported": true,
                   "enabled": false,

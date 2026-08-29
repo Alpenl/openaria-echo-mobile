@@ -14,6 +14,15 @@
       "lifecycle": "current",
       "source": "openaria-score/contracts/openapi/ylx-device-v4.openapi.yaml",
       "status": "present"
+    },
+    "sessionManifestSchema": {
+      "path": "schemas/ylx-device-session-v2.schema.json",
+      "sha256": "7de77a092152cb68d57fc9e46dcc3024fe521dbcf5961999cf0ac887186a59c8",
+      "bytes": 14034,
+      "id": "urn:ylx:schema:device-session:v2",
+      "lifecycle": "current",
+      "source": "openaria-bridge-desktop/contracts/schemas/ylx-device-session-v2.schema.json",
+      "status": "present"
     }
   },
   "productionAdapter": {
@@ -27,10 +36,16 @@
       "Android NSD discovery for _ylx-capture._tcp",
       "manual origin validation",
       "history-backed descriptor probing",
+      "initial /capture/status snapshot admission before workspace entry",
       "cancellable connection probe UI",
+      "job-owned admission cancellation with active transport disconnect",
+      "exact candidate-origin authentication retry binding",
       "foreground lifecycle request cancellation",
       "connection-generation late response rejection",
       "strict /api/v4/device descriptor validation",
+      "closed DeviceIdentity, bounded build metadata, runtime date-time and temperature range, and lab-profile descriptor admission",
+      "closed ten-key v4 capability admission with required read, download, and status support",
+      "session deletion capability required false with no deletion UI",
       "capture status bootstrap and bounded fallback polling",
       "capture SSE Last-Event-ID replay",
       "capture authority_epoch/source_revision reconciliation",
@@ -48,14 +63,19 @@
       "camera-connected capture admission gating",
       "layered recording-safe system back confirmation behavior",
       "Compose dialog, switch, radio-group, disabled-control, and 48dp accessibility semantics",
-      "cursor-paged session ledger reads",
+      "tagged ylx.session-list.v2 and ylx.session-list.v3 decoding",
+      "v2 session lists constrained to first-page compatibility",
+      "limit/cursor/take_id-bound session page validation with capacity, uniqueness, and newest-first checks",
+      "catalog_revision-bound v3 pagination with cursor progress, cross-page duplicate, and boundary rejection",
+      "strict catalog_changed reset to a fresh no-cursor session read preserving take_id",
+      "pending-dirty session refresh with lifecycle and hidden-page active transport cancellation",
       "session ledger local filters all/available/unsuccessful",
       "retained unsuccessful outcome reads",
-      "read-only session diagnostics UI",
+      "typed quarantine diagnostics preserved across pagination in read-only UI without session promotion",
       "calibration capture capability projection",
       "calibration capture admission gating",
       "calibration capture start mode",
-      "session manifest parsing",
+      "strict current ylx.device-session.v2 split-eye H.264 MP4 segment-pair and explicit segmented WAV/not-recorded manifest parsing",
       "artifact HEAD metadata validation",
       "artifact descriptor-bound Range transport",
       "artifact cancel, failure, and .part cleanup",
@@ -83,9 +103,12 @@
       "MockWebServer Device API integration tests"
     ],
     "compatibilityOnly": [
-      "Device API v4 safe-swap wire parsing is frozen compatibility code with no production UI, controller, polling, documentation claim, or acceptance path"
+      "ylx.session-list.v2 is read-only first-page compatibility; its continuation cursor is never followed",
+      "Device API v4 safe-swap wire parsing is frozen compatibility code with no production projection state or effect, UI, controller, polling, documentation claim, or acceptance path"
     ],
-    "failClosed": [],
+    "failClosed": [
+      "current ylx.device-session.v2 rejects raw-side-by-side and single-file video or audio media profiles"
+    ],
     "reason": "The production Device API adapter is enabled only for current fixed-storage v4 product operations. Destructive or connectivity-breaking actions remain gated by body-declared capability, idempotency keys, explicit user confirmation, and authoritative status reconciliation."
   }
 }

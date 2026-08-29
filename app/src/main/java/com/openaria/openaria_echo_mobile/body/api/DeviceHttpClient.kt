@@ -9,11 +9,28 @@ import java.security.MessageDigest
 
 class DeviceHttpClient {
     fun getCaptureStatus(connection: DeviceConnection): CaptureStatusResult {
+        return getCaptureStatusWithCancellation(connection, cancellation = null)
+    }
+
+    internal fun getCaptureStatus(
+        connection: DeviceConnection,
+        cancellation: DeviceAdmissionCancellation,
+    ): CaptureStatusResult {
+        return getCaptureStatusWithCancellation(connection, cancellation)
+    }
+
+    private fun getCaptureStatusWithCancellation(
+        connection: DeviceConnection,
+        cancellation: DeviceAdmissionCancellation?,
+    ): CaptureStatusResult {
         val http = try {
             (connection.target.origin.resolve("/api/v4/capture/status").toURL().openConnection() as HttpURLConnection)
                 .applyJsonRequest(connection)
         } catch (exception: IOException) {
             return CaptureStatusResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
+        }
+        if (cancellation != null && !cancellation.register(http)) {
+            return CaptureStatusResult.NetworkFailure("admission cancelled")
         }
 
         return try {
@@ -26,6 +43,7 @@ class DeviceHttpClient {
         } catch (exception: IOException) {
             CaptureStatusResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
         } finally {
+            cancellation?.clear(http)
             http.disconnect()
         }
     }
@@ -172,6 +190,38 @@ class DeviceHttpClient {
         cursor: String? = null,
         takeId: String? = null,
     ): SessionListResult {
+        return listSessionsWithCancellation(
+            connection = connection,
+            limit = limit,
+            cursor = cursor,
+            takeId = takeId,
+            cancellation = null,
+        )
+    }
+
+    internal fun listSessions(
+        connection: DeviceConnection,
+        limit: Int = 50,
+        cursor: String? = null,
+        takeId: String? = null,
+        cancellation: DeviceAdmissionCancellation,
+    ): SessionListResult {
+        return listSessionsWithCancellation(
+            connection = connection,
+            limit = limit,
+            cursor = cursor,
+            takeId = takeId,
+            cancellation = cancellation,
+        )
+    }
+
+    private fun listSessionsWithCancellation(
+        connection: DeviceConnection,
+        limit: Int,
+        cursor: String?,
+        takeId: String?,
+        cancellation: DeviceAdmissionCancellation?,
+    ): SessionListResult {
         val clampedLimit = limit.coerceIn(1, 200)
         if (cursor != null && cursor.isBlank()) {
             return SessionListResult.InvalidRequest
@@ -191,19 +241,42 @@ class DeviceHttpClient {
         } catch (exception: IOException) {
             return SessionListResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
         }
+        if (cancellation != null && !cancellation.register(http)) {
+            return SessionListResult.NetworkFailure("session request cancelled")
+        }
 
         return try {
             when (val status = http.responseCode) {
-                HttpURLConnection.HTTP_OK -> parseSessionList(http.inputStream.readBytes().decodeToString())
+                HttpURLConnection.HTTP_OK -> parseSessionList(
+                    body = http.inputStream.readBytes().decodeToString(),
+                    requestIdentity = SessionListRequestIdentity(
+                        limit = clampedLimit,
+                        cursor = cursor,
+                        takeId = takeId,
+                    ),
+                )
                 HttpURLConnection.HTTP_BAD_REQUEST -> SessionListResult.InvalidRequest
                 HttpURLConnection.HTTP_UNAUTHORIZED -> SessionListResult.AuthenticationRequired
                 HttpURLConnection.HTTP_FORBIDDEN -> SessionListResult.Forbidden
+                HttpURLConnection.HTTP_CONFLICT -> parseCatalogChanged(
+                    http.errorStream?.readBytes()?.decodeToString().orEmpty(),
+                )
                 else -> SessionListResult.HttpFailure(http.toDeviceHttpFailure(status))
             }
         } catch (exception: IOException) {
             SessionListResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
+        } catch (exception: RuntimeException) {
+            // Some JDK/Android HttpURLConnection implementations race with
+            // disconnect() and throw NPE instead of IOException. Once the
+            // caller has cancelled, expose the same typed transport result.
+            if (cancellation?.isCancelled() == true) {
+                SessionListResult.NetworkFailure("session request cancelled")
+            } else {
+                throw exception
+            }
         } finally {
-            http.disconnect()
+            cancellation?.clear(http)
+            runCatching { http.disconnect() }
         }
     }
 
@@ -811,13 +884,35 @@ class DeviceHttpClient {
         }
     }
 
-    private fun parseSessionList(body: String): SessionListResult {
+    private fun parseSessionList(
+        body: String,
+        requestIdentity: SessionListRequestIdentity,
+    ): SessionListResult {
         val root = when (val json = DeviceJsonPayload.parseObject(body)) {
             is DeviceJsonPayload.Result.Parsed -> json.value
             is DeviceJsonPayload.Result.Invalid -> return SessionListResult.InvalidResponse(json.message)
         }
-        return when (val validation = DeviceApiValidators.validateSessionList(root)) {
+        return when (
+            val validation = DeviceApiValidators.validateSessionList(
+                value = root,
+                requestIdentity = requestIdentity,
+            )
+        ) {
             is Validation.Valid -> SessionListResult.Page(validation.value)
+            is Validation.Invalid -> SessionListResult.InvalidResponse(validation.message)
+        }
+    }
+
+    private fun parseCatalogChanged(body: String): SessionListResult {
+        if (body.isBlank()) {
+            return SessionListResult.InvalidResponse("409 response is missing ylx.api-error.v2 body")
+        }
+        val root = when (val json = DeviceJsonPayload.parseObject(body)) {
+            is DeviceJsonPayload.Result.Parsed -> json.value
+            is DeviceJsonPayload.Result.Invalid -> return SessionListResult.InvalidResponse(json.message)
+        }
+        return when (val validation = DeviceApiValidators.validateCatalogChangedError(root)) {
+            is Validation.Valid -> SessionListResult.CatalogChanged(validation.value.catalogRevision)
             is Validation.Invalid -> SessionListResult.InvalidResponse(validation.message)
         }
     }
@@ -1600,6 +1695,7 @@ sealed interface CaptureCommandResult {
 
 sealed interface SessionListResult {
     data class Page(val value: SessionListPage) : SessionListResult
+    data class CatalogChanged(val catalogRevision: String) : SessionListResult
     data object InvalidRequest : SessionListResult
     data object AuthenticationRequired : SessionListResult
     data object Forbidden : SessionListResult

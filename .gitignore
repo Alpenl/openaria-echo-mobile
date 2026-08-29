@@ -1,5 +1,6 @@
 # Gradle / Android
 .gradle/
+.kotlin/
 build/
 app/build/
 local.properties
@@ -10,6 +11,10 @@ key.properties
 # IDE
 .idea/
 .vscode/
+
+# Python test tooling
+__pycache__/
+*.py[cod]
 
 # OS / editor
 .DS_Store

@@ -6,6 +6,9 @@ import com.sun.net.httpserver.HttpServer
 import java.io.ByteArrayOutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -13,6 +16,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 class DeviceHttpClientTest {
     private var server: HttpServer? = null
@@ -568,8 +572,17 @@ class DeviceHttpClientTest {
         assertEquals("/api/v4/sessions", requestedPath)
         assertEquals("limit=12", query)
         assertEquals("application/json", accept)
+        assertEquals(SessionListContract.V3, page.contract)
+        assertEquals(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            page.catalogRevision,
+        )
         assertEquals(1, page.items.size)
         assertEquals(1, page.diagnosticsCount)
+        assertEquals("manifest_invalid", page.diagnostics.single().code)
+        assertEquals("closed schema violation", page.diagnostics.single().message)
+        assertEquals("01991b70-7c88-7456-9234-123456789abc", page.items.single().takeId)
+        assertEquals(SessionListRequestIdentity(12, null, null), page.requestIdentity)
         assertEquals("test take", page.items.single().displayName)
         assertEquals("usable", page.items.single().verificationVerdict)
     }
@@ -589,11 +602,76 @@ class DeviceHttpClientTest {
             takeId = "01991b70-7c88-7456-9234-123456789abc",
         )
 
-        assertIs<SessionListResult.Page>(result)
+        val page = assertIs<SessionListResult.Page>(result).value
+        assertEquals(
+            SessionListRequestIdentity(
+                limit = 12,
+                cursor = "page 1/2",
+                takeId = "01991b70-7c88-7456-9234-123456789abc",
+            ),
+            page.requestIdentity,
+        )
         assertEquals(
             "limit=12&cursor=page+1%2F2&take_id=01991b70-7c88-7456-9234-123456789abc",
             query,
         )
+    }
+
+    @Test
+    fun `fails closed when a session page exceeds its exact requested limit`() {
+        val origin = startServer { exchange ->
+            exchange.respondJson(200, sessionListJson())
+        }
+
+        val result = DeviceHttpClient().listSessions(connection(origin), limit = 1)
+
+        val invalid = assertIs<SessionListResult.InvalidResponse>(result)
+        assertEquals("items and diagnostics exceed the request limit", invalid.message)
+    }
+
+    @Test
+    fun `fails closed when a session violates the exact take filter`() {
+        val origin = startServer { exchange ->
+            exchange.respondJson(200, sessionListJson())
+        }
+
+        val result = DeviceHttpClient().listSessions(
+            connection = connection(origin),
+            takeId = "01991b70-7c88-7567-9234-123456789abc",
+        )
+
+        val invalid = assertIs<SessionListResult.InvalidResponse>(result)
+        assertEquals("items[0].take_id does not match the request filter", invalid.message)
+    }
+
+    @Test
+    fun `cancels a blocked session list transport`() {
+        val requestArrived = CountDownLatch(1)
+        val releaseHandler = CountDownLatch(1)
+        val origin = startServer { exchange ->
+            requestArrived.countDown()
+            releaseHandler.await(5, TimeUnit.SECONDS)
+            runCatching { exchange.respondJson(200, sessionListJson()) }
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        val cancellation = DeviceAdmissionCancellation()
+
+        try {
+            val future = executor.submit<SessionListResult> {
+                DeviceHttpClient().listSessions(
+                    connection = connection(origin),
+                    cancellation = cancellation,
+                )
+            }
+            assertTrue(requestArrived.await(2, TimeUnit.SECONDS), "session request did not reach the server")
+
+            cancellation.cancel()
+
+            assertIs<SessionListResult.NetworkFailure>(future.get(2, TimeUnit.SECONDS))
+        } finally {
+            releaseHandler.countDown()
+            executor.shutdownNow()
+        }
     }
 
     @Test
@@ -605,6 +683,48 @@ class DeviceHttpClientTest {
         val result = DeviceHttpClient().listSessions(connection(origin), cursor = "")
 
         assertIs<SessionListResult.InvalidRequest>(result)
+    }
+
+    @Test
+    fun `accepts v2 session list only as a first page`() {
+        val origin = startServer { exchange ->
+            exchange.respondJson(200, fixtureText("session-list-v2.json"))
+        }
+
+        val page = assertIs<SessionListResult.Page>(
+            DeviceHttpClient().listSessions(connection(origin)),
+        ).value
+
+        assertEquals(SessionListContract.V2, page.contract)
+        assertEquals(null, page.catalogRevision)
+        assertEquals(null, page.nextCursor)
+    }
+
+    @Test
+    fun `decodes strict catalog changed response for session cursor reset`() {
+        val origin = startServer { exchange ->
+            exchange.respondJson(409, fixtureText("catalog-changed.json"))
+        }
+
+        val changed = assertIs<SessionListResult.CatalogChanged>(
+            DeviceHttpClient().listSessions(connection(origin), cursor = "opaque-page-2"),
+        )
+
+        assertEquals(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            changed.catalogRevision,
+        )
+    }
+
+    @Test
+    fun `rejects malformed catalog changed response`() {
+        val origin = startServer { exchange ->
+            exchange.respondJson(409, "{not-json")
+        }
+
+        val result = DeviceHttpClient().listSessions(connection(origin), cursor = "opaque-page-2")
+
+        assertIs<SessionListResult.InvalidResponse>(result)
     }
 
     @Test
@@ -653,8 +773,27 @@ class DeviceHttpClientTest {
         val manifest = assertIs<SessionManifestResult.Manifest>(result).value
         assertEquals("/api/v4/sessions/01991b70-7c88-7123-9234-123456789abc", requestedPath)
         assertEquals("test take", manifest.displayName)
-        assertEquals(3, manifest.artifacts.size)
-        assertEquals("video.raw-side-by-side", manifest.artifacts.last().role)
+        assertEquals(
+            listOf("imu.samples", "frames.index", "video.left", "video.right", "audio.wav"),
+            manifest.artifacts.map { it.role },
+        )
+    }
+
+    @Test
+    fun `rejects legacy raw side-by-side manifest returned by current v4 session endpoint`() {
+        val origin = startServer { exchange ->
+            exchange.respondJson(200, rawSideBySideSessionManifestJson())
+        }
+
+        val result = DeviceHttpClient().getSessionManifest(
+            connection(origin),
+            "01991b70-7c88-7123-9234-123456789abc",
+        )
+
+        assertEquals(
+            "video.layout must be split-eyes",
+            assertIs<SessionManifestResult.InvalidResponse>(result).message,
+        )
     }
 
     @Test
@@ -904,6 +1043,11 @@ class DeviceHttpClientTest {
                 previewCapable = true,
                 rangeDownloadCapable = true,
                 networkMutationCapable = false,
+                sessionListCapable = true,
+                sessionDetailCapable = true,
+                artifactDownloadCapable = true,
+                captureStatusCapable = true,
+                sessionDeletionCapable = false,
                 volumeId = "56005c52-31f1-4dac-91cd-d8eafd737d1c",
                 totalBytes = 1024L,
                 availableBytes = 512L,
@@ -1057,7 +1201,8 @@ class DeviceHttpClientTest {
     private fun sessionListJson(): String {
         return """
             {
-              "schema": "ylx.session-list.v2",
+              "schema": "ylx.session-list.v3",
+              "catalog_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "items": [
                 {
                   "session_id": "01991b70-7c88-7123-9234-123456789abc",
@@ -1122,6 +1267,10 @@ class DeviceHttpClientTest {
     }
 
     private fun deviceSessionManifestJson(): String {
+        return fixtureText("session-manifest-v2-recorded.json")
+    }
+
+    private fun rawSideBySideSessionManifestJson(): String {
         return """
             {
               "schema": "ylx.device-session.v2",

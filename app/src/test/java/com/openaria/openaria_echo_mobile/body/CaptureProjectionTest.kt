@@ -93,10 +93,9 @@ class CaptureProjectionTest {
     }
 
     @Test
-    fun `clears receipt and pending command on new authority epoch`() {
+    fun `clears pending command on new authority epoch`() {
         val current = CaptureProjectionState(
             snapshot = snapshot(revision = 7, deviceState = "recording", hasActiveRecording = true),
-            safeSwapReceipt = safeSwapReceipt(),
             pendingCommand = CapturePendingCommand(CaptureCommandKind.STOP, "stop-1"),
         )
         val event = event(
@@ -111,10 +110,8 @@ class CaptureProjectionTest {
 
         assertFalse(result.accepted)
         assertTrue(result.requiresCaptureReconciliation)
-        assertTrue(result.requiresSafeSwapReconciliation)
         assertTrue(result.clearedEpochBoundState)
         assertNull(result.state.snapshot)
-        assertNull(result.state.safeSwapReceipt)
         assertNull(result.state.pendingCommand)
         assertEquals(EPOCH_B, result.state.lastAuthorityEpoch)
         assertEquals(1L, result.state.lastSourceRevision)
@@ -139,37 +136,28 @@ class CaptureProjectionTest {
     }
 
     @Test
-    fun `safe swap event stores typed receipt without changing capture snapshot`() {
+    fun `legacy receipt payload cannot form current product state`() {
         val current = CaptureProjectionState(snapshot = snapshot(revision = 7, deviceState = "idle"))
-        val receipt = safeSwapReceipt()
         val event = event(
             deliveryId = "1042",
             revision = 8,
             type = "safe_swap",
             sessionId = SESSION_ID,
-            safeSwapReceipt = receipt,
+            safeSwapReceipt = safeSwapReceipt(),
         )
 
         val result = CaptureProjection.applyStreamEvent(current, event)
 
         assertTrue(result.accepted)
-        assertFalse(result.requiresCaptureReconciliation)
-        assertFalse(result.requiresSafeSwapReconciliation)
-        assertSame(receipt, result.state.safeSwapReceipt)
-        assertEquals("idle", result.state.snapshot?.deviceState)
-    }
-
-    @Test
-    fun `rejects safe swap receipt from older authority epoch`() {
-        val current = CaptureProjectionState(
-            snapshot = snapshot(epoch = EPOCH_A, revision = 7, deviceState = "idle"),
-            safeSwapReceipt = safeSwapReceipt().copy(authorityEpoch = EPOCH_A, sourceRevision = 7),
+        assertTrue(result.requiresCaptureReconciliation)
+        assertEquals(
+            current.copy(
+                lastEventId = "1042",
+                lastAuthorityEpoch = EPOCH_A,
+                lastSourceRevision = 8,
+            ),
+            result.state,
         )
-        val staleReceipt = safeSwapReceipt().copy(authorityEpoch = EPOCH_B, sourceRevision = 8)
-
-        val result = CaptureProjection.applySafeSwapReceipt(current, staleReceipt)
-
-        assertNull(result.safeSwapReceipt)
     }
 
     @Test

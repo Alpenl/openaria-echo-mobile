@@ -11,7 +11,11 @@ class UiShellSourceTest {
     fun `app shell uses cutout aware safe drawing and fixed bottom navigation`() {
         val source = echoAppSource()
 
-        assertContains(source, "WindowInsets.safeDrawing.asPaddingValues()")
+        assertContains(source, "WindowInsets.safeDrawing.asPaddingValues(")
+        assertContains(source, "Density(context.resources.displayMetrics.density, 1f)")
+        assertContains(source, "val layoutDirection = LocalLayoutDirection.current")
+        assertContains(source, "safeDrawing.calculateLeftPadding(layoutDirection) + 12.dp")
+        assertContains(source, "safeDrawing.calculateRightPadding(layoutDirection) + 12.dp")
         assertContains(source, "bottomNavigationReserve = safeDrawing.calculateBottomPadding() + 86.dp")
         assertFalse(
             source.contains("WindowInsets.systemBars.asPaddingValues()"),
@@ -110,6 +114,26 @@ class UiShellSourceTest {
         assertContains(source, "private fun updateInstallDisabledReason")
         assertContains(source, "update_install_disabled_no_update")
         assertContains(source, "update_install_disabled_busy")
+    }
+
+    @Test
+    fun `app update stays in app and raw diagnostics are failure only`() {
+        val source = echoAppSource()
+        val manager = File("src/main/java/com/openaria/openaria_echo_mobile/AppUpdateManager.java").readText()
+        val localizedResources =
+            listOf(
+                File("src/main/res/values/strings.xml"),
+                File("src/main/res/values-en/strings.xml"),
+            ).joinToString("\n") { it.readText() }
+
+        assertContains(
+            source,
+            "state.phase == AppUpdateManager.Phase.FAILED && state.message.isNotBlank()",
+        )
+        assertFalse(localizedResources.contains("GitHub Releases"))
+        assertFalse(manager.contains("Tap Check to query GitHub Releases"))
+        assertContains(localizedResources, "在应用内检查并下载更新")
+        assertContains(localizedResources, "download updates in the app")
     }
 
     @Test
@@ -315,6 +339,89 @@ class UiShellSourceTest {
         assertContains(uiSource, "summary.verificationVerdict == \"usable\"")
         assertContains(uiSource, "summary.producerOutcome != \"sealed\" || summary.verificationVerdict == \"unusable\"")
         assertContains(uiSource, "sessions_filter_empty_title")
+    }
+
+    @Test
+    fun `session ledger UI delegates transport jobs and recovery to the revision-aware controller`() {
+        val uiSource = echoAppSource()
+        val controllerSource = File(
+            "src/main/java/com/openaria/openaria_echo_mobile/body/api/SessionLedgerController.kt",
+        ).readText()
+
+        assertContains(uiSource, "SessionLedgerController<DeviceConnection, DeviceAdmissionCancellation>")
+        assertContains(uiSource, "SessionFilterIntent.InheritCurrentFilter")
+        assertContains(uiSource, "sessionLedgerController.refresh")
+        assertContains(uiSource, "sessionLedgerController::loadMore")
+        assertContains(uiSource, "sessionLedgerController.cancelInFlight()")
+        assertContains(uiSource, "sessionLedgerController.cancelLoadMore()")
+        assertContains(uiSource, "sessionLedgerController.reset()")
+        assertContains(controllerSource, "SessionLedgerRepository()")
+        assertContains(controllerSource, "repository.beginRefresh")
+        assertContains(controllerSource, "repository.beginLoadMore()")
+        assertContains(controllerSource, "SessionLedgerApplyResult.RefreshRequired")
+        assertContains(controllerSource, "SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED")
+        assertContains(controllerSource, "pendingRefresh = PendingSessionLedgerRefresh")
+        assertContains(controllerSource, "requestGeneration != operationGeneration")
+        assertContains(controllerSource, "currentTakeId")
+        assertContains(uiSource, "resetSessionLedgerForConnectionChange()")
+        assertContains(uiSource, "page.readOnlyDiagnosticPresentations()")
+        assertFalse(uiSource.contains("sessionLedgerRepository"))
+        assertFalse(uiSource.contains("sessionLoadMoreJob"))
+        assertFalse(uiSource.contains("mergeSessionRefresh"))
+        assertFalse(uiSource.contains("appendSessionPage"))
+    }
+
+    @Test
+    fun `session ledger lifecycle synchronously fences paused and replaced requests`() {
+        val uiSource = echoAppSource()
+        val lifecyclePauseBlock = uiSource
+            .substringAfter("Lifecycle.Event.ON_PAUSE,")
+            .substringBefore("else -> Unit")
+        val replaceConnectionBlock = uiSource
+            .substringAfter("fun replaceBodyConnection")
+            .substringBefore("fun admitBody")
+        val admitConnectionBlock = uiSource
+            .substringAfter("fun admitBody")
+            .substringBefore("fun isCurrentConnection")
+
+        assertContains(lifecyclePauseBlock, "cancelSessionLedgerInFlight()")
+        assertContains(replaceConnectionBlock, "resetSessionLedgerForConnectionChange()")
+        assertContains(admitConnectionBlock, "resetSessionLedgerForConnectionChange()")
+    }
+
+    @Test
+    fun `paused late capture responses cannot refresh sessions and resume refreshes authoritatively`() {
+        val uiSource = echoAppSource()
+        val refreshEntryBlock = uiSource
+            .substringAfter("suspend fun refreshSessionLedger(")
+            .substringBefore("suspend fun reconcileCaptureStatus")
+        val startCaptureBlock = uiSource
+            .substringAfter("fun startCaptureWithMode")
+            .substringBefore("val startCapture:")
+        val stopCaptureBlock = uiSource
+            .substringAfter("val stopCapture:")
+            .substringBefore("val loadSessionManifest:")
+
+        assertContains(
+            refreshEntryBlock,
+            "if (!appInForeground || !isCurrentConnection(activeConnection, generation)) return",
+        )
+        assertContains(startCaptureBlock, "refreshSessionLedger(activeConnection, generation)")
+        assertContains(stopCaptureBlock, "refreshSessionLedger(activeConnection, generation)")
+        assertFalse(startCaptureBlock.contains("deviceClient.listSessions"))
+        assertFalse(stopCaptureBlock.contains("deviceClient.listSessions"))
+        assertContains(
+            uiSource,
+            """
+            LaunchedEffect(bodyConnection, connectionGeneration, appInForeground) {
+                val activeConnection = bodyConnection ?: return@LaunchedEffect
+                if (!appInForeground) return@LaunchedEffect
+                val generation = connectionGeneration
+                refreshSessionLedger(activeConnection, generation)
+                refreshCameraFocus(activeConnection, generation)
+            }
+            """.trimIndent().prependIndent("    "),
+        )
     }
 
     @Test

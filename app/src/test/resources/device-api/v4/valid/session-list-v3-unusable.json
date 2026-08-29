@@ -1,0 +1,41 @@
+{
+  "schema": "ylx.session-list.v3",
+  "catalog_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "items": [
+    {
+      "session_id": "01991b70-7c88-7123-9234-123456789abc",
+      "producer_outcome": "sealed",
+      "take_id": "01991b70-7c88-7456-9234-123456789abc",
+      "take_sequence": 1,
+      "continuation_of": null,
+      "display_name": "unusable test take",
+      "device": {
+        "device_id": "56005c52-31f1-4dac-91cd-d8eafd737d1c",
+        "device_label": "YLX-00ABCDEF"
+      },
+      "started_at": "2026-08-28T04:00:00Z",
+      "ended_at": "2026-08-28T04:00:10Z",
+      "duration_seconds": 10.0,
+      "total_bytes": 2048,
+      "verification": {
+        "actor": "gateway",
+        "validator": {
+          "name": "openaria-conductor-device-session-v2-integrity",
+          "version": "1",
+          "build_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "verified_at": "2026-08-28T04:00:12Z",
+        "verdict": "unusable",
+        "diagnostics": [
+          {
+            "code": "artifact_digest_mismatch",
+            "summary": "artifact content SHA-256 does not match the manifest"
+          }
+        ]
+      }
+    }
+  ],
+  "diagnostics": [],
+  "next_cursor": null
+}

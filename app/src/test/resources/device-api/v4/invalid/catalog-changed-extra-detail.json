@@ -1,0 +1,13 @@
+{
+  "schema": "ylx.api-error.v2",
+  "error": {
+    "code": "catalog_changed",
+    "message": "The session catalog changed while paging.",
+    "request_id": "e989c6e5-14cc-4faa-9715-5abdb6b0355d",
+    "retryable": true,
+    "details": {
+      "catalog_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "previous_catalog_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  }
+}

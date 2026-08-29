@@ -121,12 +121,25 @@ class SessionLedgerRepository {
             return SessionLedgerApplyResult.Ignored
         }
         activeRefresh = null
+        if (request.catalogRecovery && result is SessionListResult.CatalogChanged) {
+            discardChain(request.takeId)
+            return SessionLedgerApplyResult.Failed(
+                SessionLedgerFailure.Protocol(
+                    reason = SessionProtocolFailureReason.CATALOG_RECOVERY_REPEATED,
+                    catalogRevision = result.catalogRevision,
+                ),
+            )
+        }
         pendingRefresh?.let { pending ->
             pendingRefresh = null
             return SessionLedgerApplyResult.RefreshRequired(
                 takeId = pending.takeId,
                 limit = pending.limit,
-                catalogRecovery = pending.catalogRecovery,
+                reason = if (pending.catalogRecovery) {
+                    SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED
+                } else {
+                    SessionLedgerRefreshReason.REQUESTED
+                },
             )
         }
 
@@ -134,7 +147,9 @@ class SessionLedgerRepository {
             is SessionListResult.Page -> {
                 if (!result.value.matches(request)) {
                     return SessionLedgerApplyResult.Failed(
-                        SessionListResult.InvalidResponse("session page request identity mismatch"),
+                        SessionLedgerFailure.Protocol(
+                            SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH,
+                        ),
                     )
                 }
                 page = normalizeFirstPage(result.value)
@@ -144,21 +159,13 @@ class SessionLedgerRepository {
             }
             is SessionListResult.CatalogChanged -> {
                 discardChain(request.takeId)
-                if (request.catalogRecovery) {
-                    SessionLedgerApplyResult.Failed(
-                        SessionListResult.InvalidResponse(
-                            "catalog_changed repeated for a request without cursor",
-                        ),
-                    )
-                } else {
-                    SessionLedgerApplyResult.RefreshRequired(
-                        takeId = request.takeId,
-                        limit = request.limit,
-                        catalogRecovery = true,
-                    )
-                }
+                SessionLedgerApplyResult.RefreshRequired(
+                    takeId = request.takeId,
+                    limit = request.limit,
+                    reason = SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED,
+                )
             }
-            else -> SessionLedgerApplyResult.Failed(result)
+            else -> SessionLedgerApplyResult.Failed(SessionLedgerFailure.Transport(result))
         }
     }
 
@@ -186,7 +193,9 @@ class SessionLedgerRepository {
                 val next = result.value
                 if (!next.matches(request)) {
                     SessionLedgerApplyResult.Failed(
-                        SessionListResult.InvalidResponse("session page request identity mismatch"),
+                        SessionLedgerFailure.Protocol(
+                            SessionProtocolFailureReason.REQUEST_IDENTITY_MISMATCH,
+                        ),
                     )
                 } else if (next.contract != SessionListContract.V3 ||
                     next.catalogRevision != request.catalogRevision
@@ -195,21 +204,27 @@ class SessionLedgerRepository {
                     SessionLedgerApplyResult.RefreshRequired(
                         takeId = request.takeId,
                         limit = request.limit,
-                        catalogRecovery = true,
+                        reason = SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED,
                     )
                 } else if (next.nextCursor != null &&
                     (next.nextCursor == request.cursor || next.nextCursor in consumedCursors)
                 ) {
                     SessionLedgerApplyResult.Failed(
-                        SessionListResult.InvalidResponse("session page cursor did not advance"),
+                        SessionLedgerFailure.Protocol(
+                            SessionProtocolFailureReason.CURSOR_DID_NOT_ADVANCE,
+                        ),
                     )
                 } else if (hasCrossPageDuplicate(current, next)) {
                     SessionLedgerApplyResult.Failed(
-                        SessionListResult.InvalidResponse("session page repeats an accumulated identity"),
+                        SessionLedgerFailure.Protocol(
+                            SessionProtocolFailureReason.DUPLICATE_IDENTITY,
+                        ),
                     )
                 } else if (hasBoundaryInversion(current, next)) {
                     SessionLedgerApplyResult.Failed(
-                        SessionListResult.InvalidResponse("session page boundary is not newest-first"),
+                        SessionLedgerFailure.Protocol(
+                            SessionProtocolFailureReason.NEWEST_FIRST_BOUNDARY_INVERTED,
+                        ),
                     )
                 } else {
                     request.cursor?.let(consumedCursors::add)
@@ -222,10 +237,10 @@ class SessionLedgerRepository {
                 SessionLedgerApplyResult.RefreshRequired(
                     takeId = request.takeId,
                     limit = request.limit,
-                    catalogRecovery = true,
+                    reason = SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED,
                 )
             }
-            else -> SessionLedgerApplyResult.Failed(result)
+            else -> SessionLedgerApplyResult.Failed(SessionLedgerFailure.Transport(result))
         }
     }
 
@@ -334,9 +349,34 @@ sealed interface SessionLedgerApplyResult {
     data class RefreshRequired(
         val takeId: String?,
         val limit: Int,
-        val catalogRecovery: Boolean,
+        val reason: SessionLedgerRefreshReason,
     ) : SessionLedgerApplyResult
-    data class Failed(val result: SessionListResult) : SessionLedgerApplyResult
+    data class Failed(val failure: SessionLedgerFailure) : SessionLedgerApplyResult
+}
+
+enum class SessionLedgerRefreshReason {
+    REQUESTED,
+    CATALOG_RECOVERY_REQUIRED,
+}
+
+sealed interface SessionLedgerFailure {
+    data class Transport(val result: SessionListResult) : SessionLedgerFailure
+
+    data object UnexpectedTransport : SessionLedgerFailure
+
+    data class Protocol(
+        val reason: SessionProtocolFailureReason,
+        val diagnosticDetail: String? = null,
+        val catalogRevision: String? = null,
+    ) : SessionLedgerFailure
+}
+
+enum class SessionProtocolFailureReason {
+    REQUEST_IDENTITY_MISMATCH,
+    CATALOG_RECOVERY_REPEATED,
+    CURSOR_DID_NOT_ADVANCE,
+    DUPLICATE_IDENTITY,
+    NEWEST_FIRST_BOUNDARY_INVERTED,
 }
 
 private data class PendingSessionRefresh(

@@ -45,7 +45,10 @@ class SessionLedgerRepositoryTest {
         val refreshRequired = assertIs<SessionLedgerApplyResult.RefreshRequired>(outcome)
         assertEquals(TAKE_ID, refreshRequired.takeId)
         assertEquals(50, refreshRequired.limit)
-        assertEquals(true, refreshRequired.catalogRecovery)
+        assertEquals(
+            SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED,
+            refreshRequired.reason,
+        )
         assertNull(repository.page)
         val refresh = requireNotNull(
             repository.beginRefresh(
@@ -68,7 +71,10 @@ class SessionLedgerRepositoryTest {
 
         val refreshRequired = assertIs<SessionLedgerApplyResult.RefreshRequired>(outcome)
         assertEquals(TAKE_ID, refreshRequired.takeId)
-        assertEquals(true, refreshRequired.catalogRecovery)
+        assertEquals(
+            SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED,
+            refreshRequired.reason,
+        )
         assertNull(repository.page)
         val recovery = requireNotNull(
             repository.beginRefresh(
@@ -99,12 +105,39 @@ class SessionLedgerRepositoryTest {
         val outcome = repository.complete(recovery, SessionListResult.CatalogChanged(REVISION_B))
 
         val failed = assertIs<SessionLedgerApplyResult.Failed>(outcome)
-        assertEquals(
-            "catalog_changed repeated for a request without cursor",
-            assertIs<SessionListResult.InvalidResponse>(failed.result).message,
-        )
+        val failure = assertIs<SessionLedgerFailure.Protocol>(failed.failure)
+        assertEquals(SessionProtocolFailureReason.CATALOG_RECOVERY_REPEATED, failure.reason)
+        assertEquals(REVISION_B, failure.catalogRevision)
+        assertNull(failure.diagnosticDetail)
         assertNull(repository.page)
         assertFalse(repository.isRefreshing)
+    }
+
+    @Test
+    fun `queued ordinary refresh cannot hide repeated catalog change during recovery`() {
+        val repository = repositoryWithFirstPage()
+        val append = requireNotNull(repository.beginLoadMore())
+        val refreshRequired = assertIs<SessionLedgerApplyResult.RefreshRequired>(
+            repository.complete(append, SessionListResult.CatalogChanged(REVISION_B)),
+        )
+        val recovery = requireNotNull(
+            repository.beginRefresh(
+                takeId = refreshRequired.takeId,
+                limit = refreshRequired.limit,
+                catalogRecovery = true,
+            ),
+        )
+        assertNull(repository.beginRefresh(takeId = TAKE_ID))
+
+        val failed = assertIs<SessionLedgerApplyResult.Failed>(
+            repository.complete(recovery, SessionListResult.CatalogChanged(REVISION_B)),
+        )
+
+        val failure = assertIs<SessionLedgerFailure.Protocol>(failed.failure)
+        assertEquals(SessionProtocolFailureReason.CATALOG_RECOVERY_REPEATED, failure.reason)
+        assertEquals(REVISION_B, failure.catalogRevision)
+        assertFalse(repository.isRefreshing)
+        assertNull(repository.page)
     }
 
     @Test
@@ -227,7 +260,7 @@ class SessionLedgerRepositoryTest {
         val refreshRequired = assertIs<SessionLedgerApplyResult.RefreshRequired>(outcome)
         assertEquals(TAKE_ID_B, refreshRequired.takeId)
         assertEquals(50, refreshRequired.limit)
-        assertEquals(false, refreshRequired.catalogRecovery)
+        assertEquals(SessionLedgerRefreshReason.REQUESTED, refreshRequired.reason)
         assertEquals(REVISION_A, repository.page?.catalogRevision)
         assertEquals(listOf(sessionId(1)), repository.page?.items?.map { it.sessionId })
 
@@ -235,7 +268,7 @@ class SessionLedgerRepositoryTest {
             repository.beginRefresh(
                 takeId = refreshRequired.takeId,
                 limit = refreshRequired.limit,
-                catalogRecovery = refreshRequired.catalogRecovery,
+                catalogRecovery = false,
             ),
         )
         assertIs<SessionLedgerApplyResult.Applied>(
@@ -262,8 +295,8 @@ class SessionLedgerRepositoryTest {
 
         val failed = assertIs<SessionLedgerApplyResult.Failed>(outcome)
         assertEquals(
-            "session page repeats an accumulated identity",
-            assertIs<SessionListResult.InvalidResponse>(failed.result).message,
+            SessionProtocolFailureReason.DUPLICATE_IDENTITY,
+            assertIs<SessionLedgerFailure.Protocol>(failed.failure).reason,
         )
         assertEquals(listOf(sessionId(1)), repository.page?.items?.map { it.sessionId })
         assertEquals(listOf(quarantineId(1)), repository.page?.diagnostics?.map { it.quarantineId })
@@ -284,8 +317,8 @@ class SessionLedgerRepositoryTest {
 
         val failed = assertIs<SessionLedgerApplyResult.Failed>(outcome)
         assertEquals(
-            "session page boundary is not newest-first",
-            assertIs<SessionListResult.InvalidResponse>(failed.result).message,
+            SessionProtocolFailureReason.NEWEST_FIRST_BOUNDARY_INVERTED,
+            assertIs<SessionLedgerFailure.Protocol>(failed.failure).reason,
         )
         assertEquals(listOf(sessionId(1)), repository.page?.items?.map { it.sessionId })
         assertEquals(listOf(quarantineId(1)), repository.page?.diagnostics?.map { it.quarantineId })
@@ -310,8 +343,8 @@ class SessionLedgerRepositoryTest {
 
         val failed = assertIs<SessionLedgerApplyResult.Failed>(outcome)
         assertEquals(
-            "session page cursor did not advance",
-            assertIs<SessionListResult.InvalidResponse>(failed.result).message,
+            SessionProtocolFailureReason.CURSOR_DID_NOT_ADVANCE,
+            assertIs<SessionLedgerFailure.Protocol>(failed.failure).reason,
         )
         assertEquals(listOf(sessionId(1)), repository.page?.items?.map { it.sessionId })
         assertEquals("cursor-2", repository.page?.nextCursor)
@@ -351,8 +384,8 @@ class SessionLedgerRepositoryTest {
 
         val failed = assertIs<SessionLedgerApplyResult.Failed>(outcome)
         assertEquals(
-            "session page cursor did not advance",
-            assertIs<SessionListResult.InvalidResponse>(failed.result).message,
+            SessionProtocolFailureReason.CURSOR_DID_NOT_ADVANCE,
+            assertIs<SessionLedgerFailure.Protocol>(failed.failure).reason,
         )
         assertEquals(listOf(sessionId(1), sessionId(2)), repository.page?.items?.map { it.sessionId })
         assertEquals("cursor-3", repository.page?.nextCursor)
@@ -454,7 +487,18 @@ class SessionLedgerRepositoryTest {
             endedAt = "2026-08-28T04:$minute:10Z",
             durationSeconds = 10.0,
             totalBytes = 2048,
-            verificationVerdict = "usable",
+            verification = GatewayVerification(
+                actor = "gateway",
+                validator = GatewayValidatorIdentity(
+                    name = "test-validator",
+                    version = "1",
+                    buildSha256 = "a".repeat(64),
+                ),
+                manifestSha256 = "b".repeat(64),
+                verifiedAt = "2026-08-28T04:$minute:11Z",
+                verdict = GatewayVerificationVerdict.USABLE,
+                diagnostics = emptyList(),
+            ),
         )
     }
 

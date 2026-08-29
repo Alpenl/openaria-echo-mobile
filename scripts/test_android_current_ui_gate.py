@@ -15,6 +15,13 @@ GESTURAL = "com.android.internal.systemui.navbar.gestural"
 THREE_BUTTON = "com.android.internal.systemui.navbar.threebutton"
 CORNER_CUTOUT = "com.android.internal.display.cutout.emulation.corner"
 TALL_CUTOUT = "com.android.internal.display.cutout.emulation.tall"
+PROFILES = (
+    "small_gesture",
+    "small_three_button",
+    "landscape_gesture",
+    "landscape_three_button",
+    "cutout_three_button",
+)
 
 
 FAKE_ADB = r'''#!/usr/bin/env python3
@@ -210,6 +217,7 @@ def pull(args: list[str]) -> int:
             "small_gesture",
             "small_three_button",
             "landscape_gesture",
+            "landscape_three_button",
             "cutout_three_button",
         )
         if filename.startswith(candidate + "-")
@@ -420,7 +428,7 @@ class AndroidCurrentUiGateBehaviorTest(unittest.TestCase):
         result = self.run_gate()
 
         self.assertEqual(0, result.returncode, result.stdout)
-        for profile in ("small_gesture", "small_three_button", "landscape_gesture", "cutout_three_button"):
+        for profile in PROFILES:
             self.assertIn("profile_exit_status=0", self.read_result(profile))
             self.assertTrue((self.evidence / f"{profile}.png").is_file())
             self.assertTrue((self.evidence / f"{profile}.json").is_file())
@@ -436,7 +444,7 @@ class AndroidCurrentUiGateBehaviorTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout)
         self.assertIn("surface_rotation=0", (self.evidence / "initial-state-snapshot.env").read_text(encoding="utf-8"))
         self.assertEqual(
-            ["small_gesture", "small_three_button", "landscape_gesture", "cutout_three_button"],
+            list(PROFILES),
             self.calls_path.read_text(encoding="utf-8").splitlines(),
         )
         self.assert_initial_state_restored()
@@ -450,7 +458,7 @@ class AndroidCurrentUiGateBehaviorTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stdout)
         self.assertEqual(
-            ["small_gesture", "small_three_button", "landscape_gesture", "cutout_three_button"],
+            list(PROFILES),
             self.calls_path.read_text(encoding="utf-8").splitlines(),
         )
         self.assertIn(["shell", "wm", "fixed-to-user-rotation", "enabled"], self.adb_calls())
@@ -460,12 +468,27 @@ class AndroidCurrentUiGateBehaviorTest(unittest.TestCase):
         result = self.run_gate()
 
         self.assertEqual(0, result.returncode, result.stdout)
-        for profile in ("small_gesture", "small_three_button", "landscape_gesture", "cutout_three_button"):
+        for profile in PROFILES:
             self.assertTrue((self.evidence / f"{profile}.png").is_file())
             self.assertTrue((self.evidence / f"{profile}.json").is_file())
         self.assertFalse(any(call and call[0] == "exec-out" for call in self.adb_calls()))
-        self.assertEqual(8, sum(1 for call in self.adb_calls() if call and call[0] == "pull"))
+        self.assertEqual(10, sum(1 for call in self.adb_calls() if call and call[0] == "pull"))
         self.assert_initial_state_restored()
+
+    def test_landscape_three_button_uses_short_rotated_safe_area_profile(self) -> None:
+        result = self.run_gate()
+
+        self.assertEqual(0, result.returncode, result.stdout)
+        preflight = (self.evidence / "landscape_three_button-preflight-state.txt").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("expected_wm_size=720x1280", preflight)
+        self.assertIn("expected_density=320", preflight)
+        self.assertIn("expected_surface_rotation=1", preflight)
+        self.assertIn(f"expected_navigation_overlays={THREE_BUTTON}", preflight)
+        self.assertIn("expected_navigation_mode=0", preflight)
+        self.assertIn("expected_cutout_resource=absent", preflight)
+        self.assertIn("gate=PASS", preflight)
 
     def test_instrumentation_failure_preserves_code_and_finally_collects_evidence(self) -> None:
         result = self.run_gate(FAKE_GRADLE_FAIL_PROFILE="small_three_button")

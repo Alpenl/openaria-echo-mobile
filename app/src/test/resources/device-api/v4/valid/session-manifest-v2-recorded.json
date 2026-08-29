@@ -1,0 +1,137 @@
+{
+  "schema": "ylx.device-session.v2",
+  "manifest_id": "01991b70-7c88-7456-9234-123456789abc",
+  "sealed": true,
+  "sealed_at": "2026-08-28T04:00:10Z",
+  "session_id": "01991b70-7c88-7123-9234-123456789abc",
+  "volume_id": "56005c52-31f1-4dac-91cd-d8eafd737d1c",
+  "capture_mode": "production",
+  "display_name": "test take",
+  "device": {
+    "device_id": "550e8400-e29b-41d4-a716-446655440000",
+    "device_label": "YLX-00ABCDEF",
+    "hardware_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "platform": "rdk-x5",
+    "software_version": "0.11.0",
+    "commit": "b7d044d4bbc5ef0e335d2789c54f7d837d1a3e01"
+  },
+  "time": {
+    "started_at": "2026-08-28T04:00:00Z",
+    "ended_at": "2026-08-28T04:00:10Z",
+    "timezone": "Asia/Shanghai",
+    "duration_seconds": 10
+  },
+  "take": {
+    "take_id": "01991b70-7c88-7456-9234-123456789abc",
+    "sequence": 1,
+    "continuation_of": null
+  },
+  "camera": {
+    "width": 3840,
+    "height": 1080,
+    "eye_width": 1920,
+    "sensor_fps": 60,
+    "frame_decimation": 2,
+    "effective_fps": 30,
+    "coordinate_frame": "opencv_optical"
+  },
+  "video": {
+    "layout": "split-eyes",
+    "codec": "h264",
+    "container": "mp4",
+    "segments": [
+      {
+        "index": 0,
+        "start_frame": 0,
+        "end_frame": 300,
+        "start_time_seconds": 0,
+        "end_time_seconds": 10,
+        "artifacts": {
+          "left": {
+            "artifact_id": "1111111111111111111111111111111111111111111111111111111111111111",
+            "role": "video.left",
+            "path": "video/left_00000.mp4",
+            "media_type": "video/mp4",
+            "bytes": 1024,
+            "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "right": {
+            "artifact_id": "2222222222222222222222222222222222222222222222222222222222222222",
+            "role": "video.right",
+            "path": "video/right_00000.mp4",
+            "media_type": "video/mp4",
+            "bytes": 1024,
+            "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        }
+      }
+    ]
+  },
+  "imu": {
+    "artifact": {
+      "artifact_id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "role": "imu.samples",
+      "path": "imu/imu.ndjson",
+      "media_type": "application/x-ndjson",
+      "bytes": 128,
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "sample_count": 2000,
+    "units": "raw_int16",
+    "coordinate_frame": "raw_device_axes"
+  },
+  "frames": {
+    "artifact": {
+      "artifact_id": "4444444444444444444444444444444444444444444444444444444444444444",
+      "role": "frames.index",
+      "path": "imu/frames.ndjson",
+      "media_type": "application/x-ndjson",
+      "bytes": 128,
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    "count": 300
+  },
+  "audio": {
+    "state": "recorded",
+    "requested_mode": "enabled",
+    "resolved_mode": "enabled",
+    "codec": "pcm_s16le",
+    "container": "wav",
+    "sample_format": "S16_LE",
+    "sample_rate": 48000,
+    "channels": 2,
+    "sample_count": 480000,
+    "sync": {
+      "time_base": "host_monotonic",
+      "start_time_seconds": 0,
+      "end_time_seconds": 10,
+      "video_time_reference": "session_time_seconds"
+    },
+    "segments": [
+      {
+        "index": 0,
+        "start_sample": 0,
+        "end_sample": 480000,
+        "start_time_seconds": 0,
+        "end_time_seconds": 10,
+        "pcm_payload_bytes": 1920000,
+        "wav_header_bytes": 44,
+        "artifact": {
+          "artifact_id": "5555555555555555555555555555555555555555555555555555555555555555",
+          "role": "audio.wav",
+          "path": "audio/audio_00000.wav",
+          "media_type": "audio/wav",
+          "bytes": 1920044,
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        }
+      }
+    ]
+  },
+  "logs": [],
+  "integrity": {
+    "verified_at": "2026-08-28T04:00:11Z",
+    "dropped_frames": 0,
+    "drop_events": [],
+    "fatal_errors": []
+  }
+}

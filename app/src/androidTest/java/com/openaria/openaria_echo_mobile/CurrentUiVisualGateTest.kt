@@ -10,12 +10,20 @@ import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
+import androidx.annotation.StringRes
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -24,6 +32,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -188,6 +197,51 @@ class CurrentUiVisualGateTest {
             topStatus.boundsInRoot.bottom <= tabTops.min() + GEOMETRY_TOLERANCE_PX,
         )
 
+        val previewStatusBody = compose
+            .onNodeWithText(activity.localizedString(R.string.preview_no_fake), useUnmergedTree = true)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+        assertTextHasNoVisualOverflow("preview status body", previewStatusBody)
+        assertRectInside("preview status body", previewStatusBody.boundsInRoot, safeBounds)
+        assertNoPositiveOverlap("top status", topStatus.boundsInRoot, "preview status body", previewStatusBody.boundsInRoot)
+        assertTrue(
+            "Preview status body must remain above fixed primary navigation.",
+            previewStatusBody.boundsInRoot.bottom <= tabTops.min() + GEOMETRY_TOLERANCE_PX,
+        )
+
+        val previewControls = PREVIEW_CONTROL_RESOURCES.associate { resourceId ->
+            val label = activity.localizedString(resourceId)
+            val bounds = compose
+                .onNodeWithContentDescription(label, useUnmergedTree = true)
+                .assertIsDisplayed()
+                .fetchSemanticsNode()
+                .boundsInRoot
+            assertRectInside("preview control $label", bounds, safeBounds)
+            assertTrue(
+                "Preview control $label must remain above fixed primary navigation.",
+                bounds.bottom <= tabTops.min() + GEOMETRY_TOLERANCE_PX,
+            )
+            label to bounds
+        }
+        previewControls.forEach { (label, bounds) ->
+            assertNoPositiveOverlap("top status", topStatus.boundsInRoot, label, bounds)
+            assertNoPositiveOverlap("preview status body", previewStatusBody.boundsInRoot, label, bounds)
+            tabs.forEachIndexed { index, tab ->
+                assertNoPositiveOverlap("navigation tab $index", tab.boundsInRoot, label, bounds)
+            }
+        }
+        val previewControlEntries = previewControls.entries.toList()
+        previewControlEntries.indices.forEach { leftIndex ->
+            ((leftIndex + 1) until previewControlEntries.size).forEach { rightIndex ->
+                val left = previewControlEntries[leftIndex]
+                val right = previewControlEntries[rightIndex]
+                assertNoPositiveOverlap(left.key, left.value, right.key, right.value)
+            }
+        }
+        compose
+            .onAllNodesWithText(activity.localizedString(R.string.preview_contract_note), useUnmergedTree = true)
+            .assertCountEquals(0)
+
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(
             "The current APK target window must still be focused immediately before screenshot capture.",
@@ -250,6 +304,13 @@ class CurrentUiVisualGateTest {
             .put("cutoutInsetsPx", insetsJson(cutoutInsets.left, cutoutInsets.top, cutoutInsets.right, cutoutInsets.bottom))
             .put("cutoutBoundsCount", windowInsets.displayCutout?.boundingRects?.size ?: 0)
             .put("topStatusBoundsPx", rectJson(topStatus.boundsInRoot))
+            .put("previewStatusBodyBoundsPx", rectJson(previewStatusBody.boundsInRoot))
+            .put(
+                "previewControlBoundsPx",
+                JSONObject().apply {
+                    previewControls.forEach { (label, bounds) -> put(label, rectJson(bounds)) }
+                },
+            )
             .put(
                 "navigationTabBoundsPx",
                 JSONArray().apply {
@@ -368,6 +429,13 @@ class CurrentUiVisualGateTest {
         return context.resources.getInteger(resourceId)
     }
 
+    private fun Context.localizedString(@StringRes resourceId: Int): String {
+        val localizedConfiguration = Configuration(resources.configuration).apply {
+            setLocale(Locale.forLanguageTag("zh-CN"))
+        }
+        return createConfigurationContext(localizedConfiguration).getString(resourceId)
+    }
+
     private fun assertRectInside(name: String, actual: Rect, safe: Rect) {
         assertTrue("$name has an empty or invalid bound: $actual", actual.width > 0f && actual.height > 0f)
         assertTrue("$name crosses the safe left edge: actual=$actual safe=$safe", actual.left + GEOMETRY_TOLERANCE_PX >= safe.left)
@@ -383,6 +451,14 @@ class CurrentUiVisualGateTest {
             "$leftName overlaps $rightName by ${overlapWidth * overlapHeight}px^2: left=$left right=$right",
             overlapWidth * overlapHeight <= GEOMETRY_TOLERANCE_PX,
         )
+    }
+
+    private fun assertTextHasNoVisualOverflow(name: String, node: SemanticsNode) {
+        val layoutResults = mutableListOf<TextLayoutResult>()
+        val action = node.config[SemanticsActions.GetTextLayoutResult].action
+        assertTrue("$name must expose its real text layout result.", action?.invoke(layoutResults) == true)
+        assertEquals("$name must produce exactly one text layout result.", 1, layoutResults.size)
+        assertTrue("$name is clipped or ellipsized.", !layoutResults.single().hasVisualOverflow)
     }
 
     private fun assertScreenshotHasRenderedContent(screenshot: Bitmap) {
@@ -642,6 +718,16 @@ class CurrentUiVisualGateTest {
             1,
             false,
         ),
+        LANDSCAPE_THREE_BUTTON(
+            "landscape_three_button",
+            VisualLayout.LANDSCAPE,
+            NAVIGATION_MODE_THREE_BUTTON,
+            1280,
+            720,
+            320,
+            1,
+            false,
+        ),
         CUTOUT_THREE_BUTTON(
             "cutout_three_button",
             VisualLayout.CUTOUT_PORTRAIT,
@@ -695,5 +781,15 @@ class CurrentUiVisualGateTest {
         const val PNG_QUALITY = 100
         val EVIDENCE_NONCE_REGEX = Regex("^[0-9a-f]{32}$")
         val SHA256_REGEX = Regex("^[0-9a-f]{64}$")
+        val PREVIEW_CONTROL_RESOURCES = listOf(
+            R.string.view_both,
+            R.string.view_left,
+            R.string.view_right,
+            R.string.grid,
+            R.string.focus_peaking,
+            R.string.imu_overlay,
+            R.string.start_recording,
+            R.string.stop_recording,
+        )
     }
 }

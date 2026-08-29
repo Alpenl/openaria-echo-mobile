@@ -38,6 +38,10 @@ CI 会通过 `ReactiveCircus/android-emulator-runner@v2.38.0` 创建 Pixel 2 / A
 
 本地 JVM 测试覆盖 Device API v4 契约哈希、严格 JSON validator、EndpointPolicy、Keystore token 包装、连接历史、Device API 客户端、MockWebServer 集成路径、采集状态投影、网络事务/SSE、制品传输计划和中英文资源一致性。
 
+`testFrozenCompatibility` 仅用于维护冻结的 safe-swap wire/parser 兼容代码，
+是手动运行的非产品检查。CI 和 release workflow 不调用它，其结果也不构成
+Android 发布验收证据。
+
 ## Development
 
 - [Android 发布流程](docs/ANDROID_RELEASE.md)

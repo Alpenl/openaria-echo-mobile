@@ -3,7 +3,6 @@ package com.openaria.openaria_echo_mobile.body
 import com.openaria.openaria_echo_mobile.body.api.CaptureRevisionRelation
 import com.openaria.openaria_echo_mobile.body.api.CaptureStatusSnapshot
 import com.openaria.openaria_echo_mobile.body.api.CaptureStreamEvent
-import com.openaria.openaria_echo_mobile.body.api.SafeSwapReceiptSummary
 
 object CaptureProjection {
     fun markCommandSubmitting(
@@ -31,7 +30,6 @@ object CaptureProjection {
         val epochChanged = current != null && current.authorityEpoch != snapshot.authorityEpoch
         val nextState = state.copy(
             snapshot = snapshot,
-            safeSwapReceipt = if (epochChanged) null else state.safeSwapReceipt,
             pendingCommand = if (epochChanged) {
                 null
             } else {
@@ -45,24 +43,6 @@ object CaptureProjection {
             accepted = true,
             clearedEpochBoundState = epochChanged,
         )
-    }
-
-    fun applySafeSwapReceipt(
-        state: CaptureProjectionState,
-        receipt: SafeSwapReceiptSummary,
-    ): CaptureProjectionState {
-        val knownAuthorityEpoch = state.snapshot?.authorityEpoch ?: state.lastAuthorityEpoch
-        if (receipt.authorityEpoch != null &&
-            knownAuthorityEpoch != null &&
-            receipt.authorityEpoch != knownAuthorityEpoch
-        ) {
-            return state.copy(safeSwapReceipt = null)
-        }
-        return state.copy(safeSwapReceipt = receipt)
-    }
-
-    fun clearSafeSwapReceipt(state: CaptureProjectionState): CaptureProjectionState {
-        return state.copy(safeSwapReceipt = null)
     }
 
     fun applyStreamEvent(
@@ -87,19 +67,16 @@ object CaptureProjection {
                 state = stateWithEventId,
                 accepted = false,
                 requiresCaptureReconciliation = true,
-                requiresSafeSwapReconciliation = event.type == "safe_swap",
             )
             CaptureRevisionRelation.NewEpoch -> CaptureProjectionResult(
                 state = stateWithEventId.copy(
                     snapshot = null,
-                    safeSwapReceipt = null,
                     pendingCommand = null,
                     lastAuthorityEpoch = event.authorityEpoch,
                     lastSourceRevision = event.sourceRevision,
                 ),
                 accepted = false,
                 requiresCaptureReconciliation = true,
-                requiresSafeSwapReconciliation = true,
                 clearedEpochBoundState = true,
             )
             CaptureRevisionRelation.Initial,
@@ -121,11 +98,6 @@ object CaptureProjection {
                 val snapshotResult = applyHttpSnapshot(advancedState, event.snapshot)
                 snapshotResult.copy(state = snapshotResult.state.copy(lastEventId = event.sseDeliveryId))
             }
-            event.safeSwapReceipt != null -> CaptureProjectionResult(
-                state = applySafeSwapReceipt(advancedState, event.safeSwapReceipt),
-                accepted = true,
-                requiresSafeSwapReconciliation = false,
-            )
             else -> CaptureProjectionResult(
                 state = advancedState,
                 accepted = true,
@@ -167,7 +139,6 @@ object CaptureProjection {
 
 data class CaptureProjectionState(
     val snapshot: CaptureStatusSnapshot? = null,
-    val safeSwapReceipt: SafeSwapReceiptSummary? = null,
     val pendingCommand: CapturePendingCommand? = null,
     val lastEventId: String? = null,
     val lastAuthorityEpoch: String? = snapshot?.authorityEpoch,
@@ -179,7 +150,6 @@ data class CaptureProjectionResult(
     val accepted: Boolean,
     val stale: Boolean = false,
     val requiresCaptureReconciliation: Boolean = false,
-    val requiresSafeSwapReconciliation: Boolean = false,
     val clearedEpochBoundState: Boolean = false,
 )
 

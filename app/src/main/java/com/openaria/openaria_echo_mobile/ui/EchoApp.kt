@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.SystemClock
 import android.widget.Toast
 import androidx.annotation.StringRes
@@ -16,6 +17,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -63,6 +65,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -132,9 +135,9 @@ import com.openaria.openaria_echo_mobile.body.api.PreviewResult
 import com.openaria.openaria_echo_mobile.body.api.RetainedUnsuccessfulOutcome
 import com.openaria.openaria_echo_mobile.body.api.RetainedUnsuccessfulOutcomeResult
 import com.openaria.openaria_echo_mobile.body.api.SessionListPage
-import com.openaria.openaria_echo_mobile.body.api.SessionListResult
-import com.openaria.openaria_echo_mobile.body.api.SessionLedgerApplyResult
-import com.openaria.openaria_echo_mobile.body.api.SessionLedgerRepository
+import com.openaria.openaria_echo_mobile.body.api.SessionFilterIntent
+import com.openaria.openaria_echo_mobile.body.api.SessionLedgerController
+import com.openaria.openaria_echo_mobile.body.api.SessionLedgerFailure
 import com.openaria.openaria_echo_mobile.body.api.SessionManifestResult
 import com.openaria.openaria_echo_mobile.body.api.SessionSummary
 import com.openaria.openaria_echo_mobile.body.api.VerifiedDeviceAdmission
@@ -150,7 +153,6 @@ import com.openaria.openaria_echo_mobile.ui.theme.EchoText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -186,15 +188,6 @@ fun EchoApp(
     var sessionPage by remember { mutableStateOf<SessionListPage?>(null) }
     var sessionMessage by remember { mutableStateOf<SessionMessage?>(null) }
     var sessionLoadingMore by remember { mutableStateOf(false) }
-    var sessionRefreshTransportCancellation by remember {
-        mutableStateOf<DeviceAdmissionCancellation?>(null)
-    }
-    var sessionRefreshTransportGeneration by remember { mutableStateOf(0L) }
-    var sessionLoadMoreJob by remember { mutableStateOf<Job?>(null) }
-    var sessionLoadMoreTransportCancellation by remember {
-        mutableStateOf<DeviceAdmissionCancellation?>(null)
-    }
-    var sessionLoadMoreTransportGeneration by remember { mutableStateOf(0L) }
     var sessionManifest by remember { mutableStateOf<DeviceSessionManifest?>(null) }
     var sessionManifestMessage by remember { mutableStateOf<SessionManifestMessage?>(null) }
     var sessionManifestLoading by remember { mutableStateOf(false) }
@@ -222,13 +215,36 @@ fun EchoApp(
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
     }
     val deviceClient = remember { DeviceHttpClient() }
-    val sessionLedgerRepository = remember { SessionLedgerRepository() }
     val artifactStore = remember(context) { ArtifactDownloadStore(context) }
     val scope = rememberCoroutineScope()
+    val sessionLedgerController = remember(scope, deviceClient) {
+        SessionLedgerController<DeviceConnection, DeviceAdmissionCancellation>(
+            scope = scope,
+            cancellationFactory = ::DeviceAdmissionCancellation,
+            cancelTransport = DeviceAdmissionCancellation::cancel,
+            transport = { activeConnection, request, cancellation ->
+                withContext(Dispatchers.IO) {
+                    deviceClient.listSessions(
+                        connection = activeConnection,
+                        limit = request.limit,
+                        cursor = request.cursor,
+                        takeId = request.takeId,
+                        cancellation = cancellation,
+                    )
+                }
+            },
+            onStateChanged = { next ->
+                sessionPage = next.page
+                sessionLoadingMore = next.isLoadingMore
+                sessionMessage = next.failure?.let { failure -> sessionMessageFor(failure) }
+            },
+        )
+    }
     val previewFrameGate = remember { PreviewFrameGate() }
     val previewFrameWorkerDispatcher = remember { Dispatchers.Default.limitedParallelism(1) }
     val selectedTab = EchoTab.valueOf(selectedTabName)
     val safeDrawing = WindowInsets.safeDrawing.asPaddingValues()
+    val layoutDirection = LocalLayoutDirection.current
     val bottomNavigationReserve = safeDrawing.calculateBottomPadding() + 86.dp
     val captureReconciliationGate = remember(connectionGeneration) {
         ReconciliationGate(ConnectionRequestPolicy.HEALTHY_RECONCILIATION_INTERVAL_MS)
@@ -237,35 +253,13 @@ fun EchoApp(
         CaptureReconciliationCoordinator(connectionGeneration, captureReconciliationGate)
     }
 
-    fun stopSessionRefreshTransport() {
-        sessionRefreshTransportGeneration += 1L
-        sessionRefreshTransportCancellation?.cancel()
-        sessionRefreshTransportCancellation = null
-    }
-
-    fun stopSessionLoadMoreTransport() {
-        sessionLoadMoreTransportGeneration += 1L
-        sessionLoadMoreTransportCancellation?.cancel()
-        sessionLoadMoreTransportCancellation = null
-        sessionLoadMoreJob?.cancel()
-        sessionLoadMoreJob = null
-    }
-
     fun resetSessionLedgerForConnectionChange() {
-        stopSessionRefreshTransport()
-        stopSessionLoadMoreTransport()
-        sessionLedgerRepository.reset()
-        sessionPage = sessionLedgerRepository.page
+        sessionLedgerController.reset()
         sessionMessage = null
-        sessionLoadingMore = sessionLedgerRepository.isLoadingMore
     }
 
     fun cancelSessionLedgerInFlight() {
-        stopSessionRefreshTransport()
-        stopSessionLoadMoreTransport()
-        sessionLedgerRepository.cancelInFlight()
-        sessionPage = sessionLedgerRepository.page
-        sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+        sessionLedgerController.cancelInFlight()
     }
 
     fun replaceBodyConnection(nextConnection: DeviceConnection?) {
@@ -309,70 +303,15 @@ fun EchoApp(
     suspend fun refreshSessionLedger(
         activeConnection: DeviceConnection,
         generation: Long = connectionGeneration,
-        takeId: String? = null,
+        filterIntent: SessionFilterIntent = SessionFilterIntent.InheritCurrentFilter,
         limit: Int = 50,
-        catalogRecovery: Boolean = false,
     ) {
         if (!isCurrentConnection(activeConnection, generation)) return
-        stopSessionLoadMoreTransport()
-        sessionLedgerRepository.cancelLoadMore()
-        val request = sessionLedgerRepository.beginRefresh(
-            takeId = takeId,
+        sessionLedgerController.refresh(
+            target = activeConnection,
+            filterIntent = filterIntent,
             limit = limit,
-            catalogRecovery = catalogRecovery,
-        ) ?: return
-        sessionLoadingMore = sessionLedgerRepository.isLoadingMore
-        sessionMessage = null
-        sessionRefreshTransportGeneration += 1L
-        val transportGeneration = sessionRefreshTransportGeneration
-        val transportCancellation = DeviceAdmissionCancellation()
-        sessionRefreshTransportCancellation = transportCancellation
-        val result = try {
-            withContext(Dispatchers.IO) {
-                deviceClient.listSessions(
-                    connection = activeConnection,
-                    limit = request.limit,
-                    takeId = request.takeId,
-                    cancellation = transportCancellation,
-                )
-            }
-        } catch (exception: Throwable) {
-            sessionLedgerRepository.cancel(request)
-            throw exception
-        } finally {
-            if (sessionRefreshTransportGeneration == transportGeneration) {
-                sessionRefreshTransportCancellation = null
-            }
-        }
-        if (!isCurrentConnection(activeConnection, generation)) return
-        when (val applied = sessionLedgerRepository.complete(request, result)) {
-            SessionLedgerApplyResult.Applied -> {
-                sessionPage = sessionLedgerRepository.page
-                sessionLoadingMore = sessionLedgerRepository.isLoadingMore
-                sessionMessage = null
-            }
-            SessionLedgerApplyResult.Ignored -> {
-                sessionPage = sessionLedgerRepository.page
-                sessionLoadingMore = sessionLedgerRepository.isLoadingMore
-            }
-            is SessionLedgerApplyResult.RefreshRequired -> {
-                sessionPage = sessionLedgerRepository.page
-                sessionLoadingMore = sessionLedgerRepository.isLoadingMore
-                sessionMessage = null
-                refreshSessionLedger(
-                    activeConnection = activeConnection,
-                    generation = generation,
-                    takeId = applied.takeId,
-                    limit = applied.limit,
-                    catalogRecovery = applied.catalogRecovery,
-                )
-            }
-            is SessionLedgerApplyResult.Failed -> {
-                sessionPage = sessionLedgerRepository.page
-                sessionLoadingMore = sessionLedgerRepository.isLoadingMore
-                sessionMessage = sessionMessageFor(applied.result)
-            }
-        }
+        )
     }
 
     suspend fun reconcileCaptureStatus(
@@ -694,69 +633,7 @@ fun EchoApp(
     }
 
     val loadMoreSessions: () -> Unit = {
-        val activeConnection = bodyConnection
-        val request = if (activeConnection == null) null else sessionLedgerRepository.beginLoadMore()
-        if (activeConnection != null && request != null) {
-            val generation = connectionGeneration
-            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
-            sessionMessage = null
-            sessionLoadMoreTransportGeneration += 1L
-            val transportGeneration = sessionLoadMoreTransportGeneration
-            val transportCancellation = DeviceAdmissionCancellation()
-            sessionLoadMoreTransportCancellation = transportCancellation
-            sessionLoadMoreJob = scope.launch {
-                try {
-                    val result = try {
-                        withContext(Dispatchers.IO) {
-                            deviceClient.listSessions(
-                                connection = activeConnection,
-                                limit = request.limit,
-                                cursor = request.cursor,
-                                takeId = request.takeId,
-                                cancellation = transportCancellation,
-                            )
-                        }
-                    } catch (exception: Throwable) {
-                        sessionLedgerRepository.cancel(request)
-                        throw exception
-                    }
-                    if (!isCurrentConnection(activeConnection, generation)) return@launch
-                    when (val applied = sessionLedgerRepository.complete(request, result)) {
-                        SessionLedgerApplyResult.Applied -> {
-                            sessionPage = sessionLedgerRepository.page
-                            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
-                            sessionMessage = null
-                        }
-                        SessionLedgerApplyResult.Ignored -> {
-                            sessionPage = sessionLedgerRepository.page
-                            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
-                        }
-                        is SessionLedgerApplyResult.RefreshRequired -> {
-                            sessionPage = sessionLedgerRepository.page
-                            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
-                            sessionMessage = null
-                            refreshSessionLedger(
-                                activeConnection = activeConnection,
-                                generation = generation,
-                                takeId = applied.takeId,
-                                limit = applied.limit,
-                                catalogRecovery = applied.catalogRecovery,
-                            )
-                        }
-                        is SessionLedgerApplyResult.Failed -> {
-                            sessionPage = sessionLedgerRepository.page
-                            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
-                            sessionMessage = sessionMessageFor(applied.result)
-                        }
-                    }
-                } finally {
-                    if (sessionLoadMoreTransportGeneration == transportGeneration) {
-                        sessionLoadMoreTransportCancellation = null
-                        sessionLoadMoreJob = null
-                    }
-                }
-            }
-        }
+        bodyConnection?.let(sessionLedgerController::loadMore)
     }
 
     val downloadArtifact: (ArtifactDescriptor) -> Unit = { artifact ->
@@ -1097,9 +974,7 @@ fun EchoApp(
     LaunchedEffect(bodyConnection, connectionGeneration, selectedTab) {
         val activeConnection = bodyConnection ?: return@LaunchedEffect
         if (selectedTab != EchoTab.SESSIONS) {
-            stopSessionLoadMoreTransport()
-            sessionLedgerRepository.cancelLoadMore()
-            sessionLoadingMore = sessionLedgerRepository.isLoadingMore
+            sessionLedgerController.cancelLoadMore()
         }
         if (!appInForeground) return@LaunchedEffect
         val generation = connectionGeneration
@@ -1126,9 +1001,9 @@ fun EchoApp(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(
-                    start = 12.dp,
+                    start = safeDrawing.calculateLeftPadding(layoutDirection) + 12.dp,
                     top = safeDrawing.calculateTopPadding() + 8.dp,
-                    end = 12.dp,
+                    end = safeDrawing.calculateRightPadding(layoutDirection) + 12.dp,
                     bottom = bottomNavigationReserve,
                 ),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -1306,12 +1181,10 @@ private fun ViewfinderScreen(
     onShowImuOverlayChange: (Boolean) -> Unit,
     onConnected: (VerifiedDeviceAdmission) -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val pageScrollState = rememberScrollState()
+    val detailScrollState = rememberScrollState()
+    val previewContent: @Composable () -> Unit = {
         PreviewFrame(
             bodyConnection = bodyConnection,
             captureStatus = captureStatus,
@@ -1329,6 +1202,8 @@ private fun ViewfinderScreen(
             onShowFocusPeakingChange = onShowFocusPeakingChange,
             onShowImuOverlayChange = onShowImuOverlayChange,
         )
+    }
+    val detailContent: @Composable () -> Unit = {
         CaptureStatusPanel(
             bodyConnection = bodyConnection,
             captureStatus = captureStatus,
@@ -1339,6 +1214,32 @@ private fun ViewfinderScreen(
             ConnectionPanel(onConnected)
         }
         ContractGate()
+    }
+
+    if (landscape) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            previewContent()
+            Spacer(Modifier.height(12.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(detailScrollState),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                detailContent()
+            }
+        }
+    } else {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(pageScrollState),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            previewContent()
+            detailContent()
+        }
     }
 }
 
@@ -1379,142 +1280,176 @@ private fun PreviewFrame(
         }
     }
 
-    Panel(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(286.dp),
-        background = Color.Black.copy(alpha = 0.64f),
-    ) {
-        Box(Modifier.fillMaxSize()) {
-            if (previewFrame != null) {
-                PreviewImage(previewFrame.image, previewMode)
-                if (showFocusPeaking && previewFrame.focusMask != null) {
-                    FocusPeakOverlay(previewFrame.focusMask, previewMode)
-                }
-            }
-            if (showGrid) {
-                PreviewGrid()
-            }
-            if (showImuOverlay && liveImuQuality != null) {
-                ImuOverlay(
-                    quality = liveImuQuality,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 58.dp, end = 10.dp),
-                )
-            }
-            if (showPreviewStatusOverlay) {
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .semantics { liveRegion = LiveRegionMode.Polite }
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color.Black.copy(alpha = if (previewFrame == null) 0f else 0.58f))
-                        .padding(horizontal = 24.dp, vertical = 14.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    StatusChip(
-                        previewStatusLabel(bodyConnection, previewMessage),
-                        previewStatusColor(bodyConnection, previewMessage),
-                    )
-                    EchoText(
-                        value = previewStatusBody(bodyConnection, previewMessage),
-                        color = EchoColors.InkSecondary,
-                        style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
-                    )
-                    EchoText(
-                        value = stringResource(R.string.preview_contract_note),
-                        color = EchoColors.InkMuted,
-                        style = TextStyle(fontSize = 12.sp, lineHeight = 17.sp),
-                    )
-                }
-            } else {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    StatusChip(stringResource(R.string.preview_live), EchoColors.Permit)
-                    captureStatus?.let {
-                        StatusChip(deviceStateLabel(it.deviceState), deviceStateColor(it.deviceState))
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val compactLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+            maxWidth >= 540.dp
+        val compactStatusWidth = (maxWidth - 310.dp).coerceIn(230.dp, 260.dp)
+
+        Panel(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(if (compactLandscape) 166.dp else 286.dp),
+            background = Color.Black.copy(alpha = 0.64f),
+        ) {
+            Box(Modifier.fillMaxSize()) {
+                if (previewFrame != null) {
+                    PreviewImage(previewFrame.image, previewMode)
+                    if (showFocusPeaking && previewFrame.focusMask != null) {
+                        FocusPeakOverlay(previewFrame.focusMask, previewMode)
                     }
                 }
-            }
-            Row(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(10.dp)
-                    .selectableGroup(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                TinyToggle(
-                    label = stringResource(R.string.view_both),
-                    selected = previewMode == PreviewMode.BOTH,
-                    onClick = { onPreviewModeChange(PreviewMode.BOTH) },
-                )
-                TinyToggle(
-                    label = stringResource(R.string.view_left),
-                    selected = previewMode == PreviewMode.LEFT,
-                    onClick = { onPreviewModeChange(PreviewMode.LEFT) },
-                )
-                TinyToggle(
-                    label = stringResource(R.string.view_right),
-                    selected = previewMode == PreviewMode.RIGHT,
-                    onClick = { onPreviewModeChange(PreviewMode.RIGHT) },
-                )
-            }
-            Column(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                FrameToolToggle(
-                    label = stringResource(R.string.grid),
-                    selected = showGrid,
-                    onClick = { onShowGridChange(!showGrid) },
-                )
-                FrameToolToggle(
-                    label = stringResource(R.string.focus_peaking),
-                    selected = showFocusPeaking,
-                    onClick = { onShowFocusPeakingChange(!showFocusPeaking) },
-                )
-                if (canShowImuOverlay) {
-                    FrameToolToggle(
-                        label = stringResource(R.string.imu_overlay),
-                        selected = showImuOverlay,
-                        onClick = { onShowImuOverlayChange(!showImuOverlay) },
-                    )
-                } else {
-                    ToolStatus(
-                        label = stringResource(R.string.imu_overlay),
-                        available = false,
-                        unavailableReason = stringResource(R.string.imu_overlay_no_sample),
+                if (showGrid) {
+                    PreviewGrid()
+                }
+                if (showImuOverlay && liveImuQuality != null) {
+                    ImuOverlay(
+                        quality = liveImuQuality,
+                        modifier = Modifier
+                            .align(if (compactLandscape) Alignment.BottomStart else Alignment.CenterStart)
+                            .padding(10.dp),
                     )
                 }
-            }
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(start = 12.dp, end = 12.dp, bottom = 14.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                ActionButton(
-                    label = stringResource(R.string.start_recording),
-                    enabled = canStart,
-                    disabledReason = startDisabledReason(bodyConnection, captureStatus, captureCommandRunning),
-                    onClick = onStartCapture,
-                    modifier = Modifier.size(width = 144.dp, height = 58.dp),
-                )
-                ActionButton(
-                    label = stringResource(R.string.stop_recording),
-                    enabled = canStop,
-                    disabledReason = stopDisabledReason(bodyConnection, captureStatus, captureCommandRunning),
-                    onClick = onStopCapture,
-                    modifier = Modifier.size(width = 118.dp, height = 58.dp),
-                )
+                if (showPreviewStatusOverlay) {
+                    val statusAreaModifier = if (compactLandscape) {
+                        Modifier
+                            .align(Alignment.BottomStart)
+                            .width(compactStatusWidth)
+                            .padding(start = 20.dp, bottom = 10.dp)
+                    } else {
+                        Modifier
+                            .align(Alignment.Center)
+                            .fillMaxSize()
+                            .padding(start = 24.dp, top = 64.dp, end = 78.dp, bottom = 80.dp)
+                    }
+                    Box(statusAreaModifier) {
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .semantics { liveRegion = LiveRegionMode.Polite }
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.Black.copy(alpha = if (previewFrame == null) 0f else 0.58f))
+                                .padding(horizontal = 4.dp, vertical = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            StatusChip(
+                                previewStatusLabel(bodyConnection, previewMessage),
+                                previewStatusColor(bodyConnection, previewMessage),
+                            )
+                            EchoText(
+                                value = previewStatusBody(bodyConnection, previewMessage),
+                                color = EchoColors.InkSecondary,
+                                style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
+                            )
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .align(if (compactLandscape) Alignment.BottomStart else Alignment.CenterStart)
+                            .padding(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        StatusChip(stringResource(R.string.preview_live), EchoColors.Permit)
+                        captureStatus?.let {
+                            StatusChip(deviceStateLabel(it.deviceState), deviceStateColor(it.deviceState))
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
+                        .selectableGroup(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    TinyToggle(
+                        label = stringResource(R.string.view_both),
+                        selected = previewMode == PreviewMode.BOTH,
+                        onClick = { onPreviewModeChange(PreviewMode.BOTH) },
+                    )
+                    TinyToggle(
+                        label = stringResource(R.string.view_left),
+                        selected = previewMode == PreviewMode.LEFT,
+                        onClick = { onPreviewModeChange(PreviewMode.LEFT) },
+                    )
+                    TinyToggle(
+                        label = stringResource(R.string.view_right),
+                        selected = previewMode == PreviewMode.RIGHT,
+                        onClick = { onPreviewModeChange(PreviewMode.RIGHT) },
+                    )
+                }
+                val toolControls: @Composable () -> Unit = {
+                    FrameToolToggle(
+                        label = stringResource(R.string.grid),
+                        selected = showGrid,
+                        onClick = { onShowGridChange(!showGrid) },
+                    )
+                    FrameToolToggle(
+                        label = stringResource(R.string.focus_peaking),
+                        selected = showFocusPeaking,
+                        onClick = { onShowFocusPeakingChange(!showFocusPeaking) },
+                    )
+                    if (canShowImuOverlay) {
+                        FrameToolToggle(
+                            label = stringResource(R.string.imu_overlay),
+                            selected = showImuOverlay,
+                            onClick = { onShowImuOverlayChange(!showImuOverlay) },
+                        )
+                    } else {
+                        ToolStatus(
+                            label = stringResource(R.string.imu_overlay),
+                            available = false,
+                            unavailableReason = stringResource(R.string.imu_overlay_no_sample),
+                        )
+                    }
+                }
+                if (compactLandscape) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 10.dp, end = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        toolControls()
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 38.dp, end = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        toolControls()
+                    }
+                }
+                Row(
+                    modifier = if (compactLandscape) {
+                        Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 10.dp, bottom = 10.dp)
+                    } else {
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(start = 12.dp, end = 12.dp, bottom = 14.dp)
+                    },
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ActionButton(
+                        label = stringResource(R.string.start_recording),
+                        enabled = canStart,
+                        disabledReason = startDisabledReason(bodyConnection, captureStatus, captureCommandRunning),
+                        onClick = onStartCapture,
+                        modifier = Modifier.size(width = 144.dp, height = 58.dp),
+                    )
+                    ActionButton(
+                        label = stringResource(R.string.stop_recording),
+                        enabled = canStop,
+                        disabledReason = stopDisabledReason(bodyConnection, captureStatus, captureCommandRunning),
+                        onClick = onStopCapture,
+                        modifier = Modifier.size(width = 118.dp, height = 58.dp),
+                    )
+                }
             }
         }
     }
@@ -1771,9 +1706,7 @@ private fun ConnectionPanel(onConnected: (VerifiedDeviceAdmission) -> Unit) {
                                     if (verifiedAdmission != null &&
                                         !admissionFence.canPublish(attempt, verifiedAdmission.connection)
                                     ) {
-                                        probeMessage = ProbeMessage.InvalidResponse(
-                                            "connection identity changed during admission",
-                                        )
+                                        probeMessage = ProbeMessage.IdentityChanged
                                         return@launch
                                     }
 
@@ -2148,23 +2081,7 @@ private fun SessionsScreen(
         sessionMessage?.let { SessionMessageBlock(it) }
         sessionPage?.let { page ->
             page.readOnlyDiagnosticPresentations().forEach { presentation ->
-                Panel(
-                    modifier = Modifier.fillMaxWidth(),
-                    background = EchoColors.Caution.copy(alpha = 0.10f),
-                    border = EchoColors.Caution.copy(alpha = 0.48f),
-                ) {
-                    InfoBlock(
-                        title = presentation.code,
-                        body = stringResource(
-                            R.string.session_diagnostic_detail,
-                            presentation.message,
-                            presentation.observedAt,
-                            presentation.quarantineId,
-                        ),
-                        accent = EchoColors.Caution,
-                        modifier = Modifier.padding(12.dp),
-                    )
-                }
+                SessionDiagnosticPanel(presentation)
             }
             if (page.items.isNotEmpty()) {
                 Panel(modifier = Modifier.fillMaxWidth()) {
@@ -2227,6 +2144,214 @@ private fun SessionsScreen(
         sessionManifestMessage?.let { SessionManifestMessageBlock(it) }
         artifactDownloadMessage?.let { ArtifactDownloadMessageBlock(it) }
     }
+}
+
+@Composable
+private fun SessionDiagnosticPanel(presentation: SessionDiagnosticPresentation) {
+    Panel(
+        modifier = Modifier.fillMaxWidth(),
+        background = EchoColors.Caution.copy(alpha = 0.10f),
+        border = EchoColors.Caution.copy(alpha = 0.48f),
+    ) {
+        SessionDiagnosticContent(
+            presentation = presentation,
+            modifier = Modifier.padding(12.dp),
+        )
+    }
+}
+
+@Composable
+internal fun SessionDiagnosticContent(
+    presentation: SessionDiagnosticPresentation,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by rememberSaveable(presentation.stableKey) { mutableStateOf(false) }
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        InfoBlock(
+            title = sessionDiagnosticReasonLabel(presentation.reason),
+            body = when (presentation.kind) {
+                SessionDiagnosticKind.QUARANTINE -> {
+                    stringResource(R.string.session_quarantine_diagnostic_body)
+                }
+                SessionDiagnosticKind.GATEWAY_VERIFICATION -> {
+                    stringResource(R.string.session_gateway_diagnostic_body)
+                }
+                SessionDiagnosticKind.LEDGER_FAILURE -> {
+                    stringResource(R.string.session_ledger_diagnostic_body)
+                }
+                SessionDiagnosticKind.SESSION_MANIFEST -> {
+                    stringResource(R.string.session_manifest_diagnostic_body)
+                }
+                SessionDiagnosticKind.UNSUCCESSFUL_OUTCOME -> {
+                    stringResource(R.string.unsuccessful_outcome_diagnostic_body)
+                }
+            },
+            accent = EchoColors.Caution,
+            liveRegionMode = LiveRegionMode.Polite,
+        )
+        ActionButton(
+            label = if (expanded) {
+                stringResource(R.string.session_diagnostic_hide_details)
+            } else {
+                stringResource(R.string.session_diagnostic_show_details)
+            },
+            enabled = true,
+            modifier = Modifier.fillMaxWidth(),
+            onClick = { expanded = !expanded },
+        )
+        if (expanded) {
+            SectionLabel(stringResource(R.string.session_diagnostic_details_title))
+            presentation.code?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_code, it))
+            }
+            presentation.summary?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_summary, it))
+            }
+            presentation.rawDetail?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_raw_detail, it))
+            }
+            presentation.observedAt?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_observed_at, it))
+            }
+            presentation.verifiedAt?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_verified_at, it))
+            }
+            presentation.quarantineId?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_quarantine_id, it))
+            }
+            presentation.sessionId?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_session_id, it))
+            }
+            presentation.catalogRevision?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_catalog_revision, it))
+            }
+            presentation.httpStatusCode?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_http_status, it))
+            }
+            presentation.actor?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_actor, it))
+            }
+            presentation.validatorName?.let { name ->
+                SessionDiagnosticDetailLine(
+                    stringResource(
+                        R.string.session_diagnostic_validator,
+                        name,
+                        presentation.validatorVersion.orEmpty(),
+                    ),
+                )
+            }
+            presentation.validatorBuildSha256?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_validator_build, it))
+            }
+            presentation.manifestSha256?.let {
+                SessionDiagnosticDetailLine(stringResource(R.string.session_diagnostic_manifest_sha256, it))
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionDiagnosticDetailLine(value: String) {
+    EchoText(
+        value = value,
+        color = EchoColors.InkMuted,
+        style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 16.sp),
+    )
+}
+
+@Composable
+private fun sessionDiagnosticReasonLabel(reason: SessionDiagnosticReason): String {
+    return stringResource(
+        when (reason) {
+            SessionDiagnosticReason.QUARANTINE_MANIFEST_UNREADABLE -> {
+                R.string.session_reason_quarantine_manifest_unreadable
+            }
+            SessionDiagnosticReason.QUARANTINE_UNSUPPORTED_SCHEMA -> {
+                R.string.session_reason_quarantine_unsupported_schema
+            }
+            SessionDiagnosticReason.QUARANTINE_MANIFEST_INVALID -> {
+                R.string.session_reason_quarantine_manifest_invalid
+            }
+            SessionDiagnosticReason.QUARANTINE_MANIFEST_NOT_SEALED -> {
+                R.string.session_reason_quarantine_manifest_not_sealed
+            }
+            SessionDiagnosticReason.QUARANTINE_UNKNOWN -> R.string.session_reason_quarantine_unknown
+            SessionDiagnosticReason.VERIFICATION_ARTIFACT_DIGEST_MISMATCH -> {
+                R.string.session_reason_verification_artifact_digest_mismatch
+            }
+            SessionDiagnosticReason.VERIFICATION_ARTIFACT_INVALID -> {
+                R.string.session_reason_verification_artifact_invalid
+            }
+            SessionDiagnosticReason.VERIFICATION_MANIFEST_INVALID -> {
+                R.string.session_reason_verification_manifest_invalid
+            }
+            SessionDiagnosticReason.VERIFICATION_FAILED -> {
+                R.string.session_reason_verification_failed
+            }
+            SessionDiagnosticReason.VERIFICATION_LEGACY -> {
+                R.string.session_reason_verification_legacy
+            }
+            SessionDiagnosticReason.LEDGER_AUTHENTICATION_REQUIRED -> {
+                R.string.session_reason_ledger_auth_required
+            }
+            SessionDiagnosticReason.LEDGER_FORBIDDEN -> R.string.session_reason_ledger_forbidden
+            SessionDiagnosticReason.LEDGER_HTTP_FAILURE -> R.string.session_reason_ledger_http_failure
+            SessionDiagnosticReason.LEDGER_INVALID_REQUEST -> R.string.session_reason_ledger_invalid_request
+            SessionDiagnosticReason.LEDGER_INVALID_RESPONSE -> R.string.session_reason_ledger_invalid_response
+            SessionDiagnosticReason.LEDGER_NETWORK_FAILURE -> R.string.session_reason_ledger_network_failure
+            SessionDiagnosticReason.LEDGER_UNEXPECTED_TRANSPORT_FAILURE -> {
+                R.string.session_reason_ledger_unexpected_transport_failure
+            }
+            SessionDiagnosticReason.PROTOCOL_REQUEST_IDENTITY_MISMATCH -> {
+                R.string.session_reason_protocol_request_identity_mismatch
+            }
+            SessionDiagnosticReason.PROTOCOL_CATALOG_RECOVERY_REPEATED -> {
+                R.string.session_reason_protocol_catalog_recovery_repeated
+            }
+            SessionDiagnosticReason.PROTOCOL_CURSOR_DID_NOT_ADVANCE -> {
+                R.string.session_reason_protocol_cursor_did_not_advance
+            }
+            SessionDiagnosticReason.PROTOCOL_DUPLICATE_IDENTITY -> {
+                R.string.session_reason_protocol_duplicate_identity
+            }
+            SessionDiagnosticReason.PROTOCOL_NEWEST_FIRST_BOUNDARY_INVERTED -> {
+                R.string.session_reason_protocol_newest_first_boundary_inverted
+            }
+            SessionDiagnosticReason.MANIFEST_NOT_FOUND -> R.string.session_reason_manifest_not_found
+            SessionDiagnosticReason.MANIFEST_AUTHENTICATION_REQUIRED -> {
+                R.string.session_reason_manifest_auth_required
+            }
+            SessionDiagnosticReason.MANIFEST_FORBIDDEN -> R.string.session_reason_manifest_forbidden
+            SessionDiagnosticReason.MANIFEST_HTTP_FAILURE -> R.string.session_reason_manifest_http_failure
+            SessionDiagnosticReason.MANIFEST_INVALID_REQUEST -> {
+                R.string.session_reason_manifest_invalid_request
+            }
+            SessionDiagnosticReason.MANIFEST_INVALID_RESPONSE -> {
+                R.string.session_reason_manifest_invalid_response
+            }
+            SessionDiagnosticReason.MANIFEST_NETWORK_FAILURE -> {
+                R.string.session_reason_manifest_network_failure
+            }
+            SessionDiagnosticReason.OUTCOME_NOT_FOUND -> R.string.session_reason_outcome_not_found
+            SessionDiagnosticReason.OUTCOME_AUTHENTICATION_REQUIRED -> {
+                R.string.session_reason_outcome_auth_required
+            }
+            SessionDiagnosticReason.OUTCOME_FORBIDDEN -> R.string.session_reason_outcome_forbidden
+            SessionDiagnosticReason.OUTCOME_HTTP_FAILURE -> R.string.session_reason_outcome_http_failure
+            SessionDiagnosticReason.OUTCOME_INVALID_REQUEST -> {
+                R.string.session_reason_outcome_invalid_request
+            }
+            SessionDiagnosticReason.OUTCOME_INVALID_RESPONSE -> {
+                R.string.session_reason_outcome_invalid_response
+            }
+            SessionDiagnosticReason.OUTCOME_NETWORK_FAILURE -> {
+                R.string.session_reason_outcome_network_failure
+            }
+        },
+    )
 }
 
 @Composable
@@ -4022,6 +4147,13 @@ private fun SessionSummaryCard(
                 color = EchoColors.InkMuted,
                 style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 16.sp),
             )
+            val verificationDiagnostics = summary.verificationDiagnosticPresentations()
+            if (verificationDiagnostics.isNotEmpty()) {
+                SectionLabel(stringResource(R.string.session_verification_diagnostics_title))
+                verificationDiagnostics.forEach { presentation ->
+                    SessionDiagnosticContent(presentation)
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ActionButton(
                     label = stringResource(R.string.load_artifacts),
@@ -4126,19 +4258,8 @@ private fun sessionMatchesFilter(summary: SessionSummary, filter: String): Boole
     }
 }
 
-private fun sessionMessageFor(result: SessionListResult): SessionMessage? {
-    return when (result) {
-        is SessionListResult.Page -> null
-        is SessionListResult.CatalogChanged -> {
-            SessionMessage.InvalidResponse("catalog_changed requires a fresh session request")
-        }
-        SessionListResult.AuthenticationRequired -> SessionMessage.AuthRequired
-        SessionListResult.Forbidden -> SessionMessage.Forbidden
-        is SessionListResult.HttpFailure -> SessionMessage.HttpFailure(result.statusCode)
-        SessionListResult.InvalidRequest -> SessionMessage.InvalidRequest
-        is SessionListResult.InvalidResponse -> SessionMessage.InvalidResponse(result.message)
-        is SessionListResult.NetworkFailure -> SessionMessage.NetworkFailure(result.message)
-    }
+private fun sessionMessageFor(failure: SessionLedgerFailure): SessionMessage? {
+    return failure.toReadOnlyPresentation()?.let(::SessionMessage)
 }
 
 @Composable
@@ -4146,47 +4267,33 @@ private fun UnsuccessfulOutcomeBlock(
     outcome: RetainedUnsuccessfulOutcome?,
     message: UnsuccessfulOutcomeMessage?,
 ) {
-    val (body, accent) = when {
-        outcome != null -> stringResource(
-            R.string.unsuccessful_outcome_body,
-            unsuccessfulOutcomeStateLabel(outcome.state),
-            outcome.sourceRevision,
-            outcome.authorityEpoch,
-            outcome.generationId,
-        ) to EchoColors.Caution
-        message != null -> unsuccessfulOutcomeMessageBody(message) to when (message) {
-            UnsuccessfulOutcomeMessage.NotFound -> EchoColors.InkMuted
-            UnsuccessfulOutcomeMessage.Loading -> EchoColors.Live
-            else -> EchoColors.Caution
+    when {
+        outcome != null -> {
+            InfoBlock(
+                title = stringResource(R.string.unsuccessful_outcome_title),
+                body = stringResource(
+                    R.string.unsuccessful_outcome_body,
+                    unsuccessfulOutcomeStateLabel(outcome.state),
+                    outcome.sourceRevision,
+                    outcome.authorityEpoch,
+                    outcome.generationId,
+                ),
+                accent = EchoColors.Caution,
+                liveRegionMode = LiveRegionMode.Polite,
+            )
         }
-        else -> return
-    }
-    InfoBlock(
-        title = stringResource(R.string.unsuccessful_outcome_title),
-        body = body,
-        accent = accent,
-        liveRegionMode = LiveRegionMode.Polite,
-    )
-}
-
-@Composable
-private fun unsuccessfulOutcomeMessageBody(message: UnsuccessfulOutcomeMessage): String {
-    return when (message) {
-        UnsuccessfulOutcomeMessage.Loading -> stringResource(R.string.unsuccessful_outcome_loading_body)
-        UnsuccessfulOutcomeMessage.NotFound -> stringResource(R.string.unsuccessful_outcome_not_found)
-        UnsuccessfulOutcomeMessage.AuthRequired -> stringResource(R.string.unsuccessful_outcome_auth_required)
-        UnsuccessfulOutcomeMessage.Forbidden -> stringResource(R.string.unsuccessful_outcome_forbidden)
-        is UnsuccessfulOutcomeMessage.HttpFailure -> {
-            stringResource(R.string.unsuccessful_outcome_http_failure, message.statusCode)
+        message == UnsuccessfulOutcomeMessage.Loading -> {
+            InfoBlock(
+                title = stringResource(R.string.unsuccessful_outcome_title),
+                body = stringResource(R.string.unsuccessful_outcome_loading_body),
+                accent = EchoColors.Live,
+                liveRegionMode = LiveRegionMode.Polite,
+            )
         }
-        is UnsuccessfulOutcomeMessage.InvalidRequest -> {
-            stringResource(R.string.unsuccessful_outcome_invalid_request, message.detail)
-        }
-        is UnsuccessfulOutcomeMessage.InvalidResponse -> {
-            stringResource(R.string.unsuccessful_outcome_invalid_response, message.detail)
-        }
-        is UnsuccessfulOutcomeMessage.NetworkFailure -> {
-            stringResource(R.string.unsuccessful_outcome_network_failure, message.detail)
+        message != null -> {
+            message.toReadOnlyPresentation()?.let { presentation ->
+                SessionDiagnosticPanel(presentation)
+            }
         }
     }
 }
@@ -4220,61 +4327,29 @@ private fun gatewayVerdictLabel(value: String): String {
 
 @Composable
 private fun SessionMessageBlock(message: SessionMessage) {
-    val body = when (message) {
-        SessionMessage.AuthRequired -> stringResource(R.string.session_auth_required)
-        SessionMessage.Forbidden -> stringResource(R.string.session_forbidden)
-        is SessionMessage.HttpFailure -> stringResource(R.string.session_http_failure, message.statusCode)
-        SessionMessage.InvalidRequest -> stringResource(R.string.session_invalid_request)
-        is SessionMessage.InvalidResponse -> stringResource(R.string.session_invalid_response, message.detail)
-        is SessionMessage.NetworkFailure -> stringResource(R.string.session_network_failure, message.detail)
-    }
-    Panel(
-        modifier = Modifier.fillMaxWidth(),
-        background = EchoColors.Caution.copy(alpha = 0.10f),
-        border = EchoColors.Caution.copy(alpha = 0.48f),
-    ) {
-        InfoBlock(
-            title = stringResource(R.string.nav_sessions),
-            body = body,
-            accent = EchoColors.Caution,
-            modifier = Modifier.padding(12.dp),
-            liveRegionMode = LiveRegionMode.Polite,
-        )
-    }
+    SessionDiagnosticPanel(message.presentation)
 }
 
 @Composable
 private fun SessionManifestMessageBlock(message: SessionManifestMessage) {
-    val (body, accent) = when (message) {
-        SessionManifestMessage.Loading -> stringResource(R.string.session_manifest_loading) to EchoColors.Live
-        SessionManifestMessage.AuthRequired -> stringResource(R.string.session_manifest_auth_required) to EchoColors.Caution
-        SessionManifestMessage.Forbidden -> stringResource(R.string.session_manifest_forbidden) to EchoColors.Caution
-        is SessionManifestMessage.HttpFailure -> {
-            stringResource(R.string.session_manifest_http_failure, message.statusCode) to EchoColors.Caution
+    if (message == SessionManifestMessage.Loading) {
+        Panel(
+            modifier = Modifier.fillMaxWidth(),
+            background = EchoColors.Live.copy(alpha = 0.10f),
+            border = EchoColors.Live.copy(alpha = 0.48f),
+        ) {
+            InfoBlock(
+                title = stringResource(R.string.artifacts),
+                body = stringResource(R.string.session_manifest_loading),
+                accent = EchoColors.Live,
+                modifier = Modifier.padding(12.dp),
+                liveRegionMode = LiveRegionMode.Polite,
+            )
         }
-        is SessionManifestMessage.InvalidRequest -> {
-            stringResource(R.string.session_manifest_invalid_request, message.detail) to EchoColors.Caution
+    } else {
+        message.toReadOnlyPresentation()?.let { presentation ->
+            SessionDiagnosticPanel(presentation)
         }
-        is SessionManifestMessage.InvalidResponse -> {
-            stringResource(R.string.session_manifest_invalid_response, message.detail) to EchoColors.Caution
-        }
-        is SessionManifestMessage.NetworkFailure -> {
-            stringResource(R.string.session_manifest_network_failure, message.detail) to EchoColors.Caution
-        }
-        SessionManifestMessage.NotFound -> stringResource(R.string.session_manifest_not_found) to EchoColors.Caution
-    }
-    Panel(
-        modifier = Modifier.fillMaxWidth(),
-        background = accent.copy(alpha = 0.10f),
-        border = accent.copy(alpha = 0.48f),
-    ) {
-        InfoBlock(
-            title = stringResource(R.string.artifacts),
-            body = body,
-            accent = accent,
-            modifier = Modifier.padding(12.dp),
-            liveRegionMode = LiveRegionMode.Polite,
-        )
     }
 }
 
@@ -4539,7 +4614,7 @@ private fun UpdateCard(
                 color = updatePhaseColor(state.phase),
                 style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
             )
-            if (state.message.isNotBlank()) {
+            if (state.phase == AppUpdateManager.Phase.FAILED && state.message.isNotBlank()) {
                 EchoText(
                     value = state.message,
                     color = if (state.phase == AppUpdateManager.Phase.FAILED) EchoColors.Caution else EchoColors.InkMuted,
@@ -4833,6 +4908,11 @@ private fun ProbeMessageText(message: ProbeMessage) {
         is ProbeMessage.Forbidden -> Triple(
             stringResource(R.string.access_token),
             stringResource(R.string.probe_forbidden, message.origin),
+            EchoColors.Caution,
+        )
+        ProbeMessage.IdentityChanged -> Triple(
+            stringResource(R.string.status_contract_missing),
+            stringResource(R.string.probe_identity_changed),
             EchoColors.Caution,
         )
         is ProbeMessage.InvalidResponse -> Triple(
@@ -5514,7 +5594,13 @@ private fun probeMessageFor(result: DeviceAdmissionResult): ProbeMessage {
             statusCode = result.statusCode,
             errorCode = result.errorCode,
         )
-        is DeviceAdmissionResult.InvalidResponse -> ProbeMessage.InvalidResponse(result.message)
+        is DeviceAdmissionResult.InvalidResponse -> {
+            if (result.message == CONNECTION_IDENTITY_CHANGED_DIAGNOSTIC) {
+                ProbeMessage.IdentityChanged
+            } else {
+                ProbeMessage.InvalidResponse(result.message)
+            }
+        }
         is DeviceAdmissionResult.NetworkFailure -> ProbeMessage.NetworkFailure(result.message)
         is DeviceAdmissionResult.RejectedEndpoint -> ProbeMessage.RejectedEndpoint(result.reason.toStringResource())
         is DeviceAdmissionResult.Verified -> {
@@ -5572,6 +5658,7 @@ private sealed interface ProbeMessage {
     data class AuthRequired(val origin: String) : ProbeMessage
     data class Forbidden(val origin: String) : ProbeMessage
     data class RejectedEndpoint(@param:StringRes val reasonString: Int) : ProbeMessage
+    data object IdentityChanged : ProbeMessage
     data class InvalidResponse(val detail: String) : ProbeMessage
     data class NetworkFailure(val detail: String) : ProbeMessage
     data class HttpFailure(
@@ -5580,6 +5667,9 @@ private sealed interface ProbeMessage {
     ) : ProbeMessage
     data class Verified(val deviceLabel: String) : ProbeMessage
 }
+
+private const val CONNECTION_IDENTITY_CHANGED_DIAGNOSTIC =
+    "connection identity changed during admission"
 
 internal data class AuthorityRevision(
     val authorityEpoch: String,
@@ -5672,36 +5762,7 @@ private sealed interface PreviewMessage {
     data class HttpFailure(val statusCode: Int) : PreviewMessage
 }
 
-private sealed interface SessionMessage {
-    data object AuthRequired : SessionMessage
-    data object Forbidden : SessionMessage
-    data object InvalidRequest : SessionMessage
-    data class InvalidResponse(val detail: String) : SessionMessage
-    data class NetworkFailure(val detail: String) : SessionMessage
-    data class HttpFailure(val statusCode: Int) : SessionMessage
-}
-
-private sealed interface SessionManifestMessage {
-    data object Loading : SessionManifestMessage
-    data object NotFound : SessionManifestMessage
-    data object AuthRequired : SessionManifestMessage
-    data object Forbidden : SessionManifestMessage
-    data class InvalidRequest(val detail: String) : SessionManifestMessage
-    data class InvalidResponse(val detail: String) : SessionManifestMessage
-    data class NetworkFailure(val detail: String) : SessionManifestMessage
-    data class HttpFailure(val statusCode: Int) : SessionManifestMessage
-}
-
-private sealed interface UnsuccessfulOutcomeMessage {
-    data object Loading : UnsuccessfulOutcomeMessage
-    data object NotFound : UnsuccessfulOutcomeMessage
-    data object AuthRequired : UnsuccessfulOutcomeMessage
-    data object Forbidden : UnsuccessfulOutcomeMessage
-    data class InvalidRequest(val detail: String) : UnsuccessfulOutcomeMessage
-    data class InvalidResponse(val detail: String) : UnsuccessfulOutcomeMessage
-    data class NetworkFailure(val detail: String) : UnsuccessfulOutcomeMessage
-    data class HttpFailure(val statusCode: Int) : UnsuccessfulOutcomeMessage
-}
+private data class SessionMessage(val presentation: SessionDiagnosticPresentation)
 
 private sealed interface ArtifactDownloadMessage {
     data class Running(val role: String) : ArtifactDownloadMessage

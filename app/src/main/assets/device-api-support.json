@@ -14,6 +14,15 @@
       "lifecycle": "current",
       "source": "openaria-score/contracts/openapi/ylx-device-v4.openapi.yaml",
       "status": "present"
+    },
+    "sessionManifestSchema": {
+      "path": "schemas/ylx-device-session-v2.schema.json",
+      "sha256": "7de77a092152cb68d57fc9e46dcc3024fe521dbcf5961999cf0ac887186a59c8",
+      "bytes": 14034,
+      "id": "urn:ylx:schema:device-session:v2",
+      "lifecycle": "current",
+      "source": "openaria-bridge-desktop/contracts/schemas/ylx-device-session-v2.schema.json",
+      "status": "present"
     }
   },
   "productionAdapter": {
@@ -66,7 +75,7 @@
       "calibration capture capability projection",
       "calibration capture admission gating",
       "calibration capture start mode",
-      "session manifest parsing",
+      "strict current ylx.device-session.v2 split-eye H.264 MP4 segment-pair and explicit segmented WAV/not-recorded manifest parsing",
       "artifact HEAD metadata validation",
       "artifact descriptor-bound Range transport",
       "artifact cancel, failure, and .part cleanup",
@@ -95,9 +104,11 @@
     ],
     "compatibilityOnly": [
       "ylx.session-list.v2 is read-only first-page compatibility; its continuation cursor is never followed",
-      "Device API v4 safe-swap wire parsing is frozen compatibility code with no production UI, controller, polling, documentation claim, or acceptance path"
+      "Device API v4 safe-swap wire parsing is frozen compatibility code with no production projection state or effect, UI, controller, polling, documentation claim, or acceptance path"
     ],
-    "failClosed": [],
+    "failClosed": [
+      "current ylx.device-session.v2 rejects raw-side-by-side and single-file video or audio media profiles"
+    ],
     "reason": "The production Device API adapter is enabled only for current fixed-storage v4 product operations. Destructive or connectivity-breaking actions remain gated by body-declared capability, idempotency keys, explicit user confirmation, and authoritative status reconciliation."
   }
 }

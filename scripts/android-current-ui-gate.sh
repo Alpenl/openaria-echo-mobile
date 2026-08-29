@@ -18,7 +18,7 @@ readonly missing_evidence_failure=72
 readonly state_capture_failure=73
 readonly checksum_failure=74
 readonly evidence_identity_failure=75
-readonly profiles=(small_gesture small_three_button landscape_gesture cutout_three_button)
+readonly profiles=(small_gesture small_three_button landscape_gesture landscape_three_button cutout_three_button)
 readonly cutout_overlay_prefix="com.android.internal.display.cutout.emulation."
 readonly navigation_gestural_overlay="com.android.internal.systemui.navbar.gestural"
 readonly navigation_three_button_overlay="com.android.internal.systemui.navbar.threebutton"
@@ -372,6 +372,12 @@ load_profile_expectations() {
       profile_expected_navigation_overlay="com.android.internal.systemui.navbar.gestural"; profile_expected_navigation_mode="2"
       profile_expected_cutout_overlays=""; profile_expected_cutout_state="absent"
       ;;
+    landscape_three_button)
+      profile_expected_wm_size="720x1280"; profile_expected_window_width="1280"; profile_expected_window_height="720"
+      profile_expected_density="320"; profile_expected_rotation="1"
+      profile_expected_navigation_overlay="com.android.internal.systemui.navbar.threebutton"; profile_expected_navigation_mode="0"
+      profile_expected_cutout_overlays=""; profile_expected_cutout_state="absent"
+      ;;
     cutout_three_button)
       profile_expected_wm_size="$initial_physical_size"
       natural_width="${initial_physical_size%x*}"; natural_height="${initial_physical_size#*x}"
@@ -399,7 +405,7 @@ configure_profile() {
   load_profile_expectations "$profile" || return $?
   run_mutation 'disable active cutout overlays' disable_enabled_overlays "$cutout_overlay_prefix"
   case "$profile" in
-    small_gesture | small_three_button | landscape_gesture)
+    small_gesture | small_three_button | landscape_gesture | landscape_three_button)
       run_mutation 'set 720x1280 wm override' adb_shell wm size 720x1280
       run_mutation 'set 320 dpi override' adb_shell wm density 320
       ;;

@@ -705,7 +705,7 @@ public final class AppUpdateManager {
                     null,
                     0,
                     0,
-                    "Tap Check to query GitHub Releases.");
+                    "");
         }
 
         static State current(long currentBuildNumber, String currentVersionName, String message) {

@@ -12,31 +12,43 @@ class VisualEvidenceBaselineTest {
         val instrumentation = File(
             "src/androidTest/java/com/openaria/openaria_echo_mobile/CurrentUiVisualGateTest.kt",
         )
+        val landscapeThreeButtonTest = File(
+            "src/androidTest/java/com/openaria/openaria_echo_mobile/LandscapeThreeButtonSafeAreaTest.kt",
+        )
         val runner = File("../scripts/android-current-ui-gate.sh")
         val runnerBehaviorTests = File("../scripts/test_android_current_ui_gate.py")
         val ci = File("../.github/workflows/mobile-ci.yml").readText()
         val release = File("../.github/workflows/mobile-release.yml").readText()
 
         assertTrue(instrumentation.isFile, "Current APK visual instrumentation gate must be versioned.")
+        assertTrue(landscapeThreeButtonTest.isFile, "Landscape three-button safe-area instrumentation must be versioned.")
         assertTrue(runner.isFile, "Current APK visual profile runner must be versioned.")
         assertTrue(runnerBehaviorTests.isFile, "Current APK visual runner behavior tests must be versioned.")
 
         val testSource = instrumentation.readText()
+        val landscapeThreeButtonTestSource = landscapeThreeButtonTest.readText()
         val runnerSource = runner.readText()
+        val runnerBehaviorTestSource = runnerBehaviorTests.readText()
         listOf(
             "small_gesture",
             "small_three_button",
             "landscape_gesture",
+            "landscape_three_button",
             "cutout_three_button",
         ).forEach { profile ->
             assertContains(testSource, profile)
             assertContains(runnerSource, profile)
+            assertContains(runnerBehaviorTestSource, profile)
         }
         assertContains(testSource, "createAndroidComposeRule<MainActivity>")
         assertContains(testSource, "WindowInsetsCompat.Type.displayCutout()")
         assertContains(testSource, "config_navBarInteractionMode")
         assertContains(testSource, "assertRectInside")
         assertContains(testSource, "assertNoPositiveOverlap")
+        assertContains(testSource, "assertTextHasNoVisualOverflow")
+        assertContains(testSource, "previewStatusBodyBoundsPx")
+        assertContains(testSource, "previewControlBoundsPx")
+        assertContains(testSource, "PREVIEW_CONTROL_RESOURCES")
         assertContains(testSource, "takeScreenshot()")
         assertContains(testSource, "Bitmap.CompressFormat.PNG")
         assertContains(testSource, "BitmapFactory.decodeFile")
@@ -50,6 +62,9 @@ class VisualEvidenceBaselineTest {
         assertContains(testSource, "hasWindowFocus()")
         assertContains(testSource, "expectedWindowWidthPx")
         assertContains(testSource, "must explicitly have no display cutout")
+        assertContains(landscapeThreeButtonTestSource, "WindowInsetsCompat.Type.displayCutout()")
+        assertContains(landscapeThreeButtonTestSource, "PREVIEW_CONTROL_RESOURCES")
+        assertContains(landscapeThreeButtonTestSource, "assertRectInside")
         assertFalse(testSource.contains("screencap -p"), "An unvalidated second screencap must never be uploaded.")
         assertContains(runnerSource, "\"\$adb_bin\" pull")
         assertFalse(runnerSource.contains("exec-out run-as"), "AGP uninstalls the app before host-side evidence export.")

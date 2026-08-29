@@ -17,13 +17,48 @@ class WorkflowGateTest {
         listOf(ci, release).forEach { workflow ->
             assertContains(workflow, "assembleDebugAndroidTest")
             assertContains(workflow, "Enable KVM for Android emulator")
-            assertContains(workflow, "ReactiveCircus/android-emulator-runner@v2.38.0")
+            assertContains(
+                workflow,
+                "ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0",
+            )
             assertContains(workflow, "api-level: 35")
             assertContains(workflow, "target: google_apis")
             assertContains(workflow, "arch: x86_64")
             assertContains(workflow, "profile: pixel_2")
             assertContains(workflow, "-gpu swiftshader")
             assertContains(workflow, "connectedDebugAndroidTest")
+        }
+    }
+
+    @Test
+    fun `third party workflow actions are pinned to immutable commits`() {
+        fun actionReferences(contents: String): List<String> =
+            contents.lineSequence()
+                .map { it.trim().removePrefix("- ").trim() }
+                .filter { it.startsWith("uses:") }
+                .map { it.removePrefix("uses:").trim().substringBefore(" #").trim() }
+                .toList()
+
+        val workflows =
+            listOf(
+                File("../.github/workflows/mobile-ci.yml"),
+                releaseFile,
+            )
+
+        assertTrue(
+            actionReferences("- uses: example/action@v1") == listOf("example/action@v1"),
+            "The pin scanner must cover compact '- uses:' YAML steps.",
+        )
+        workflows.forEach { workflow ->
+            actionReferences(workflow.readText())
+                .forEach { reference ->
+                    if (!reference.startsWith("./")) {
+                        assertTrue(
+                            reference.substringAfterLast('@').matches(Regex("[0-9a-f]{40}")),
+                            "${workflow.name} must pin $reference to a full commit SHA.",
+                        )
+                    }
+                }
         }
     }
 
@@ -35,6 +70,26 @@ class WorkflowGateTest {
             appBuild.contains("managedDevices"),
             "AGP managed devices currently pass emulator -gpu auto-no-window, which emulator 37 rejects.",
         )
+    }
+
+    @Test
+    fun `frozen safe-swap compatibility is absent from CI and release workflows`() {
+        val appBuild = File("build.gradle.kts").readText()
+        val ci = File("../.github/workflows/mobile-ci.yml").readText()
+        val release = releaseFile.readText()
+        val readme = File("../README.md").readText()
+        val releaseGuide = File("../docs/ANDROID_RELEASE.md").readText()
+
+        assertContains(appBuild, "testFrozenCompatibility")
+        assertContains(appBuild, "includeFrozenCompatibility")
+        assertContains(appBuild, "Manual-only frozen safe-swap parser/projection compatibility checks")
+        assertFalse(ci.contains("frozen-safe-swap-compatibility"))
+        assertFalse(ci.contains("testFrozenCompatibility"))
+        assertFalse(release.contains("frozen-safe-swap-compatibility"))
+        assertFalse(release.contains("testFrozenCompatibility"))
+        assertContains(readme, "CI 和 release workflow 不调用它")
+        assertContains(releaseGuide, "CI and release workflows do not invoke that task")
+        assertContains(releaseGuide, "never release acceptance evidence")
     }
 
     @Test
@@ -120,7 +175,26 @@ class WorkflowGateTest {
         assertFalse(trigger.contains("push:"), "A tag push must not bypass the trusted admin preflight.")
         assertContains(release, "actions: read")
         assertContains(release, "contents: write")
+        val workflowPermissions = release.substringBefore("jobs:")
+        val androidJob = release.substringAfter("  android:").substringBefore("\n  release:")
+        val releaseJobPermissions =
+            release.substringAfter("  release:").substringBefore("    steps:")
+        assertContains(workflowPermissions, "contents: read")
+        assertFalse(
+            androidJob.contains("contents: write"),
+            "Build, test, and signing steps must not receive repository write permission.",
+        )
+        assertContains(releaseJobPermissions, "contents: write")
         assertContains(metadata, "Only the repository owner may dispatch")
+        assertContains(metadata, "default_branch")
+        assertContains(metadata, "default_branch_head")
+        assertContains(metadata, "live_default_branch")
+        assertContains(metadata, "live_default_branch_head")
+        assertContains(metadata, "repos/\${GITHUB_REPOSITORY}/commits/\${live_default_branch}")
+        assertContains(metadata, "refs/heads/\${live_default_branch}")
+        assertContains(metadata, "GITHUB_SHA")
+        assertContains(metadata, "release workflow definition must run from the exact protected default-branch head")
+        assertContains(metadata, "default-branch head")
         assertContains(metadata, "GITHUB_RUN_ATTEMPT")
         assertContains(metadata, "Release reruns cannot reuse immutable-release preflight evidence")
         val releaseJob = release.substringAfter("  release:")
@@ -225,6 +299,13 @@ class WorkflowGateTest {
         assertContains(preparation, "Content-Type: application/octet-stream")
         assertContains(preparation, "already has a never-public draft")
         assertContains(preparation, "will not adopt, edit, or delete an unowned draft")
+        assertContains(preparation, "Release tag \${RELEASE_TAG} already exists")
+        assertContains(preparation, "no pre-existing tag or Release")
+        assertFalse(
+            preparation.contains("tag_commit") &&
+                preparation.contains("but this build checked out"),
+            "A matching existing tag must not be adopted by a later publication attempt.",
+        )
         assertFalse(preparation.contains("--method DELETE"))
         assertFalse(preparation.contains("gh release upload"))
         assertFalse(preparation.contains("gh release create"))
@@ -298,6 +379,10 @@ class WorkflowGateTest {
             release
                 .substringAfter("      - name: Upgrade previous production through the staged production updater")
                 .substringBefore("      - name: Upload pre-publish in-app upgrade evidence")
+        val stagedEvidenceUpload =
+            release
+                .substringAfter("      - name: Upload pre-publish in-app upgrade evidence")
+                .substringBefore("      - name: Publish the receipt-owned GitHub Release")
 
         assertContains(release, "system-images;android-33;google_apis;x86_64")
         assertContains(stagedStep, "api-level: 33")
@@ -306,6 +391,7 @@ class WorkflowGateTest {
         assertFalse(stagedStep.contains("script: |"))
         assertFalse(stagedStep.contains("\\\n"))
         assertContains(stagedStep, "scripts/android-staged-update-acceptance.sh")
+        assertContains(stagedEvidenceUpload, "if-no-files-found: error")
         assertContains(helper, "adb root")
         assertContains(helper, "adb remount")
         assertContains(helper, "getprop sys.boot_completed")
@@ -348,6 +434,8 @@ class WorkflowGateTest {
             release
                 .substringAfter("      - name: Post-publish verification")
                 .substringBefore("      - name: Upload post-publish verification evidence")
+        val postPublishEvidenceUpload =
+            release.substringAfter("      - name: Upload post-publish verification evidence")
 
         assertContains(postPublish, "if: always()")
         assertTrue(
@@ -368,6 +456,8 @@ class WorkflowGateTest {
         assertContains(postPublish, "published_assets")
         assertContains(postPublish, "openaria.mobile.release-post-publish-verification.v1")
         assertContains(postPublish, "legacy_bootstrap_authorized")
+        assertContains(postPublishEvidenceUpload, "if-no-files-found: error")
+        assertFalse(release.contains("if-no-files-found: warn"))
         listOf("--method PATCH", "--method POST", "--method DELETE", "gh release edit", "gh release upload").forEach {
             assertFalse(postPublish.contains(it), "Post-publication verification must remain read-only: $it")
         }

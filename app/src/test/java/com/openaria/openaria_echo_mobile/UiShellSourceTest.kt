@@ -12,6 +12,9 @@ class UiShellSourceTest {
         val source = echoAppSource()
 
         assertContains(source, "WindowInsets.safeDrawing.asPaddingValues()")
+        assertContains(source, "val layoutDirection = LocalLayoutDirection.current")
+        assertContains(source, "safeDrawing.calculateLeftPadding(layoutDirection) + 12.dp")
+        assertContains(source, "safeDrawing.calculateRightPadding(layoutDirection) + 12.dp")
         assertContains(source, "bottomNavigationReserve = safeDrawing.calculateBottomPadding() + 86.dp")
         assertFalse(
             source.contains("WindowInsets.systemBars.asPaddingValues()"),
@@ -110,6 +113,26 @@ class UiShellSourceTest {
         assertContains(source, "private fun updateInstallDisabledReason")
         assertContains(source, "update_install_disabled_no_update")
         assertContains(source, "update_install_disabled_busy")
+    }
+
+    @Test
+    fun `app update stays in app and raw diagnostics are failure only`() {
+        val source = echoAppSource()
+        val manager = File("src/main/java/com/openaria/openaria_echo_mobile/AppUpdateManager.java").readText()
+        val localizedResources =
+            listOf(
+                File("src/main/res/values/strings.xml"),
+                File("src/main/res/values-en/strings.xml"),
+            ).joinToString("\n") { it.readText() }
+
+        assertContains(
+            source,
+            "state.phase == AppUpdateManager.Phase.FAILED && state.message.isNotBlank()",
+        )
+        assertFalse(localizedResources.contains("GitHub Releases"))
+        assertFalse(manager.contains("Tap Check to query GitHub Releases"))
+        assertContains(localizedResources, "在应用内检查并下载更新")
+        assertContains(localizedResources, "download updates in the app")
     }
 
     @Test
@@ -318,25 +341,31 @@ class UiShellSourceTest {
     }
 
     @Test
-    fun `session ledger UI delegates refresh and pagination ordering to revision-aware repository`() {
+    fun `session ledger UI delegates transport jobs and recovery to the revision-aware controller`() {
         val uiSource = echoAppSource()
+        val controllerSource = File(
+            "src/main/java/com/openaria/openaria_echo_mobile/body/api/SessionLedgerController.kt",
+        ).readText()
 
-        assertContains(uiSource, "SessionLedgerRepository()")
-        assertContains(uiSource, "sessionLedgerRepository.beginRefresh")
-        assertContains(uiSource, "sessionLedgerRepository.beginLoadMore()")
-        assertContains(uiSource, "SessionLedgerApplyResult.RefreshRequired")
-        assertContains(uiSource, "takeId = applied.takeId")
-        assertContains(uiSource, "takeId = request.takeId")
-        assertContains(uiSource, "limit = applied.limit")
-        assertContains(uiSource, "catalogRecovery = applied.catalogRecovery")
-        assertContains(uiSource, "sessionLedgerRepository.cancelInFlight()")
-        assertContains(uiSource, "sessionLedgerRepository.cancelLoadMore()")
-        assertContains(uiSource, "sessionRefreshTransportCancellation?.cancel()")
-        assertContains(uiSource, "sessionLoadMoreTransportCancellation?.cancel()")
-        assertContains(uiSource, "sessionLoadMoreJob?.cancel()")
-        assertContains(uiSource, "cancellation = transportCancellation")
+        assertContains(uiSource, "SessionLedgerController<DeviceConnection, DeviceAdmissionCancellation>")
+        assertContains(uiSource, "SessionFilterIntent.InheritCurrentFilter")
+        assertContains(uiSource, "sessionLedgerController.refresh")
+        assertContains(uiSource, "sessionLedgerController::loadMore")
+        assertContains(uiSource, "sessionLedgerController.cancelInFlight()")
+        assertContains(uiSource, "sessionLedgerController.cancelLoadMore()")
+        assertContains(uiSource, "sessionLedgerController.reset()")
+        assertContains(controllerSource, "SessionLedgerRepository()")
+        assertContains(controllerSource, "repository.beginRefresh")
+        assertContains(controllerSource, "repository.beginLoadMore()")
+        assertContains(controllerSource, "SessionLedgerApplyResult.RefreshRequired")
+        assertContains(controllerSource, "SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED")
+        assertContains(controllerSource, "pendingRefresh = PendingSessionLedgerRefresh")
+        assertContains(controllerSource, "requestGeneration != operationGeneration")
+        assertContains(controllerSource, "currentTakeId")
         assertContains(uiSource, "resetSessionLedgerForConnectionChange()")
         assertContains(uiSource, "page.readOnlyDiagnosticPresentations()")
+        assertFalse(uiSource.contains("sessionLedgerRepository"))
+        assertFalse(uiSource.contains("sessionLoadMoreJob"))
         assertFalse(uiSource.contains("mergeSessionRefresh"))
         assertFalse(uiSource.contains("appendSessionPage"))
     }

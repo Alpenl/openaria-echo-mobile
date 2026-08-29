@@ -98,6 +98,52 @@ tasks.withType<org.gradle.api.tasks.compile.JavaCompile>().configureEach {
     options.compilerArgs.add("-Xlint:deprecation")
 }
 
+// Safe-swap remains readable at the frozen Device API boundary, but it is not
+// a current Echo product capability. Keep its positive wire/projection tests
+// in an explicitly named, manual-only compatibility task instead of letting
+// them become a release gate by being picked up by the default debug unit-test
+// task. CI and release workflows deliberately do not invoke this task.
+val frozenCompatibilityTestPatterns = listOf(
+    "*CaptureProjectionTest*safe*swap*",
+    "*DeviceApiValidatorsTest*safe*swap*",
+    "*DeviceHttpClientTest*safe*swap*",
+)
+
+val frozenCompatibilityTest = tasks.register<org.gradle.api.tasks.testing.Test>("testFrozenCompatibility") {
+    group = "verification"
+    description = "Manual-only frozen safe-swap parser/projection compatibility checks; not release acceptance."
+    filter {
+        frozenCompatibilityTestPatterns.forEach(::includeTestsMatching)
+    }
+}
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    if (name == "testDebugUnitTest") {
+        inputs.property(
+            "includeFrozenCompatibility",
+            project.findProperty("includeFrozenCompatibility")?.toString() == "true",
+        )
+        if (project.findProperty("includeFrozenCompatibility")?.toString() != "true") {
+            filter {
+                frozenCompatibilityTestPatterns.forEach(::excludeTestsMatching)
+            }
+        }
+    }
+}
+
+// Android Gradle Plugin registers the variant task during configuration. Bind
+// the independent compatibility runner only after all projects have finished
+// evaluating, before Gradle decides whether the runner has test sources.
+gradle.projectsEvaluated {
+    val debugUnitTest = tasks.findByName("testDebugUnitTest")
+        as? org.gradle.api.tasks.testing.Test
+        ?: error("Android debug unit-test task was not registered")
+    val compatibilityTask = frozenCompatibilityTest.get()
+    compatibilityTask.dependsOn("compileDebugUnitTestKotlin", "compileDebugUnitTestJavaWithJavac")
+    compatibilityTask.testClassesDirs = debugUnitTest.testClassesDirs
+    compatibilityTask.classpath = debugUnitTest.classpath
+}
+
 tasks.register("verifyUnitTestSources") {
     group = "verification"
     description = "Fails when the Android unit test task would be NO-SOURCE."

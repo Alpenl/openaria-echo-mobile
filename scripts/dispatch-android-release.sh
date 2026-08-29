@@ -46,6 +46,11 @@ if [[ "${remote_commit}" != "${source_commit}" ]]; then
   exit 1
 fi
 default_branch="$(gh api "repos/${repository}" --jq .default_branch)"
+default_branch_head="$(gh api "repos/${repository}/commits/${default_branch}" --jq .sha)"
+if [[ "${default_branch_head}" != "${source_commit}" ]]; then
+  echo "The release source must equal the current ${default_branch} head ${default_branch_head}; got ${source_commit}." >&2
+  exit 1
+fi
 
 control_root="$(mktemp -d)"
 cleanup() {
@@ -80,6 +85,8 @@ preflight="$({
     --arg repository "${repository}" \
     --arg actor "${actor}" \
     --arg source_commit "${source_commit}" \
+    --arg default_branch "${default_branch}" \
+    --arg default_branch_head "${default_branch_head}" \
     --arg release_tag "${release_tag}" \
     --argjson allow_legacy_baseline_bootstrap "${allow_legacy_baseline_bootstrap}" \
     --arg endpoint "GET /repos/${repository}/immutable-releases" \
@@ -89,7 +96,10 @@ preflight="$({
     --arg response_raw_base64 "${response_raw_base64}" \
     --slurpfile response "${raw_response}" \
     '{schema: $schema, repository: $repository, actor: $actor,
-      source_commit: $source_commit, release_tag: $release_tag,
+      source_commit: $source_commit,
+      default_branch: $default_branch,
+      default_branch_head: $default_branch_head,
+      release_tag: $release_tag,
       allow_legacy_baseline_bootstrap: $allow_legacy_baseline_bootstrap,
       endpoint: $endpoint, api_version: $api_version,
       checked_at: $checked_at, enabled: true,

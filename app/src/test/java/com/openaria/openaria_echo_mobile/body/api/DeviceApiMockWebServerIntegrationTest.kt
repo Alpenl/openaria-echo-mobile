@@ -3,6 +3,7 @@ package com.openaria.openaria_echo_mobile.body.api
 import com.openaria.openaria_echo_mobile.security.EndpointPolicy
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -174,8 +175,20 @@ class DeviceApiMockWebServerIntegrationTest {
             val page = assertIs<SessionListResult.Page>(result).value
             assertEquals("/api/v4/sessions?limit=50", request.path)
             assertEquals(SessionListContract.V3, page.contract)
-            assertEquals("unusable", page.items.single().verificationVerdict)
-            assertEquals("unusable test take", page.items.single().displayName)
+            val session = page.items.single()
+            assertEquals("unusable", session.verificationVerdict)
+            assertEquals("unusable test take", session.displayName)
+            val diagnostic = assertIs<GatewayVerificationDiagnostic.Current>(
+                requireNotNull(session.verification).diagnostics.single(),
+            )
+            assertEquals(
+                GatewayVerificationDiagnosticCode.ARTIFACT_DIGEST_MISMATCH,
+                diagnostic.code,
+            )
+            assertEquals(
+                "artifact content SHA-256 does not match the manifest",
+                diagnostic.summary,
+            )
         }
     }
 
@@ -198,50 +211,38 @@ class DeviceApiMockWebServerIntegrationTest {
     }
 
     @Test
-    fun `catalog recovery sends the original take filter without a cursor`() {
+    fun `controller catalog recovery sends the original take filter without a cursor`() {
         withMockWebServer { server ->
             server.enqueue(jsonResponse(200, fixtureText("session-list-v3.json")))
             server.enqueue(jsonResponse(409, fixtureText("catalog-changed.json")))
             server.enqueue(jsonResponse(200, fixtureText("session-list-v3-unusable.json")))
-            val repository = SessionLedgerRepository()
             val client = DeviceHttpClient()
             val connection = connection(server)
+            runBlocking {
+                val controller =
+                    SessionLedgerController<DeviceConnection, DeviceAdmissionCancellation>(
+                        scope = this,
+                        cancellationFactory = ::DeviceAdmissionCancellation,
+                        cancelTransport = DeviceAdmissionCancellation::cancel,
+                        transport = { target, request, cancellation ->
+                            client.listSessions(
+                                connection = target,
+                                limit = request.limit,
+                                cursor = request.cursor,
+                                takeId = request.takeId,
+                                cancellation = cancellation,
+                            )
+                        },
+                    )
 
-            val first = requireNotNull(repository.beginRefresh(takeId = TAKE_ID))
-            assertIs<SessionLedgerApplyResult.Applied>(
-                repository.complete(
-                    first,
-                    client.listSessions(connection, takeId = first.takeId),
-                ),
-            )
-            val append = requireNotNull(repository.beginLoadMore())
-            val refreshRequired = assertIs<SessionLedgerApplyResult.RefreshRequired>(
-                repository.complete(
-                    append,
-                    client.listSessions(
-                        connection = connection,
-                        cursor = append.cursor,
-                        takeId = append.takeId,
-                    ),
-                ),
-            )
-            val recovery = requireNotNull(
-                repository.beginRefresh(
-                    takeId = refreshRequired.takeId,
-                    limit = refreshRequired.limit,
-                    catalogRecovery = true,
-                ),
-            )
-            assertIs<SessionLedgerApplyResult.Applied>(
-                repository.complete(
-                    recovery,
-                    client.listSessions(connection, takeId = recovery.takeId),
-                ),
-            )
+                controller.refresh(connection, SessionFilterIntent.Exact(TAKE_ID))
+                controller.awaitIdle()
+                controller.loadMore(connection)
+                controller.awaitIdle()
 
-            assertEquals(TAKE_ID, refreshRequired.takeId)
-            assertNull(recovery.cursor)
-            assertEquals(TAKE_ID, recovery.takeId)
+                assertEquals(TAKE_ID, controller.currentTakeId)
+                assertNull(controller.state.failure)
+            }
             assertEquals(
                 "/api/v4/sessions?limit=50&take_id=$TAKE_ID",
                 server.takeRecordedRequest().path,

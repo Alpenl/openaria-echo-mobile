@@ -10,13 +10,18 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsNode
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
@@ -25,6 +30,11 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.openaria.openaria_echo_mobile.ui.EchoApp
 import com.openaria.openaria_echo_mobile.ui.theme.EchoTheme
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -91,6 +101,41 @@ class EchoAppUiSmokeTest {
         }
     }
 
+    @Test
+    fun previewStatusBodyAndControlsKeepIndependentUnclippedLayoutOnNarrowPortrait() {
+        renderEchoApp(localeTag = "zh-CN", widthDp = 360, heightDp = 740)
+
+        assertPreviewStatusAndControlsAreIndependent()
+    }
+
+    @Test
+    fun previewStatusBodyAndPrimaryCommandsStayVisibleOnCompactLandscape() {
+        renderEchoApp(localeTag = "zh-CN", widthDp = 600, heightDp = 360)
+
+        assertPreviewStatusAndControlsAreIndependent()
+    }
+
+    @Test
+    fun widePortraitKeepsThePortraitPreviewToolRail() {
+        renderEchoApp(localeTag = "zh-CN", widthDp = 700, heightDp = 900)
+
+        val toolBounds = listOf("网格", "对焦峰值", "IMU 叠加").map { label ->
+            compose
+                .onNodeWithContentDescription(label, useUnmergedTree = true)
+                .assertIsDisplayed()
+                .fetchSemanticsNode()
+                .boundsInRoot
+        }
+        assertTrue(
+            "Wide portrait must keep preview tools in one vertical rail: $toolBounds",
+            toolBounds.all { abs(it.left - toolBounds.first().left) <= GEOMETRY_TOLERANCE_PX },
+        )
+        assertTrue(
+            "Wide portrait preview tools must keep their vertical order: $toolBounds",
+            toolBounds.zipWithNext().all { (top, bottom) -> top.bottom < bottom.top },
+        )
+    }
+
     private fun renderEchoApp(renderCaseState: MutableState<RenderCase>) {
         compose.setContent {
             val renderCase = renderCaseState.value
@@ -131,6 +176,15 @@ class EchoAppUiSmokeTest {
             .targetContext
             .localized(localeTag)
         val configuration = Configuration(localizedContext.resources.configuration)
+        if (widthDp != null && heightDp != null) {
+            configuration.screenWidthDp = widthDp
+            configuration.screenHeightDp = heightDp
+            configuration.orientation = if (widthDp > heightDp) {
+                Configuration.ORIENTATION_LANDSCAPE
+            } else {
+                Configuration.ORIENTATION_PORTRAIT
+            }
+        }
 
         CompositionLocalProvider(
             LocalContext provides localizedContext,
@@ -174,6 +228,52 @@ class EchoAppUiSmokeTest {
         return createConfigurationContext(configuration)
     }
 
+    private fun assertPreviewStatusAndControlsAreIndependent() {
+        val body = compose
+            .onNodeWithText(PREVIEW_STATUS_BODY, useUnmergedTree = true)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+        assertTextHasNoVisualOverflow("preview status body", body)
+
+        val controls = PREVIEW_CONTROL_LABELS.associateWith { label ->
+            compose
+                .onNodeWithContentDescription(label, useUnmergedTree = true)
+                .assertIsDisplayed()
+                .fetchSemanticsNode()
+                .boundsInRoot
+        }
+        controls.forEach { (label, bounds) ->
+            assertNoPositiveOverlap("preview status body", body.boundsInRoot, label, bounds)
+        }
+        val entries = controls.entries.toList()
+        entries.indices.forEach { leftIndex ->
+            ((leftIndex + 1) until entries.size).forEach { rightIndex ->
+                val left = entries[leftIndex]
+                val right = entries[rightIndex]
+                assertNoPositiveOverlap(left.key, left.value, right.key, right.value)
+            }
+        }
+
+        compose.onAllNodesWithText(PREVIEW_CONTRACT_NOTE, useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    private fun assertTextHasNoVisualOverflow(name: String, node: SemanticsNode) {
+        val layoutResults = mutableListOf<TextLayoutResult>()
+        val action = node.config[SemanticsActions.GetTextLayoutResult].action
+        assertTrue("$name must expose its real text layout result.", action?.invoke(layoutResults) == true)
+        assertTrue("$name must produce exactly one text layout result.", layoutResults.size == 1)
+        assertFalse("$name is clipped or ellipsized.", layoutResults.single().hasVisualOverflow)
+    }
+
+    private fun assertNoPositiveOverlap(leftName: String, left: Rect, rightName: String, right: Rect) {
+        val overlapWidth = max(0f, min(left.right, right.right) - max(left.left, right.left))
+        val overlapHeight = max(0f, min(left.bottom, right.bottom) - max(left.top, right.top))
+        assertTrue(
+            "$leftName overlaps $rightName by ${overlapWidth * overlapHeight}px^2: left=$left right=$right",
+            overlapWidth * overlapHeight <= GEOMETRY_TOLERANCE_PX,
+        )
+    }
+
     private data class RenderCase(
         val localeTag: String,
         val widthDp: Int,
@@ -181,4 +281,20 @@ class EchoAppUiSmokeTest {
         val fontScale: Float,
         val connectionTitle: String,
     )
+
+    private companion object {
+        const val PREVIEW_STATUS_BODY = "未连接机身时不显示伪造视频、ready 状态或录制指标。"
+        const val PREVIEW_CONTRACT_NOTE = "预览将使用 Device API v4 JPEG 最新帧；断流、相机未接入和鉴权失败会分开显示。"
+        const val GEOMETRY_TOLERANCE_PX = 1f
+        val PREVIEW_CONTROL_LABELS = listOf(
+            "双目",
+            "左眼",
+            "右眼",
+            "网格",
+            "对焦峰值",
+            "IMU 叠加",
+            "开始录制",
+            "停止",
+        )
+    }
 }

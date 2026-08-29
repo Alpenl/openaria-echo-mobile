@@ -81,7 +81,8 @@ class DeviceApiSupportManifestTest {
         val implemented = manifest.substringAfter("\"implemented\": [").substringBefore("],")
         assertFalse(implemented.contains("safe-swap") || implemented.contains("safe_swap"))
         assertContains(manifest, "safe-swap wire parsing is frozen compatibility code")
-        assertContains(manifest, "no production UI, controller, polling, documentation claim, or acceptance path")
+        assertContains(manifest, "no production projection state or effect")
+        assertContains(manifest, "UI, controller, polling, documentation claim, or acceptance path")
         assertContains(manifest, "calibration capture admission gating")
         assertContains(manifest, "calibration capture start mode")
         assertContains(manifest, "authoritative /network desired/observed/saved/verified status")
@@ -95,7 +96,10 @@ class DeviceApiSupportManifestTest {
         assertContains(manifest, "network SSE Last-Event-ID replay")
         assertContains(manifest, "Rescue AP transaction projection")
         assertContains(manifest, "MockWebServer Device API integration tests")
-        assertContains(manifest, "\"failClosed\": []")
+        assertContains(
+            manifest,
+            "current ylx.device-session.v2 rejects raw-side-by-side and single-file video or audio media profiles",
+        )
     }
 
     @Test

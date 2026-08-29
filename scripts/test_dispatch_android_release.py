@@ -23,6 +23,7 @@ class DispatchAndroidReleaseTest(unittest.TestCase):
         self,
         *extra: str,
         release_tag: str = "v0.1.7",
+        default_branch_head: str = SOURCE_COMMIT,
     ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -39,6 +40,8 @@ class DispatchAndroidReleaseTest(unittest.TestCase):
                       printf '%s\n' '{SOURCE_COMMIT}'
                     elif [[ "$1" == "api" && "$2" == "repos/Alpenl/openaria-echo-mobile" ]]; then
                       printf '%s\n' 'main'
+                    elif [[ "$1" == "api" && "$2" == "repos/Alpenl/openaria-echo-mobile/commits/main" ]]; then
+                      printf '%s\n' '{default_branch_head}'
                     elif [[ "$1" == "api" && "${{@: -1}}" == "repos/Alpenl/openaria-echo-mobile/immutable-releases" ]]; then
                       printf '%s\n' '{{"enabled":true,"enforced_by_owner":false}}'
                     elif [[ "$1" == "workflow" && "$2" == "run" ]]; then
@@ -81,6 +84,8 @@ class DispatchAndroidReleaseTest(unittest.TestCase):
         self.assertEqual("Alpenl/openaria-echo-mobile", evidence["repository"])
         self.assertEqual("Alpenl", evidence["actor"])
         self.assertEqual(SOURCE_COMMIT, evidence["source_commit"])
+        self.assertEqual("main", evidence["default_branch"])
+        self.assertEqual(SOURCE_COMMIT, evidence["default_branch_head"])
         self.assertEqual("v0.1.7", evidence["release_tag"])
         self.assertFalse(evidence["allow_legacy_baseline_bootstrap"])
         self.assertEqual(RAW_RESPONSE, base64.b64decode(str(evidence["response_raw_base64"])))
@@ -108,6 +113,14 @@ class DispatchAndroidReleaseTest(unittest.TestCase):
 
         self.assertEqual(1, result.returncode)
         self.assertIn("only for v0.1.7", result.stderr)
+        self.assertEqual([], captured)
+
+    def test_non_default_branch_head_fails_before_admin_read_or_dispatch(self) -> None:
+        other_head = "2" * 40
+        result, captured = self.run_dispatcher(default_branch_head=other_head)
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn(f"current main head {other_head}", result.stderr)
         self.assertEqual([], captured)
 
 

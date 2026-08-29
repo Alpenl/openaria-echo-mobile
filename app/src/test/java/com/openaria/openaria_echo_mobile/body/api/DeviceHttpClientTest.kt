@@ -773,8 +773,27 @@ class DeviceHttpClientTest {
         val manifest = assertIs<SessionManifestResult.Manifest>(result).value
         assertEquals("/api/v4/sessions/01991b70-7c88-7123-9234-123456789abc", requestedPath)
         assertEquals("test take", manifest.displayName)
-        assertEquals(3, manifest.artifacts.size)
-        assertEquals("video.raw-side-by-side", manifest.artifacts.last().role)
+        assertEquals(
+            listOf("imu.samples", "frames.index", "video.left", "video.right", "audio.wav"),
+            manifest.artifacts.map { it.role },
+        )
+    }
+
+    @Test
+    fun `rejects legacy raw side-by-side manifest returned by current v4 session endpoint`() {
+        val origin = startServer { exchange ->
+            exchange.respondJson(200, rawSideBySideSessionManifestJson())
+        }
+
+        val result = DeviceHttpClient().getSessionManifest(
+            connection(origin),
+            "01991b70-7c88-7123-9234-123456789abc",
+        )
+
+        assertEquals(
+            "video.layout must be split-eyes",
+            assertIs<SessionManifestResult.InvalidResponse>(result).message,
+        )
     }
 
     @Test
@@ -1248,6 +1267,10 @@ class DeviceHttpClientTest {
     }
 
     private fun deviceSessionManifestJson(): String {
+        return fixtureText("session-manifest-v2-recorded.json")
+    }
+
+    private fun rawSideBySideSessionManifestJson(): String {
         return """
             {
               "schema": "ylx.device-session.v2",

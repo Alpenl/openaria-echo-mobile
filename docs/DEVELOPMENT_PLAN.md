@@ -608,7 +608,7 @@ app/src/main/java/com/openaria/openaria_echo_mobile/
 
 任务：
 
-- `M0-001` 获取 v4 OpenAPI 原文件，验证 75767 bytes 和 SHA-256 `5808b4449201ce4657a3d0b80d018466c6294c81732d3b93a9f2b575c5e0d905`；同步 Web support manifest 的旧哈希。
+- `M0-001` [已完成] v4 OpenAPI 已固定为第 3.3 节所述中央契约 identity，并与 mobile support manifest 的 SHA-256、字节数和版本保持一致；这是已完成的契约基线，不再执行旧文件或旧哈希的获取任务。
 - `M0-002` 在 mobile 新增 consumer support 清单，consumer 标识为 `openaria-echo-mobile`，仅支持 major 4、unknown fail closed。
 - `M0-003` 从 Web fixture 和真机响应建立最小正反 fixture 集，不手写“看起来合理”的 JSON。
 - `M0-004` 真机确认 preview 的 Content-Type、典型 JPEG 尺寸/FPS/延迟、401/503 error body 和取消行为。

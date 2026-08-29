@@ -17,9 +17,14 @@ scripts/dispatch-android-release.sh <40-character-source-commit> <vX.Y.Z>
 The command performs the official
 `GET /repos/Alpenl/openaria-echo-mobile/immutable-releases` request, records the
 exact raw response and SHA-256, binds it to the owner, repository, source
-commit, and tag, then immediately creates a fresh `workflow_dispatch` run. The
-workflow compares the GET time with the Actions run `created_at`; it does not
-use job start time as evidence of an immediate dispatch.
+commit, current default branch and its exact HEAD, and tag, then immediately
+creates a fresh `workflow_dispatch` run. Production releases may only use the
+protected default-branch HEAD observed at dispatch. The workflow independently
+rechecks that HEAD and requires its own `GITHUB_REF` and `GITHUB_SHA` to identify
+the same branch and commit. A branch update during dispatch fails closed and
+requires a fresh preflight. The workflow compares the GET time with the Actions
+run `created_at`; it does not use job start time as evidence of an immediate
+dispatch.
 
 The local admin credential stays in the operator's existing `gh` credential
 store. It is never placed in a repository secret, workflow input, log message,
@@ -52,3 +57,8 @@ The flag is bound into the local admin preflight, ownership receipt, staged
 upgrade evidence, publication recheck, and post-publication evidence. It is
 rejected once an immutable Release is latest and cannot authorize any later
 version.
+
+The release matrix runs the current Android `testDebugUnitTest` suite only.
+Frozen safe-swap wire/parser checks are kept in the manual `:app:testFrozenCompatibility`
+task for source compatibility; CI and release workflows do not invoke that task,
+and it is never release acceptance evidence.

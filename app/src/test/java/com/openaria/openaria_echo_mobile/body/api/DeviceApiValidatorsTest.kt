@@ -468,8 +468,37 @@ class DeviceApiValidatorsTest {
 
         val valid = assertIs<Validation.Valid<SessionListPage>>(result).value
         assertEquals(SessionListContract.V3, valid.contract)
-        assertEquals("unusable", valid.items.single().verificationVerdict)
-        assertEquals("unusable test take", valid.items.single().displayName)
+        val session = valid.items.single()
+        assertEquals("unusable", session.verificationVerdict)
+        assertEquals("unusable test take", session.displayName)
+        val verification = requireNotNull(session.verification)
+        assertEquals(GatewayVerificationVerdict.UNUSABLE, verification.verdict)
+        assertEquals("gateway", verification.actor)
+        assertEquals(
+            "openaria-conductor-device-session-v2-integrity",
+            verification.validator.name,
+        )
+        assertEquals("1", verification.validator.version)
+        assertEquals(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            verification.validator.buildSha256,
+        )
+        assertEquals(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            verification.manifestSha256,
+        )
+        assertEquals("2026-08-28T04:00:12Z", verification.verifiedAt)
+        val diagnostic = assertIs<GatewayVerificationDiagnostic.Current>(
+            verification.diagnostics.single(),
+        )
+        assertEquals(
+            GatewayVerificationDiagnosticCode.ARTIFACT_DIGEST_MISMATCH,
+            diagnostic.code,
+        )
+        assertEquals(
+            "artifact content SHA-256 does not match the manifest",
+            diagnostic.summary,
+        )
     }
 
     @Test
@@ -644,7 +673,11 @@ class DeviceApiValidatorsTest {
             validV3SessionList(items = listOf(validSessionSummary())),
         )
 
-        assertIs<Validation.Valid<SessionListPage>>(legacyString)
+        val legacyPage = assertIs<Validation.Valid<SessionListPage>>(legacyString).value
+        val legacyDiagnostic = assertIs<GatewayVerificationDiagnostic.Legacy>(
+            requireNotNull(legacyPage.items.single().verification).diagnostics.single(),
+        )
+        assertEquals("artifact content digest mismatch", legacyDiagnostic.summary)
         assertEquals(
             "items[0].verification.diagnostics entries must be strings containing 1..512 characters",
             assertIs<Validation.Invalid>(legacyObject).message,
@@ -935,24 +968,131 @@ class DeviceApiValidatorsTest {
     }
 
     @Test
-    fun `accepts device session manifest and collects artifact descriptors`() {
-        val result = DeviceApiValidators.validateDeviceSessionManifest(validDeviceSessionManifest())
+    fun `accepts current split-eye recorded-audio manifest and collects segment artifacts`() {
+        val result = DeviceApiValidators.validateDeviceSessionManifest(currentDeviceSessionManifest())
 
         val valid = assertIs<Validation.Valid<DeviceSessionManifest>>(result)
         assertEquals("test take", valid.value.displayName)
-        assertEquals(3, valid.value.artifacts.size)
-        assertEquals(listOf("imu.samples", "frames.index", "video.raw-side-by-side"), valid.value.artifacts.map { it.role })
+        assertEquals(
+            listOf("imu.samples", "frames.index", "video.left", "video.right", "audio.wav"),
+            valid.value.artifacts.map { it.role },
+        )
     }
 
     @Test
     fun `rejects device session manifest artifact unsafe path`() {
-        val imu = validArtifact("imu.samples", "../imu.ndjson", "a")
-        val result = DeviceApiValidators.validateDeviceSessionManifest(
-            validDeviceSessionManifest(imuArtifact = imu),
-        )
+        val manifest = currentDeviceSessionManifest()
+        val imu = manifest.getValue("imu").objectCopy()
+        imu["artifact"] = validArtifact("imu.samples", "../imu.ndjson", "application/x-ndjson", "a")
+        manifest["imu"] = imu
+
+        val result = DeviceApiValidators.validateDeviceSessionManifest(manifest)
 
         val invalid = assertIs<Validation.Invalid>(result)
         assertEquals("imu.artifact.path is not a safe relative artifact path", invalid.message)
+    }
+
+    @Test
+    fun `accepts explicit not-recorded audio without inventing an artifact`() {
+        val manifest = currentDeviceSessionManifest()
+        manifest["audio"] = mapOf(
+            "state" to "not_recorded",
+            "requested_mode" to "disabled",
+            "resolved_mode" to "disabled",
+            "reason" to "user_disabled",
+        )
+
+        val result = DeviceApiValidators.validateDeviceSessionManifest(manifest)
+
+        val valid = assertIs<Validation.Valid<DeviceSessionManifest>>(result)
+        assertEquals(
+            listOf("imu.samples", "frames.index", "video.left", "video.right"),
+            valid.value.artifacts.map { it.role },
+        )
+    }
+
+    @Test
+    fun `rejects legacy raw side-by-side video in the current v4 manifest path`() {
+        val manifest = currentDeviceSessionManifest()
+        manifest["video"] = mapOf(
+            "layout" to "raw-side-by-side",
+            "codec" to "mjpeg",
+            "continuous" to true,
+            "artifact" to validArtifact(
+                "video.raw-side-by-side",
+                "video/raw.mjpeg",
+                "video/x-motion-jpeg",
+                "6",
+            ),
+        )
+
+        val result = DeviceApiValidators.validateDeviceSessionManifest(manifest)
+
+        assertEquals(
+            "video.layout must be split-eyes",
+            assertIs<Validation.Invalid>(result).message,
+        )
+    }
+
+    @Test
+    fun `rejects a single MP4 artifact instead of split-eye segment pairs`() {
+        val manifest = currentDeviceSessionManifest()
+        manifest["video"] = mapOf(
+            "layout" to "split-eyes",
+            "codec" to "h264",
+            "container" to "mp4",
+            "artifact" to validArtifact("video.left", "video/only.mp4", "video/mp4", "6"),
+        )
+
+        val result = DeviceApiValidators.validateDeviceSessionManifest(manifest)
+
+        assertEquals(
+            "video.missing required key segments",
+            assertIs<Validation.Invalid>(result).message,
+        )
+    }
+
+    @Test
+    fun `rejects implicit empty audio state`() {
+        val manifest = currentDeviceSessionManifest()
+        manifest["audio"] = emptyMap<String, Any?>()
+
+        val result = DeviceApiValidators.validateDeviceSessionManifest(manifest)
+
+        assertEquals(
+            "audio.state is required",
+            assertIs<Validation.Invalid>(result).message,
+        )
+    }
+
+    @Test
+    fun `rejects a single WAV artifact instead of recorded audio segments`() {
+        val manifest = currentDeviceSessionManifest()
+        manifest["audio"] = mapOf(
+            "state" to "recorded",
+            "requested_mode" to "enabled",
+            "resolved_mode" to "enabled",
+            "codec" to "pcm_s16le",
+            "container" to "wav",
+            "sample_format" to "S16_LE",
+            "sample_rate" to 48_000L,
+            "channels" to 2L,
+            "sample_count" to 480_000L,
+            "sync" to mapOf(
+                "time_base" to "host_monotonic",
+                "start_time_seconds" to 0L,
+                "end_time_seconds" to 10L,
+                "video_time_reference" to "session_time_seconds",
+            ),
+            "artifact" to validArtifact("audio.wav", "audio/audio.wav", "audio/wav", "6"),
+        )
+
+        val result = DeviceApiValidators.validateDeviceSessionManifest(manifest)
+
+        assertEquals(
+            "audio.missing required key segments",
+            assertIs<Validation.Invalid>(result).message,
+        )
     }
 
     @Test
@@ -1204,42 +1344,8 @@ class DeviceApiValidatorsTest {
         )
     }
 
-    private fun validDeviceSessionManifest(
-        imuArtifact: Map<String, Any?> = validArtifact("imu.samples", "imu.ndjson", "a"),
-    ): Map<String, Any?> {
-        return mapOf(
-            "schema" to "ylx.device-session.v2",
-            "manifest_id" to "01991b70-7c88-7456-9234-123456789abc",
-            "sealed" to true,
-            "sealed_at" to "2026-08-28T04:00:10Z",
-            "session_id" to "01991b70-7c88-7123-9234-123456789abc",
-            "volume_id" to "56005c52-31f1-4dac-91cd-d8eafd737d1c",
-            "capture_mode" to "production",
-            "display_name" to "test take",
-            "device" to mapOf<String, Any?>(),
-            "time" to mapOf<String, Any?>(),
-            "take" to mapOf<String, Any?>(),
-            "camera" to mapOf<String, Any?>(),
-            "video" to mapOf(
-                "layout" to "raw-side-by-side",
-                "codec" to "mjpeg",
-                "continuous" to true,
-                "artifact" to validArtifact("video.raw-side-by-side", "video.mjpeg", "c"),
-            ),
-            "imu" to mapOf(
-                "artifact" to imuArtifact,
-                "sample_count" to 24L,
-                "units" to "raw_int16",
-                "coordinate_frame" to "raw_device_axes",
-            ),
-            "frames" to mapOf(
-                "artifact" to validArtifact("frames.index", "frames.ndjson", "b"),
-                "count" to 12L,
-            ),
-            "audio" to mapOf<String, Any?>(),
-            "logs" to emptyList<Any>(),
-            "integrity" to mapOf<String, Any?>(),
-        )
+    private fun currentDeviceSessionManifest(): MutableMap<String, Any?> {
+        return fixtureMap("session-manifest-v2-recorded.json").toMutableMap()
     }
 
     private fun validRetainedUnsuccessfulOutcome(): Map<String, Any?> {
@@ -1258,16 +1364,18 @@ class DeviceApiValidatorsTest {
         )
     }
 
-    private fun validArtifact(role: String, path: String, hex: String): Map<String, Any?> {
+    private fun validArtifact(
+        role: String,
+        path: String,
+        mediaType: String,
+        hex: String,
+    ): Map<String, Any?> {
         val digest = hex.repeat(64)
         return mapOf(
             "artifact_id" to digest,
             "role" to role,
             "path" to path,
-            "media_type" to when {
-                role.startsWith("video.") -> "video/x-motion-jpeg"
-                else -> "application/x-ndjson"
-            },
+            "media_type" to mediaType,
             "bytes" to 128L,
             "sha256" to digest,
         )

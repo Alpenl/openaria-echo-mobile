@@ -16,9 +16,10 @@ import sys
 import tempfile
 import time
 import zipfile
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 REPOSITORY = "Alpenl/openaria-echo-mobile"
@@ -1669,22 +1670,19 @@ def download_anonymous_asset(
         "total_timeout_seconds": total_timeout_seconds,
         "allow_http_for_tests": allow_http_for_tests,
     }
-    environment = dict(os.environ)
-    for credential_name in (
-        "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-        "ACTIONS_ID_TOKEN_REQUEST_URL",
-        "ACTIONS_RUNTIME_TOKEN",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-    ):
-        environment.pop(credential_name, None)
+    environment = {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PYTHONUTF8": "1",
+    }
+    python_executable = str(Path(sys.executable).resolve(strict=True))
 
     started = time.monotonic()
     deadline = started + total_timeout_seconds
     process: subprocess.Popen[str] | None = None
     try:
         process = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), DOWNLOAD_WORKER_FLAG],
+            [python_executable, str(Path(__file__).resolve()), DOWNLOAD_WORKER_FLAG],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1786,13 +1784,8 @@ def download_anonymous_asset(
         "isolated_process": True,
         "reaped": process.poll() is not None,
         "network_elapsed_seconds": worker_elapsed,
-        "credentials_removed": [
-            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-            "ACTIONS_ID_TOKEN_REQUEST_URL",
-            "ACTIONS_RUNTIME_TOKEN",
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-        ],
+        "environment_policy": "fixed-minimal-allowlist",
+        "environment_names": sorted(environment),
     }
     report["limits"]["total_timeout_scope"] = (
         "worker start, DNS, TCP/TLS, headers, redirects, body, and worker reap"
@@ -1844,7 +1837,9 @@ def _safe_tool_output(
     return output
 
 
-def _preflight_aab_zip_container(aab_path: Path) -> dict[str, Any]:
+def _preflight_aab_zip_container(
+    archive_file: BinaryIO, archive_bytes: int
+) -> dict[str, Any]:
     eocd_struct = struct.Struct("<4s4H2IH")
     zip64_locator_struct = struct.Struct("<4sIQI")
     zip64_eocd_struct = struct.Struct("<4sQ2H2I4Q")
@@ -1854,14 +1849,6 @@ def _preflight_aab_zip_container(aab_path: Path) -> dict[str, Any]:
     zip64_eocd_signature = b"PK\x06\x06"
     central_signature = b"PK\x01\x02"
 
-    try:
-        archive_bytes = aab_path.stat().st_size
-    except OSError as error:
-        raise _download_failure(
-            "aab.archive.container_preflight.archive_bytes",
-            f"1..{AAB_MAX_ARCHIVE_BYTES}",
-            type(error).__name__,
-        ) from error
     mismatches: list[dict[str, Any]] = []
     _require(
         mismatches,
@@ -1881,7 +1868,7 @@ def _preflight_aab_zip_container(aab_path: Path) -> dict[str, Any]:
         raise VerificationFailure(mismatches)
 
     try:
-        with aab_path.open("rb") as archive_file:
+        with nullcontext(archive_file):
             tail_bytes = min(archive_bytes, eocd_struct.size + 65535)
             archive_file.seek(archive_bytes - tail_bytes)
             tail = archive_file.read(tail_bytes)
@@ -2212,8 +2199,11 @@ def _preflight_aab_zip_container(aab_path: Path) -> dict[str, Any]:
     }
 
 
-def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
-    container_evidence = _preflight_aab_zip_container(aab_path)
+def _audit_aab_archive_file(
+    archive_file: BinaryIO, archive_bytes: int
+) -> dict[str, Any]:
+    container_evidence = _preflight_aab_zip_container(archive_file, archive_bytes)
+    archive_file.seek(0)
     entries: list[zipfile.ZipInfo] = []
     payload_entries: list[str] = []
     signature_controls: list[str] = []
@@ -2221,7 +2211,7 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
     max_entry_uncompressed_bytes = 0
     max_compression_ratio = 0.0
     try:
-        with zipfile.ZipFile(aab_path) as archive:
+        with zipfile.ZipFile(archive_file) as archive:
             entries = archive.infolist()
             resource_mismatches: list[dict[str, Any]] = []
             _require(
@@ -2336,8 +2326,16 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
                     continue
                 signature_file = re.fullmatch(r"META-INF/([^/]*)\.SF", normalized_name)
                 if signature_file is not None:
-                    signature_files.append((signature_file.group(1), name))
+                    signature_basename = signature_file.group(1)
+                    signature_files.append((signature_basename, name))
                     signature_controls.append(name)
+                    _require(
+                        mismatches,
+                        bool(signature_basename),
+                        f"aab.archive.entries[{name}].signature_control_basename",
+                        "non-empty JAR signer basename",
+                        signature_basename,
+                    )
                     _require(
                         mismatches,
                         name == normalized_name,
@@ -2350,8 +2348,16 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
                     r"META-INF/([^/]*)\.(RSA|DSA|EC)", normalized_name
                 )
                 if signature_block is not None:
-                    signature_blocks.append((signature_block.group(1), name))
+                    signature_basename = signature_block.group(1)
+                    signature_blocks.append((signature_basename, name))
                     signature_controls.append(name)
+                    _require(
+                        mismatches,
+                        bool(signature_basename),
+                        f"aab.archive.entries[{name}].signature_control_basename",
+                        "non-empty JAR signer basename",
+                        signature_basename,
+                    )
                     _require(
                         mismatches,
                         name == normalized_name,
@@ -2454,6 +2460,112 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
             "container_checked_before_zipfile": True,
         },
     }
+
+
+def _stable_file_state(file_stat: os.stat_result) -> dict[str, int]:
+    return {
+        "device": file_stat.st_dev,
+        "inode": file_stat.st_ino,
+        "mode": file_stat.st_mode,
+        "size": file_stat.st_size,
+        "mtime_ns": file_stat.st_mtime_ns,
+        "ctime_ns": file_stat.st_ctime_ns,
+    }
+
+
+def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
+    try:
+        no_follow_flag = os.O_NOFOLLOW
+    except AttributeError as error:
+        raise VerificationFailure(
+            [
+                {
+                    "field": "aab.archive.stable_file.no_follow_support",
+                    "expected": True,
+                    "actual": False,
+                }
+            ]
+        ) from error
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow_flag
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(aab_path, flags)
+        before = os.fstat(descriptor)
+        mismatches: list[dict[str, Any]] = []
+        _require(
+            mismatches,
+            stat.S_ISREG(before.st_mode),
+            "aab.archive.stable_file.regular_file",
+            True,
+            False,
+        )
+        if mismatches:
+            raise VerificationFailure(mismatches)
+
+        archive_file = os.fdopen(descriptor, "rb", closefd=True)
+        descriptor = None
+        with archive_file:
+            evidence = _audit_aab_archive_file(archive_file, before.st_size)
+            archive_file.seek(0)
+            digest = hashlib.sha256()
+            remaining_bytes = before.st_size
+            while remaining_bytes > 0:
+                chunk = archive_file.read(min(DOWNLOAD_CHUNK_BYTES, remaining_bytes))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                remaining_bytes -= len(chunk)
+            trailing_bytes = archive_file.read(1)
+            after = os.fstat(archive_file.fileno())
+        before_state = _stable_file_state(before)
+        after_state = _stable_file_state(after)
+        hashed_bytes = before.st_size - remaining_bytes
+        _mismatch(
+            mismatches,
+            "aab.archive.stable_file.hashed_bytes",
+            before.st_size,
+            hashed_bytes,
+        )
+        _mismatch(
+            mismatches,
+            "aab.archive.stable_file.trailing_bytes",
+            0,
+            len(trailing_bytes),
+        )
+        _mismatch(
+            mismatches,
+            "aab.archive.stable_file.fstat_unchanged",
+            before_state,
+            after_state,
+        )
+        if mismatches:
+            raise VerificationFailure(mismatches)
+    except VerificationFailure:
+        raise
+    except OSError as error:
+        raise VerificationFailure(
+            [
+                {
+                    "field": "aab.archive.stable_file.open",
+                    "expected": "O_NOFOLLOW regular file opened once for preflight and ZIP audit",
+                    "actual": type(error).__name__,
+                }
+            ]
+        ) from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    evidence["container_preflight"]["stable_file"] = {
+        "opened_with_no_follow": True,
+        "regular_file": True,
+        "preflight_and_zipfile_same_descriptor": True,
+        "fstat_unchanged": True,
+        "hashed_bytes": hashed_bytes,
+        "digest": f"sha256:{digest.hexdigest()}",
+        "state": after_state,
+    }
+    return evidence
 
 
 def verify_aab_signature(
@@ -2674,8 +2786,10 @@ def verify_aab_signature(
         "schema": AAB_EVIDENCE_SCHEMA,
         "aab": {
             "name": aab_path.name,
-            "size": aab_path.stat().st_size,
-            "digest": f"sha256:{_sha256(aab_path)}",
+            "size": archive_evidence["container_preflight"]["stable_file"]["state"][
+                "size"
+            ],
+            "digest": archive_evidence["container_preflight"]["stable_file"]["digest"],
         },
         "archive": archive_evidence,
         "certificate_sha256": normalized_expected_certificate,
@@ -3006,6 +3120,84 @@ def verify_downloaded_release(
                 "archive",
                 "container_preflight",
                 "checked_before_zipfile",
+            ),
+        ),
+        (
+            "archive.container_preflight.stable_file.opened_with_no_follow",
+            True,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "stable_file",
+                "opened_with_no_follow",
+            ),
+        ),
+        (
+            "archive.container_preflight.stable_file.regular_file",
+            True,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "stable_file",
+                "regular_file",
+            ),
+        ),
+        (
+            "archive.container_preflight.stable_file.preflight_and_zipfile_same_descriptor",
+            True,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "stable_file",
+                "preflight_and_zipfile_same_descriptor",
+            ),
+        ),
+        (
+            "archive.container_preflight.stable_file.fstat_unchanged",
+            True,
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "stable_file",
+                "fstat_unchanged",
+            ),
+        ),
+        (
+            "archive.container_preflight.stable_file.hashed_bytes",
+            expected_aab["size"],
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "stable_file",
+                "hashed_bytes",
+            ),
+        ),
+        (
+            "archive.container_preflight.stable_file.state.size",
+            expected_aab["size"],
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "stable_file",
+                "state",
+                "size",
+            ),
+        ),
+        (
+            "archive.container_preflight.stable_file.digest",
+            expected_aab["digest"],
+            _at(
+                aab_verification,
+                "archive",
+                "container_preflight",
+                "stable_file",
+                "digest",
             ),
         ),
         (

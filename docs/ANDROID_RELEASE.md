@@ -69,24 +69,33 @@ and dispatch time are revalidated.
 The supplement selects the unique ownership artifact and downloads it by its
 numeric artifact ID into an exact one-file root. It anonymously downloads the
 closed four-asset public set through a per-byte hard ceiling taken from the
-validated API state. Each download runs in a credential-stripped isolated
-process. The parent applies the total wall-clock deadline to process startup,
-DNS, TCP/TLS, redirects, response headers, body transfer, termination, and
-reaping; the worker also applies connect and body deadlines while reading at
-most one socket payload at a time. On timeout the parent kills and reaps the
-worker and removes its partial file, so a slow-drip response cannot keep a
-resolver, thread, or connection alive. A partial file must match the exact state
-size and SHA-256 before an atomic rename makes it available to any APK or AAB
-tool. The verifier job also has a 30-minute hard timeout. It checks bytes, manifest, checksums,
-package/version, and APK identity, and verifies the AAB with a pinned
-certificate in an ephemeral one-entry truststore plus strict full-entry JAR
-verification. Before `ZipFile` can materialize the central directory, a bounded
-EOCD/ZIP64 preflight enforces a 256 MiB archive limit, a 16 MiB central-directory
-limit, at most 4096 declared and actually parsed entries, exact offsets, and an
-unambiguous single-disk structure. Before any ZIP payload is decompressed, each
-entry is then limited to 64 MiB, the total uncompressed size to 256 MiB, and the
-per-entry compression ratio to 100x. Duplicate ZIP entries and every extra JAR
-signature-control entry are rejected using the JDK's case-insensitive
+validated API state. Each download runs in an isolated process started with a
+fixed minimal environment containing only locale and Python UTF-8 controls; it
+does not inherit home/netrc, proxy, cloud, GitHub, SSH-agent, Python path, or
+dynamic-loader variables. The parent applies the total wall-clock deadline to
+process startup, DNS, TCP/TLS, redirects, response headers, body transfer,
+termination, and reaping; the worker also applies connect and body deadlines
+while reading at most one socket payload at a time. On timeout the parent kills
+and reaps the worker and removes its partial file, so a slow-drip response cannot
+keep a resolver, thread, or connection alive. A partial file must match the
+exact state size and SHA-256 before an atomic rename makes it available to any
+APK or AAB tool. The verifier job also has a 30-minute hard timeout. It checks
+bytes, manifest, checksums, package/version, and APK identity, and verifies the
+AAB with a pinned certificate in an ephemeral one-entry truststore plus strict
+full-entry JAR verification. Before `ZipFile` can materialize the central
+directory, a bounded EOCD/ZIP64 preflight enforces a 256 MiB archive limit, a
+16 MiB central-directory limit, at most 4096 declared and actually parsed
+entries, exact offsets, and an unambiguous single-disk structure. The archive is
+opened once as an
+`O_NOFOLLOW` regular-file descriptor; preflight and `ZipFile` share that exact
+descriptor, and matching before/after `fstat` state is recorded in the evidence,
+while an exact-size bounded SHA-256 pass on that descriptor binds the evidence
+digest. A path replacement therefore cannot switch the ZIP after preflight.
+Before any ZIP payload is decompressed, each entry is then limited to 64 MiB,
+the total uncompressed size to 256 MiB, and the per-entry compression ratio to
+100x.
+Duplicate ZIP entries and every extra JAR signature-control entry are rejected
+using the JDK's case-insensitive
 `META-INF`, extension, and `SIG-*` semantics, including empty basenames such as
 `META-INF/.SF` and `META-INF/SIG-`. Keytool and jarsigner calls have bounded
 timeouts and the temporary truststore is cleaned on timeout or failure. After

@@ -193,6 +193,56 @@ class BoundedAnonymousDownloadTest(unittest.TestCase):
             self.assertTrue(report["worker"]["reaped"])
             self.assertIn("DNS", report["limits"]["total_timeout_scope"])
 
+    def test_download_worker_receives_only_fixed_noncredential_environment(
+        self,
+    ) -> None:
+        captured_environments: list[dict[str, str]] = []
+        captured_commands: list[list[str]] = []
+        real_popen = subprocess.Popen
+
+        def capture_process(*args: object, **kwargs: object) -> subprocess.Popen[str]:
+            command = args[0]
+            environment = kwargs["env"]
+            self.assertIsInstance(command, list)
+            self.assertIsInstance(environment, dict)
+            captured_commands.append(list(command))  # type: ignore[arg-type]
+            captured_environments.append(dict(environment))  # type: ignore[arg-type]
+            return real_popen(*args, **kwargs)
+
+        sentinels = {
+            "AWS_SECRET_ACCESS_KEY": "sentinel-aws-secret",
+            "HTTPS_PROXY": "https://user:sentinel-proxy@example.invalid",
+            "HOME": "/tmp/sentinel-home",
+            "NETRC": "/tmp/sentinel-netrc",
+            "SSH_AUTH_SOCK": "/tmp/sentinel-ssh-agent",
+            "PYTHONPATH": "/tmp/sentinel-pythonpath",
+            "LD_PRELOAD": "/tmp/sentinel-loader.so",
+            "GH_TOKEN": "sentinel-gh-token",
+            "GITHUB_TOKEN": "sentinel-github-token",
+        }
+        with (
+            tempfile.TemporaryDirectory() as temporary_directory,
+            mock.patch.dict(os.environ, sentinels, clear=False),
+            mock.patch.object(
+                verifier.subprocess, "Popen", side_effect=capture_process
+            ),
+        ):
+            report = self.download(Path(temporary_directory), "/exact")
+
+        self.assertEqual(
+            [{"LANG": "C", "LC_ALL": "C", "PYTHONUTF8": "1"}],
+            captured_environments,
+        )
+        self.assertEqual(1, len(captured_commands))
+        self.assertTrue(Path(captured_commands[0][0]).is_absolute())
+        self.assertEqual(
+            "fixed-minimal-allowlist", report["worker"]["environment_policy"]
+        )
+        self.assertEqual(
+            ["LANG", "LC_ALL", "PYTHONUTF8"],
+            report["worker"]["environment_names"],
+        )
+
     def test_oversized_content_length_is_rejected_before_body_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -713,6 +763,22 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
                         "single_disk": True,
                         "unambiguous": True,
                         "checked_before_zipfile": True,
+                        "stable_file": {
+                            "opened_with_no_follow": True,
+                            "regular_file": True,
+                            "preflight_and_zipfile_same_descriptor": True,
+                            "fstat_unchanged": True,
+                            "hashed_bytes": len(aab),
+                            "digest": f"sha256:{sha256(aab)}",
+                            "state": {
+                                "device": 1,
+                                "inode": 1,
+                                "mode": 33188,
+                                "size": len(aab),
+                                "mtime_ns": 1,
+                                "ctime_ns": 1,
+                            },
+                        },
                         "limits": {
                             "archive_bytes": verifier.AAB_MAX_ARCHIVE_BYTES,
                             "central_directory_bytes": verifier.AAB_MAX_CENTRAL_DIRECTORY_BYTES,
@@ -792,6 +858,25 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
                 )
             self.assertIn(
                 "aab.strict_verification.aab.digest",
+                mismatch_fields(raised.exception),
+            )
+            aab_verification["aab"]["digest"] = f"sha256:{sha256(aab)}"
+            aab_verification["archive"]["container_preflight"]["stable_file"][
+                "fstat_unchanged"
+            ] = False
+            with self.assertRaises(VerificationFailure) as raised:
+                verify_downloaded_release(
+                    state=state,
+                    asset_dir=root,
+                    expected_certificate_sha256=CERTIFICATE,
+                    apk_signature_report=apk_signature,
+                    apk_package_report=apk_package,
+                    apk_version_name_report=apk_version_name,
+                    apk_version_code_report=apk_version_code,
+                    aab_verification=aab_verification,
+                )
+            self.assertIn(
+                "aab.strict_verification.archive.container_preflight.stable_file.fstat_unchanged",
                 mismatch_fields(raised.exception),
             )
 
@@ -942,6 +1027,22 @@ class StrictAabVerifierTest(unittest.TestCase):
         )
         self.assertTrue(
             evidence["archive"]["container_preflight"]["checked_before_zipfile"]
+        )
+        self.assertTrue(
+            evidence["archive"]["container_preflight"]["stable_file"][
+                "preflight_and_zipfile_same_descriptor"
+            ]
+        )
+        self.assertTrue(
+            evidence["archive"]["container_preflight"]["stable_file"]["fstat_unchanged"]
+        )
+        self.assertEqual(
+            evidence["aab"]["digest"],
+            evidence["archive"]["container_preflight"]["stable_file"]["digest"],
+        )
+        self.assertEqual(
+            evidence["aab"]["size"],
+            evidence["archive"]["container_preflight"]["stable_file"]["hashed_bytes"],
         )
         self.assertEqual(
             evidence["archive"]["entry_count"],
@@ -1115,11 +1216,60 @@ class StrictAabVerifierTest(unittest.TestCase):
                         self.verify(aab, root)
 
                 fields = mismatch_fields(raised.exception)
-                self.assertTrue(
-                    "aab.archive.signature_control_count" in fields
-                    or "aab.archive.signature_controls" in fields
-                    or "aab.archive.signature_file_count" in fields
-                    or "aab.archive.signature_block_count" in fields
+                if ignored_control == "META-INF/SIG-":
+                    self.assertIn("aab.archive.signature_controls", fields)
+                else:
+                    self.assertIn(
+                        f"aab.archive.entries[{ignored_control}].signature_control_basename",
+                        fields,
+                    )
+
+    def test_replacing_legal_signature_pair_with_empty_basename_is_rejected(
+        self,
+    ) -> None:
+        for block_extension in ("RSA", "DSA", "EC"):
+            with self.subTest(block_extension=block_extension):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    aab = root / f"empty-signer-{block_extension.lower()}.aab"
+                    with (
+                        zipfile.ZipFile(self.base_aab) as source,
+                        zipfile.ZipFile(aab, "w") as target,
+                    ):
+                        for entry in source.infolist():
+                            replacement_entry = copy.copy(entry)
+                            normalized_name = entry.filename.upper()
+                            if normalized_name.endswith(".SF"):
+                                replacement_entry.filename = "META-INF/.SF"
+                            elif normalized_name.endswith(".RSA"):
+                                replacement_entry.filename = (
+                                    f"META-INF/.{block_extension}"
+                                )
+                            target.writestr(
+                                replacement_entry, source.read(entry.filename)
+                            )
+
+                    if block_extension == "RSA":
+                        jarsigner = subprocess.run(
+                            ["jarsigner", "-verify", str(aab)],
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            env={**os.environ, "LC_ALL": "C"},
+                        )
+                        self.assertEqual(0, jarsigner.returncode, jarsigner.stderr)
+
+                    with self.assertRaises(VerificationFailure) as raised:
+                        verifier._audit_aab_archive(aab)
+
+                fields = mismatch_fields(raised.exception)
+                self.assertIn(
+                    "aab.archive.entries[META-INF/.SF].signature_control_basename",
+                    fields,
+                )
+                self.assertIn(
+                    f"aab.archive.entries[META-INF/.{block_extension}].signature_control_basename",
+                    fields,
                 )
 
     def test_declared_entry_limit_is_rejected_before_zipfile_construction(
@@ -1173,6 +1323,78 @@ class StrictAabVerifierTest(unittest.TestCase):
         self.assertIn(
             "aab.archive.container_preflight.unparsed_central_directory_bytes",
             mismatch_fields(raised.exception),
+        )
+
+    def test_path_replacement_after_preflight_cannot_change_zipfile_input(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            archive_path = self.copy_fixture(root)
+            replacement = root / "replacement.aab"
+            with zipfile.ZipFile(replacement, "w", zipfile.ZIP_STORED) as archive:
+                for index in range(verifier.AAB_MAX_ENTRY_COUNT + 1):
+                    archive.writestr(f"replacement/{index}", b"")
+            replacement_size = replacement.stat().st_size
+            real_preflight = verifier._preflight_aab_zip_container
+            real_zipfile = zipfile.ZipFile
+            zipfile_inputs: list[object] = []
+
+            def replace_path_after_preflight(
+                archive_file: object, archive_bytes: int
+            ) -> dict[str, object]:
+                evidence = real_preflight(archive_file, archive_bytes)  # type: ignore[arg-type]
+                os.replace(replacement, archive_path)
+                return evidence
+
+            def capture_zipfile_input(
+                archive_file: object, *args: object, **kwargs: object
+            ) -> zipfile.ZipFile:
+                zipfile_inputs.append(archive_file)
+                return real_zipfile(archive_file, *args, **kwargs)  # type: ignore[arg-type]
+
+            with (
+                mock.patch.object(
+                    verifier,
+                    "_preflight_aab_zip_container",
+                    side_effect=replace_path_after_preflight,
+                ),
+                mock.patch.object(
+                    verifier.zipfile,
+                    "ZipFile",
+                    side_effect=capture_zipfile_input,
+                ),
+                self.assertRaises(VerificationFailure) as raised,
+            ):
+                verifier._audit_aab_archive(archive_path)
+
+            self.assertEqual(replacement_size, archive_path.stat().st_size)
+            self.assertEqual(1, len(zipfile_inputs))
+            self.assertFalse(isinstance(zipfile_inputs[0], (str, bytes, os.PathLike)))
+            self.assertEqual(
+                {"aab.archive.stable_file.fstat_unchanged"},
+                mismatch_fields(raised.exception),
+            )
+
+    def test_aab_symlink_is_rejected_before_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            target = self.copy_fixture(root)
+            symlink = root / "symlink.aab"
+            symlink.symlink_to(target)
+
+            with (
+                mock.patch.object(
+                    verifier,
+                    "_preflight_aab_zip_container",
+                    side_effect=AssertionError("preflight must not follow a symlink"),
+                ),
+                self.assertRaises(VerificationFailure) as raised,
+            ):
+                verifier._audit_aab_archive(symlink)
+
+        self.assertEqual(
+            {"aab.archive.stable_file.open"}, mismatch_fields(raised.exception)
         )
 
     def test_archive_and_central_directory_byte_limits_precede_zipfile(self) -> None:
@@ -1417,6 +1639,11 @@ class StrictAabVerifierTest(unittest.TestCase):
                 "aab.keytool.import_pinned_trust_anchor",
             ),
             (
+                "-importcert",
+                "nonzero",
+                "aab.keytool.import_pinned_trust_anchor.exit_code",
+            ),
+            (
                 "-list",
                 "timeout",
                 "aab.keytool.list_pinned_trust_anchor.timeout_seconds",
@@ -1425,6 +1652,11 @@ class StrictAabVerifierTest(unittest.TestCase):
                 "-list",
                 "os_error",
                 "aab.keytool.list_pinned_trust_anchor",
+            ),
+            (
+                "-list",
+                "nonzero",
+                "aab.keytool.list_pinned_trust_anchor.exit_code",
             ),
         )
         real_subprocess_run = subprocess.run
@@ -1448,7 +1680,21 @@ class StrictAabVerifierTest(unittest.TestCase):
                                 raise subprocess.TimeoutExpired(
                                     command, kwargs.get("timeout")
                                 )
-                            raise OSError("synthetic keytool failure")
+                            if failure_kind == "os_error":
+                                raise OSError("synthetic keytool failure")
+                            if marker == "-importcert":
+                                truststore_argument = Path(
+                                    command[command.index("-keystore") + 1]
+                                )
+                                truststore_argument.write_bytes(
+                                    b"synthetic partial truststore"
+                                )
+                            return subprocess.CompletedProcess(
+                                command,
+                                17,
+                                "",
+                                "synthetic keytool nonzero",
+                            )
                         return real_subprocess_run(command, *args, **kwargs)
 
                     with (
@@ -1466,7 +1712,7 @@ class StrictAabVerifierTest(unittest.TestCase):
                             temporary_parent=trust_parent,
                         )
 
-                    self.assertEqual([], list(trust_parent.iterdir()))
+                    self.assertEqual([], list(trust_parent.rglob("*")))
                 self.assertIn(expected_field, mismatch_fields(raised.exception))
 
 

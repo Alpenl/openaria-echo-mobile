@@ -39,11 +39,11 @@ class SessionLedgerController<Target, TransportCancellation>(
         desiredQuery = DesiredSessionQuery(resolveTakeId(filterIntent), limit)
         failure = null
         if (repository.isRefreshing) {
-            check(
-                repository.beginRefresh(
-                    takeId = desiredQuery.takeId,
-                    limit = desiredQuery.limit,
-                ) == null,
+            operationGeneration += 1L
+            pendingRefresh = PendingSessionLedgerRefresh(
+                target = target,
+                query = desiredQuery,
+                catalogRecovery = false,
             )
             publish()
             return

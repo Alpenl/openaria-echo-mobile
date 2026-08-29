@@ -140,6 +140,67 @@ class SessionLedgerControllerTest {
         }
 
     @Test
+    fun `latest queued refresh drains after superseded transport throws`() =
+        runBlocking {
+            val firstStarted = CompletableDeferred<Unit>()
+            val releaseFirst = CompletableDeferred<Unit>()
+            val targets = mutableListOf<String>()
+            val requests = mutableListOf<SessionLedgerRequest>()
+            val controller =
+                SessionLedgerController<String, FakeCancellation>(
+                    scope = this,
+                    cancellationFactory = ::FakeCancellation,
+                    cancelTransport = FakeCancellation::cancel,
+                    transport = { target, request, _ ->
+                        targets += target
+                        requests += request
+                        if (requests.size == 1) {
+                            firstStarted.complete(Unit)
+                            releaseFirst.await()
+                            error("superseded transport failure")
+                        }
+                        pageResult(
+                            revision = REVISION_C,
+                            nextCursor = null,
+                            takeId = TAKE_ID_C,
+                            limit = LATEST_LIMIT,
+                        )
+                    },
+                )
+
+            controller.refresh(
+                target = "first-device",
+                filterIntent = SessionFilterIntent.Exact(TAKE_ID_A),
+                limit = 41,
+            )
+            firstStarted.await()
+            controller.refresh(
+                target = "superseded-device",
+                filterIntent = SessionFilterIntent.Exact(TAKE_ID_B),
+                limit = 57,
+            )
+            controller.refresh(
+                target = "latest-device",
+                filterIntent = SessionFilterIntent.Exact(TAKE_ID_C),
+                limit = LATEST_LIMIT,
+            )
+            releaseFirst.complete(Unit)
+            controller.awaitIdle()
+
+            assertEquals(listOf("first-device", "latest-device"), targets)
+            assertEquals(2, requests.size)
+            assertRequest(requests[0], cursor = null, revision = null, takeId = TAKE_ID_A)
+            assertEquals(41, requests[0].limit)
+            assertRequest(requests[1], cursor = null, revision = null, takeId = TAKE_ID_C)
+            assertEquals(LATEST_LIMIT, requests[1].limit)
+            assertEquals(TAKE_ID_C, controller.currentTakeId)
+            assertEquals(REVISION_C, controller.state.page?.catalogRevision)
+            assertNull(controller.state.failure)
+            assertFalse(controller.state.isRefreshing)
+            assertFalse(controller.state.isLoadingMore)
+        }
+
+    @Test
     fun `repeated catalog change is a stable typed protocol failure`() =
         runBlocking {
             val transport = ScriptedTransport(
@@ -279,6 +340,8 @@ class SessionLedgerControllerTest {
         const val TAKE_ID = "01991b70-7c88-7456-9234-123456789abc"
         const val TAKE_ID_A = "01991b70-7c88-7456-9234-123456789abc"
         const val TAKE_ID_B = "01991b70-7c88-7567-9234-123456789abc"
+        const val TAKE_ID_C = "01991b70-7c88-7678-9234-123456789abc"
+        const val LATEST_LIMIT = 73
     }
 }
 
@@ -286,6 +349,7 @@ private fun pageResult(
     revision: String,
     nextCursor: String?,
     takeId: String?,
+    limit: Int = 50,
 ): SessionListResult.Page {
     return SessionListResult.Page(
         SessionListPage(
@@ -294,7 +358,7 @@ private fun pageResult(
             items = emptyList(),
             diagnostics = emptyList(),
             nextCursor = nextCursor,
-            requestIdentity = SessionListRequestIdentity(limit = 50, cursor = null, takeId = takeId),
+            requestIdentity = SessionListRequestIdentity(limit = limit, cursor = null, takeId = takeId),
         ),
     )
 }

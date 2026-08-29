@@ -390,6 +390,41 @@ class UiShellSourceTest {
     }
 
     @Test
+    fun `paused late capture responses cannot refresh sessions and resume refreshes authoritatively`() {
+        val uiSource = echoAppSource()
+        val refreshEntryBlock = uiSource
+            .substringAfter("suspend fun refreshSessionLedger(")
+            .substringBefore("suspend fun reconcileCaptureStatus")
+        val startCaptureBlock = uiSource
+            .substringAfter("fun startCaptureWithMode")
+            .substringBefore("val startCapture:")
+        val stopCaptureBlock = uiSource
+            .substringAfter("val stopCapture:")
+            .substringBefore("val loadSessionManifest:")
+
+        assertContains(
+            refreshEntryBlock,
+            "if (!appInForeground || !isCurrentConnection(activeConnection, generation)) return",
+        )
+        assertContains(startCaptureBlock, "refreshSessionLedger(activeConnection, generation)")
+        assertContains(stopCaptureBlock, "refreshSessionLedger(activeConnection, generation)")
+        assertFalse(startCaptureBlock.contains("deviceClient.listSessions"))
+        assertFalse(stopCaptureBlock.contains("deviceClient.listSessions"))
+        assertContains(
+            uiSource,
+            """
+            LaunchedEffect(bodyConnection, connectionGeneration, appInForeground) {
+                val activeConnection = bodyConnection ?: return@LaunchedEffect
+                if (!appInForeground) return@LaunchedEffect
+                val generation = connectionGeneration
+                refreshSessionLedger(activeConnection, generation)
+                refreshCameraFocus(activeConnection, generation)
+            }
+            """.trimIndent().prependIndent("    "),
+        )
+    }
+
+    @Test
     fun `connection panel uses real nsd discovery for ylx capture service`() {
         val uiSource = echoAppSource()
         val discoverySource =

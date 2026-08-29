@@ -313,7 +313,7 @@ fun EchoApp(
         filterIntent: SessionFilterIntent = SessionFilterIntent.InheritCurrentFilter,
         limit: Int = 50,
     ) {
-        if (!isCurrentConnection(activeConnection, generation)) return
+        if (!appInForeground || !isCurrentConnection(activeConnection, generation)) return
         sessionLedgerController.refresh(
             target = activeConnection,
             filterIntent = filterIntent,

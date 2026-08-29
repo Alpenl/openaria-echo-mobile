@@ -4,6 +4,7 @@ import java.net.ServerSocket
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 
@@ -83,12 +84,59 @@ class DeviceProbeCandidateFallbackTest {
                 bearerToken = "session-token",
             )
 
-            assertIs<ProbeResult.AuthenticationRequired>(result)
+            val challenged = assertIs<ProbeResult.AuthenticationRequired>(result)
+            assertEquals(first.origin(), challenged.origin)
             assertEquals(1, first.requestCount)
             assertEquals(0, second.requestCount)
         } finally {
             first.shutdown()
             second.shutdown()
+        }
+    }
+
+    @Test
+    fun `network failure on primary then backup unauthorized preserves backup canonical origin and token boundary`() {
+        val firstPort = ServerSocket(0).use { it.localPort }
+        val primary = "http://127.0.0.1:$firstPort"
+        val backupServer = MockWebServer()
+        try {
+            backupServer.start()
+            backupServer.enqueue(MockResponse().setResponseCode(401))
+
+            val lookups = mutableListOf<String>()
+            val result = DeviceProbeClient().probe(
+                origins = listOf(primary, "${backupServer.origin()}/"),
+            ) { origin ->
+                lookups += origin
+                // A token entered for the primary candidate must never be
+                // copied to the backup candidate during fallback.
+                if (origin == primary) "primary-token" else null
+            }
+
+            val challenged = assertIs<ProbeResult.AuthenticationRequired>(result)
+            assertEquals(backupServer.origin(), challenged.origin)
+            assertEquals(listOf(primary, "${backupServer.origin()}/"), lookups)
+            assertNull(backupServer.takeRequest().getHeader("Authorization"))
+        } finally {
+            backupServer.shutdown()
+        }
+    }
+
+    @Test
+    fun `unauthorized origin is canonicalized before being exposed to caller`() {
+        val server = MockWebServer()
+        try {
+            server.start()
+            server.enqueue(MockResponse().setResponseCode(401))
+
+            val result = DeviceProbeClient().probe("${server.origin()}/", null)
+
+            assertEquals(
+                server.origin(),
+                assertIs<ProbeResult.AuthenticationRequired>(result).origin,
+            )
+        } finally {
+            server.shutdown()
         }
     }
 

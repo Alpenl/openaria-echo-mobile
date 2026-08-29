@@ -51,7 +51,7 @@ class DeviceProbeClientTest {
 
         val result = DeviceProbeClient().probe(origin, null)
 
-        assertIs<ProbeResult.AuthenticationRequired>(result)
+        assertEquals(origin, assertIs<ProbeResult.AuthenticationRequired>(result).origin)
     }
 
     @Test

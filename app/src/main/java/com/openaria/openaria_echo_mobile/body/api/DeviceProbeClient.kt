@@ -84,7 +84,13 @@ class DeviceProbeClient {
                     bearerToken = bearerToken,
                     body = connection.inputStream.readBytes().decodeToString(),
                 )
-                HttpURLConnection.HTTP_UNAUTHORIZED -> ProbeResult.AuthenticationRequired
+                // Keep the canonical endpoint identity with the challenge. A
+                // multi-address service may fail on one candidate and require
+                // credentials on another; callers must authorize that exact
+                // origin instead of guessing from the primary address.
+                HttpURLConnection.HTTP_UNAUTHORIZED -> {
+                    ProbeResult.AuthenticationRequired(target.origin.toString())
+                }
                 HttpURLConnection.HTTP_FORBIDDEN -> ProbeResult.Forbidden
                 else -> ProbeResult.HttpFailure(connection.toDeviceHttpFailure(status))
             }
@@ -128,7 +134,7 @@ class DeviceProbeClient {
 
 sealed interface ProbeResult {
     data class Verified(val connection: DeviceConnection) : ProbeResult
-    data object AuthenticationRequired : ProbeResult
+    data class AuthenticationRequired(val origin: String) : ProbeResult
     data object Forbidden : ProbeResult
     data class RejectedEndpoint(val reason: EndpointPolicy.RejectReason) : ProbeResult
     data class InvalidResponse(val message: String) : ProbeResult

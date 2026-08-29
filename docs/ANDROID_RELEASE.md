@@ -68,11 +68,20 @@ and dispatch time are revalidated.
 
 The supplement selects the unique ownership artifact and downloads it by its
 numeric artifact ID into an exact one-file root. It anonymously downloads the
-closed four-asset public set, checks bytes, manifest, checksums,
+closed four-asset public set through a per-byte hard ceiling taken from the
+validated API state. Every connection, body read, and complete attempt has a
+deadline; a partial file must match the exact state size and SHA-256 before an
+atomic rename makes it available to any APK or AAB tool. The verifier job also
+has a 30-minute hard timeout. It checks bytes, manifest, checksums,
 package/version, and APK identity, and verifies the AAB with a pinned
 certificate in an ephemeral one-entry truststore plus strict full-entry JAR
-verification. Duplicate ZIP entries and extra signature-control entries are
-rejected. After all downloads and signature checks, it refetches the source
+verification. Before any ZIP payload is decompressed, the AAB is limited to
+4096 entries, 64 MiB per entry, 256 MiB total uncompressed bytes, and a 100x
+per-entry compression ratio. Duplicate ZIP entries and every extra JAR
+signature-control entry are rejected using case-insensitive `META-INF`,
+extension, and `SIG-*` semantics. Keytool and jarsigner calls have bounded
+timeouts and the temporary truststore is cleaned on timeout or failure. After
+all downloads and signature checks, it refetches the source
 run, attempt jobs, numeric artifact metadata and digest, latest Release,
 Release by ID, Release by tag, and tag ref. The v2 evidence is written only if
 that final state exactly matches the initial state. Its only successful output

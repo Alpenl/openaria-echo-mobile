@@ -4,6 +4,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -12,10 +13,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 REPOSITORY = "Alpenl/openaria-echo-mobile"
 PACKAGE_NAME = "com.openaria.openaria_echo_mobile"
@@ -31,6 +34,14 @@ HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 RELEASE_TAG = re.compile(r"^v([0-9]+\.[0-9]+\.[0-9]+)$")
+DOWNLOAD_CHUNK_BYTES = 64 * 1024
+DOWNLOAD_MAX_REDIRECTS = 5
+AAB_MAX_ENTRY_COUNT = 4096
+AAB_MAX_ENTRY_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
+AAB_MAX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+AAB_MAX_COMPRESSION_RATIO = 100.0
+KEYTOOL_TIMEOUT_SECONDS = 30
+JARSIGNER_TIMEOUT_SECONDS = 120
 
 
 class VerificationFailure(Exception):
@@ -1161,7 +1172,389 @@ def validate_final_recheck(
         raise VerificationFailure(mismatches)
 
 
-def _run_tool(command: list[str], field: str) -> subprocess.CompletedProcess[str]:
+def _download_failure(field: str, expected: Any, actual: Any) -> VerificationFailure:
+    return VerificationFailure(
+        [{"field": field, "expected": expected, "actual": actual}]
+    )
+
+
+def _redacted_download_url(url: str) -> str:
+    parsed = urlsplit(url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _remaining_timeout(
+    *, deadline: float, phase_timeout: float, asset_name: str, phase: str
+) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].total_timeout_seconds",
+            "download completed before the total deadline",
+            "expired",
+        )
+    return max(0.001, min(phase_timeout, remaining))
+
+
+def _raise_download_timeout(
+    *, asset_name: str, phase: str, phase_timeout: float, deadline: float
+) -> None:
+    if time.monotonic() >= deadline:
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].total_timeout_seconds",
+            "download completed before the total deadline",
+            "expired",
+        )
+    raise _download_failure(
+        f"anonymous_downloads[{asset_name}].{phase}_timeout_seconds",
+        f"each {phase} operation completed within {phase_timeout:g} seconds",
+        "expired",
+    )
+
+
+def download_anonymous_asset(
+    *,
+    asset_name: str,
+    url: str,
+    partial_output: Path,
+    expected_size: int,
+    expected_digest: str,
+    connect_timeout_seconds: float,
+    body_timeout_seconds: float,
+    total_timeout_seconds: float,
+    allow_http_for_tests: bool = False,
+) -> dict[str, Any]:
+    mismatches: list[dict[str, Any]] = []
+    _require(
+        mismatches,
+        Path(asset_name).name == asset_name and asset_name not in ("", ".", ".."),
+        "anonymous_download.asset_name",
+        "single safe filename",
+        asset_name,
+    )
+    _require(
+        mismatches,
+        isinstance(expected_size, int)
+        and not isinstance(expected_size, bool)
+        and expected_size > 0,
+        f"anonymous_downloads[{asset_name}].expected_size",
+        "positive integer",
+        expected_size,
+    )
+    _require(
+        mismatches,
+        isinstance(expected_digest, str)
+        and SHA256_DIGEST.fullmatch(expected_digest) is not None,
+        f"anonymous_downloads[{asset_name}].expected_digest",
+        "sha256:<64 lowercase hex>",
+        expected_digest,
+    )
+    for field, value in (
+        ("connect_timeout_seconds", connect_timeout_seconds),
+        ("body_timeout_seconds", body_timeout_seconds),
+        ("total_timeout_seconds", total_timeout_seconds),
+    ):
+        _require(
+            mismatches,
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value > 0,
+            f"anonymous_downloads[{asset_name}].{field}",
+            "positive number",
+            value,
+        )
+    if all(
+        isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+        for value in (
+            connect_timeout_seconds,
+            body_timeout_seconds,
+            total_timeout_seconds,
+        )
+    ):
+        _require(
+            mismatches,
+            connect_timeout_seconds <= total_timeout_seconds,
+            f"anonymous_downloads[{asset_name}].connect_timeout_seconds",
+            f"<= total timeout {total_timeout_seconds:g}",
+            connect_timeout_seconds,
+        )
+        _require(
+            mismatches,
+            body_timeout_seconds <= total_timeout_seconds,
+            f"anonymous_downloads[{asset_name}].body_timeout_seconds",
+            f"<= total timeout {total_timeout_seconds:g}",
+            body_timeout_seconds,
+        )
+    if mismatches:
+        raise VerificationFailure(mismatches)
+
+    partial_output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        partial_output.unlink(missing_ok=True)
+    except OSError as error:
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].partial_output",
+            "replaceable partial path",
+            type(error).__name__,
+        ) from error
+
+    started = time.monotonic()
+    deadline = started + total_timeout_seconds
+    current_url = url
+    redirects: list[str] = []
+    connection: http.client.HTTPConnection | None = None
+    response: http.client.HTTPResponse | None = None
+    phase = "connect"
+    observed_size = 0
+    observed_digest = ""
+    content_length: int | None = None
+    request_headers = {
+        "Accept": "application/octet-stream",
+        "Accept-Encoding": "identity",
+        "User-Agent": "OpenAria-read-only-release-verifier/1",
+    }
+
+    def remove_partial() -> None:
+        try:
+            partial_output.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    try:
+        while True:
+            try:
+                parsed = urlsplit(current_url)
+                parsed_port = parsed.port
+            except ValueError as error:
+                raise _download_failure(
+                    f"anonymous_downloads[{asset_name}].url",
+                    "valid URL without an invalid port",
+                    "invalid",
+                ) from error
+            allowed_schemes = {"https"}
+            if allow_http_for_tests:
+                allowed_schemes.add("http")
+            if (
+                parsed.scheme not in allowed_schemes
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
+                raise _download_failure(
+                    f"anonymous_downloads[{asset_name}].url",
+                    "anonymous HTTPS URL without credentials or fragment",
+                    current_url,
+                )
+
+            phase = "connect"
+            connect_timeout = _remaining_timeout(
+                deadline=deadline,
+                phase_timeout=connect_timeout_seconds,
+                asset_name=asset_name,
+                phase=phase,
+            )
+            connection_type: type[http.client.HTTPConnection]
+            if parsed.scheme == "https":
+                connection_type = http.client.HTTPSConnection
+            else:
+                connection_type = http.client.HTTPConnection
+            connection = connection_type(
+                parsed.hostname, parsed_port, timeout=connect_timeout
+            )
+            request_target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+            try:
+                connection.request("GET", request_target, headers=request_headers)
+                if connection.sock is not None:
+                    connection.sock.settimeout(
+                        _remaining_timeout(
+                            deadline=deadline,
+                            phase_timeout=connect_timeout_seconds,
+                            asset_name=asset_name,
+                            phase=phase,
+                        )
+                    )
+                response = connection.getresponse()
+            except TimeoutError:
+                _raise_download_timeout(
+                    asset_name=asset_name,
+                    phase=phase,
+                    phase_timeout=connect_timeout_seconds,
+                    deadline=deadline,
+                )
+
+            if response.status in (301, 302, 303, 307, 308):
+                location = response.getheader("Location")
+                if not location:
+                    raise _download_failure(
+                        f"anonymous_downloads[{asset_name}].redirect_location",
+                        "non-empty Location header",
+                        location,
+                    )
+                if len(redirects) >= DOWNLOAD_MAX_REDIRECTS:
+                    raise _download_failure(
+                        f"anonymous_downloads[{asset_name}].redirect_count",
+                        f"<= {DOWNLOAD_MAX_REDIRECTS}",
+                        len(redirects) + 1,
+                    )
+                next_url = urljoin(current_url, location)
+                redirects.append(next_url)
+                response.close()
+                connection.close()
+                response = None
+                connection = None
+                current_url = next_url
+                continue
+            if response.status != 200:
+                raise _download_failure(
+                    f"anonymous_downloads[{asset_name}].http_status",
+                    200,
+                    response.status,
+                )
+            break
+
+        content_encoding = response.getheader("Content-Encoding")
+        if content_encoding is not None and content_encoding.lower() != "identity":
+            raise _download_failure(
+                f"anonymous_downloads[{asset_name}].content_encoding",
+                "identity or absent",
+                content_encoding,
+            )
+        content_length_header = response.getheader("Content-Length")
+        if content_length_header is not None:
+            try:
+                content_length = int(content_length_header)
+            except ValueError as error:
+                raise _download_failure(
+                    f"anonymous_downloads[{asset_name}].content_length",
+                    expected_size,
+                    content_length_header,
+                ) from error
+            if content_length != expected_size:
+                raise _download_failure(
+                    f"anonymous_downloads[{asset_name}].content_length",
+                    expected_size,
+                    content_length,
+                )
+
+        phase = "body"
+        digest = hashlib.sha256()
+        with partial_output.open("xb") as output:
+            while True:
+                if connection.sock is not None:
+                    connection.sock.settimeout(
+                        _remaining_timeout(
+                            deadline=deadline,
+                            phase_timeout=body_timeout_seconds,
+                            asset_name=asset_name,
+                            phase=phase,
+                        )
+                    )
+                read_limit = min(
+                    DOWNLOAD_CHUNK_BYTES, expected_size - observed_size + 1
+                )
+                try:
+                    chunk = response.read(read_limit)
+                except TimeoutError:
+                    _raise_download_timeout(
+                        asset_name=asset_name,
+                        phase=phase,
+                        phase_timeout=body_timeout_seconds,
+                        deadline=deadline,
+                    )
+                if not chunk:
+                    break
+                next_size = observed_size + len(chunk)
+                if next_size > expected_size:
+                    raise _download_failure(
+                        f"anonymous_downloads[{asset_name}].max_bytes",
+                        expected_size,
+                        f">={next_size}",
+                    )
+                output.write(chunk)
+                digest.update(chunk)
+                observed_size = next_size
+
+        observed_digest = f"sha256:{digest.hexdigest()}"
+        if observed_size != expected_size:
+            raise _download_failure(
+                f"anonymous_downloads[{asset_name}].size",
+                expected_size,
+                observed_size,
+            )
+        if observed_digest != expected_digest:
+            raise _download_failure(
+                f"anonymous_downloads[{asset_name}].digest",
+                expected_digest,
+                observed_digest,
+            )
+        if partial_output.stat().st_size != expected_size:
+            raise _download_failure(
+                f"anonymous_downloads[{asset_name}].partial_size",
+                expected_size,
+                partial_output.stat().st_size,
+            )
+    except VerificationFailure:
+        remove_partial()
+        raise
+    except TimeoutError:
+        remove_partial()
+        _raise_download_timeout(
+            asset_name=asset_name,
+            phase=phase,
+            phase_timeout=(
+                connect_timeout_seconds if phase == "connect" else body_timeout_seconds
+            ),
+            deadline=deadline,
+        )
+    except (OSError, http.client.HTTPException) as error:
+        remove_partial()
+        raise _download_failure(
+            f"anonymous_downloads[{asset_name}].{phase}_network_error",
+            "successful anonymous transfer",
+            type(error).__name__,
+        ) from error
+    finally:
+        if response is not None:
+            response.close()
+        if connection is not None:
+            connection.close()
+
+    return {
+        "schema": "openaria.mobile.bounded-anonymous-download.v1",
+        "asset": {
+            "name": asset_name,
+            "url": url,
+            "size": observed_size,
+            "digest": observed_digest,
+        },
+        "anonymous": True,
+        "partial_verified_before_publish": True,
+        "limits": {
+            "hard_max_bytes": expected_size,
+            "chunk_bytes": DOWNLOAD_CHUNK_BYTES,
+            "connect_timeout_seconds": connect_timeout_seconds,
+            "body_timeout_seconds": body_timeout_seconds,
+            "total_timeout_seconds": total_timeout_seconds,
+            "max_redirects": DOWNLOAD_MAX_REDIRECTS,
+        },
+        "response": {
+            "content_length": content_length,
+            "redirect_count": len(redirects),
+            "redirects": [_redacted_download_url(value) for value in redirects],
+            "final_url": _redacted_download_url(current_url),
+            "signed_query_parameters_redacted": any(
+                urlsplit(value).query for value in (*redirects, current_url)
+            ),
+        },
+        "request_headers": sorted(request_headers),
+        "elapsed_seconds": round(time.monotonic() - started, 6),
+    }
+
+
+def _run_tool(
+    command: list[str], field: str, *, timeout_seconds: int
+) -> subprocess.CompletedProcess[str]:
     environment = dict(os.environ)
     environment["LC_ALL"] = "C"
     try:
@@ -1173,7 +1566,18 @@ def _run_tool(command: list[str], field: str) -> subprocess.CompletedProcess[str
             encoding="utf-8",
             errors="replace",
             env=environment,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as error:
+        raise VerificationFailure(
+            [
+                {
+                    "field": f"{field}.timeout_seconds",
+                    "expected": f"completed within {timeout_seconds} seconds",
+                    "actual": "expired",
+                }
+            ]
+        ) from error
     except OSError as error:
         raise VerificationFailure(
             [{"field": field, "expected": "executable tool", "actual": str(error)}]
@@ -1193,18 +1597,71 @@ def _safe_tool_output(
 
 
 def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
-    mismatches: list[dict[str, Any]] = []
+    entries: list[zipfile.ZipInfo] = []
+    payload_entries: list[str] = []
+    signature_controls: list[str] = []
+    total_uncompressed_bytes = 0
+    max_entry_uncompressed_bytes = 0
+    max_compression_ratio = 0.0
     try:
         with zipfile.ZipFile(aab_path) as archive:
             entries = archive.infolist()
+            resource_mismatches: list[dict[str, Any]] = []
+            _require(
+                resource_mismatches,
+                len(entries) <= AAB_MAX_ENTRY_COUNT,
+                "aab.archive.entry_count",
+                f"<= {AAB_MAX_ENTRY_COUNT}",
+                len(entries),
+            )
+            for entry in entries:
+                total_uncompressed_bytes += entry.file_size
+                max_entry_uncompressed_bytes = max(
+                    max_entry_uncompressed_bytes, entry.file_size
+                )
+                _require(
+                    resource_mismatches,
+                    entry.file_size <= AAB_MAX_ENTRY_UNCOMPRESSED_BYTES,
+                    f"aab.archive.entries[{entry.filename}].uncompressed_bytes",
+                    f"<= {AAB_MAX_ENTRY_UNCOMPRESSED_BYTES}",
+                    entry.file_size,
+                )
+                if entry.is_dir() or entry.file_size == 0:
+                    compression_ratio = 0.0
+                elif entry.compress_size == 0:
+                    compression_ratio = float("inf")
+                else:
+                    compression_ratio = entry.file_size / entry.compress_size
+                max_compression_ratio = max(max_compression_ratio, compression_ratio)
+                _require(
+                    resource_mismatches,
+                    compression_ratio <= AAB_MAX_COMPRESSION_RATIO,
+                    f"aab.archive.entries[{entry.filename}].compression_ratio",
+                    f"<= {AAB_MAX_COMPRESSION_RATIO:g}",
+                    (
+                        round(compression_ratio, 6)
+                        if compression_ratio != float("inf")
+                        else "infinite"
+                    ),
+                )
+            _require(
+                resource_mismatches,
+                total_uncompressed_bytes <= AAB_MAX_TOTAL_UNCOMPRESSED_BYTES,
+                "aab.archive.total_uncompressed_bytes",
+                f"<= {AAB_MAX_TOTAL_UNCOMPRESSED_BYTES}",
+                total_uncompressed_bytes,
+            )
+            if resource_mismatches:
+                raise VerificationFailure(resource_mismatches)
+
+            mismatches: list[dict[str, Any]] = []
             names = [entry.filename for entry in entries]
             duplicates = sorted(name for name in set(names) if names.count(name) != 1)
             _mismatch(mismatches, "aab.archive.duplicate_entries", [], duplicates)
 
-            payload_entries: list[str] = []
+            manifests: list[str] = []
             signature_files: list[tuple[str, str]] = []
             signature_blocks: list[tuple[str, str]] = []
-            signature_controls: list[str] = []
             for entry in entries:
                 name = entry.filename
                 stripped_name = name.removesuffix("/")
@@ -1242,20 +1699,45 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
                 )
                 if entry.is_dir():
                     continue
-                if name == "META-INF/MANIFEST.MF":
+                normalized_name = name.upper()
+                if normalized_name == "META-INF/MANIFEST.MF":
+                    manifests.append(name)
                     signature_controls.append(name)
+                    _require(
+                        mismatches,
+                        name == normalized_name,
+                        f"aab.archive.entries[{name}].signature_control_case",
+                        "META-INF/MANIFEST.MF",
+                        name,
+                    )
                     continue
-                signature_file = re.fullmatch(r"META-INF/([^/]+)\.SF", name)
+                signature_file = re.fullmatch(r"META-INF/([^/]+)\.SF", normalized_name)
                 if signature_file is not None:
                     signature_files.append((signature_file.group(1), name))
                     signature_controls.append(name)
+                    _require(
+                        mismatches,
+                        name == normalized_name,
+                        f"aab.archive.entries[{name}].signature_control_case",
+                        normalized_name,
+                        name,
+                    )
                     continue
-                signature_block = re.fullmatch(r"META-INF/([^/]+)\.(RSA|DSA|EC)", name)
+                signature_block = re.fullmatch(
+                    r"META-INF/([^/]+)\.(RSA|DSA|EC)", normalized_name
+                )
                 if signature_block is not None:
                     signature_blocks.append((signature_block.group(1), name))
                     signature_controls.append(name)
+                    _require(
+                        mismatches,
+                        name == normalized_name,
+                        f"aab.archive.entries[{name}].signature_control_case",
+                        normalized_name,
+                        name,
+                    )
                     continue
-                if re.fullmatch(r"META-INF/SIG-[^/]+", name) is not None:
+                if re.fullmatch(r"META-INF/SIG-[^/]+", normalized_name) is not None:
                     signature_controls.append(name)
                     mismatches.append(
                         {
@@ -1271,7 +1753,7 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
                 mismatches,
                 "aab.archive.manifest_count",
                 1,
-                names.count("META-INF/MANIFEST.MF"),
+                len(manifests),
             )
             _mismatch(
                 mismatches,
@@ -1305,8 +1787,15 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
                 "positive integer",
                 len(payload_entries),
             )
+            if mismatches:
+                raise VerificationFailure(mismatches)
+
             bad_crc_entry = archive.testzip()
             _mismatch(mismatches, "aab.archive.bad_crc_entry", None, bad_crc_entry)
+            if mismatches:
+                raise VerificationFailure(mismatches)
+    except VerificationFailure:
+        raise
     except (OSError, zipfile.BadZipFile) as error:
         raise VerificationFailure(
             [
@@ -1317,15 +1806,26 @@ def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
                 }
             ]
         ) from error
-    if mismatches:
-        raise VerificationFailure(mismatches)
     return {
         "entry_count": len(entries),
         "payload_entry_count": len(payload_entries),
         "signature_control_entries": sorted(signature_controls),
+        "jarsigner_ignored_meta_inf_entries": sorted(signature_controls),
         "duplicate_entries": False,
         "canonical_paths": True,
         "crc": "exact",
+        "resources": {
+            "total_uncompressed_bytes": total_uncompressed_bytes,
+            "max_entry_uncompressed_bytes": max_entry_uncompressed_bytes,
+            "max_compression_ratio": round(max_compression_ratio, 6),
+            "limits": {
+                "entry_count": AAB_MAX_ENTRY_COUNT,
+                "entry_uncompressed_bytes": AAB_MAX_ENTRY_UNCOMPRESSED_BYTES,
+                "total_uncompressed_bytes": AAB_MAX_TOTAL_UNCOMPRESSED_BYTES,
+                "compression_ratio": AAB_MAX_COMPRESSION_RATIO,
+            },
+            "checked_before_crc_decompression": True,
+        },
     }
 
 
@@ -1360,10 +1860,12 @@ def verify_aab_signature(
     certificate_pem_result = _run_tool(
         ["keytool", "-printcert", "-rfc", "-jarfile", str(aab_path)],
         "aab.keytool.printcert_rfc",
+        timeout_seconds=KEYTOOL_TIMEOUT_SECONDS,
     )
     certificate_text_result = _run_tool(
         ["keytool", "-printcert", "-jarfile", str(aab_path)],
         "aab.keytool.printcert",
+        timeout_seconds=KEYTOOL_TIMEOUT_SECONDS,
     )
     certificate_pem_output = certificate_pem_result.stdout
     certificate_text = _safe_tool_output(certificate_text_result)
@@ -1452,6 +1954,7 @@ def verify_aab_signature(
                 truststore_password,
             ],
             "aab.keytool.import_pinned_trust_anchor",
+            timeout_seconds=KEYTOOL_TIMEOUT_SECONDS,
         )
         if import_result.returncode == 0:
             truststore_list_result = _run_tool(
@@ -1466,6 +1969,7 @@ def verify_aab_signature(
                     truststore_password,
                 ],
                 "aab.keytool.list_pinned_trust_anchor",
+                timeout_seconds=KEYTOOL_TIMEOUT_SECONDS,
             )
             truststore_output = _safe_tool_output(
                 truststore_list_result, (truststore_password, str(truststore_path))
@@ -1495,6 +1999,7 @@ def verify_aab_signature(
                     "openaria-release-anchor",
                 ],
                 "aab.jarsigner.strict",
+                timeout_seconds=JARSIGNER_TIMEOUT_SECONDS,
             )
             strict_output = _safe_tool_output(
                 strict_result, (truststore_password, str(truststore_path))
@@ -1816,6 +2321,60 @@ def verify_downloaded_release(
             _at(aab_verification, "archive", "canonical_paths"),
         ),
         ("archive.crc", "exact", _at(aab_verification, "archive", "crc")),
+        (
+            "archive.resources.checked_before_crc_decompression",
+            True,
+            _at(
+                aab_verification,
+                "archive",
+                "resources",
+                "checked_before_crc_decompression",
+            ),
+        ),
+        (
+            "archive.resources.limits.entry_count",
+            AAB_MAX_ENTRY_COUNT,
+            _at(
+                aab_verification,
+                "archive",
+                "resources",
+                "limits",
+                "entry_count",
+            ),
+        ),
+        (
+            "archive.resources.limits.entry_uncompressed_bytes",
+            AAB_MAX_ENTRY_UNCOMPRESSED_BYTES,
+            _at(
+                aab_verification,
+                "archive",
+                "resources",
+                "limits",
+                "entry_uncompressed_bytes",
+            ),
+        ),
+        (
+            "archive.resources.limits.total_uncompressed_bytes",
+            AAB_MAX_TOTAL_UNCOMPRESSED_BYTES,
+            _at(
+                aab_verification,
+                "archive",
+                "resources",
+                "limits",
+                "total_uncompressed_bytes",
+            ),
+        ),
+        (
+            "archive.resources.limits.compression_ratio",
+            AAB_MAX_COMPRESSION_RATIO,
+            _at(
+                aab_verification,
+                "archive",
+                "resources",
+                "limits",
+                "compression_ratio",
+            ),
+        ),
     ):
         _mismatch(mismatches, f"aab.strict_verification.{field}", expected, actual)
     _require(
@@ -1834,6 +2393,58 @@ def verify_downloaded_release(
         "exact three-entry JAR signature closure",
         _at(aab_verification, "archive", "signature_control_entries"),
     )
+    _mismatch(
+        mismatches,
+        "aab.strict_verification.archive.jarsigner_ignored_meta_inf_entries",
+        _at(aab_verification, "archive", "signature_control_entries"),
+        _at(aab_verification, "archive", "jarsigner_ignored_meta_inf_entries"),
+    )
+    for field, limit, actual in (
+        (
+            "entry_count",
+            AAB_MAX_ENTRY_COUNT,
+            _at(aab_verification, "archive", "entry_count"),
+        ),
+        (
+            "max_entry_uncompressed_bytes",
+            AAB_MAX_ENTRY_UNCOMPRESSED_BYTES,
+            _at(
+                aab_verification,
+                "archive",
+                "resources",
+                "max_entry_uncompressed_bytes",
+            ),
+        ),
+        (
+            "total_uncompressed_bytes",
+            AAB_MAX_TOTAL_UNCOMPRESSED_BYTES,
+            _at(
+                aab_verification,
+                "archive",
+                "resources",
+                "total_uncompressed_bytes",
+            ),
+        ),
+        (
+            "max_compression_ratio",
+            AAB_MAX_COMPRESSION_RATIO,
+            _at(
+                aab_verification,
+                "archive",
+                "resources",
+                "max_compression_ratio",
+            ),
+        ),
+    ):
+        _require(
+            mismatches,
+            isinstance(actual, (int, float))
+            and not isinstance(actual, bool)
+            and 0 <= actual <= limit,
+            f"aab.strict_verification.archive.resources.{field}",
+            f"number between 0 and {limit}",
+            actual,
+        )
     if mismatches:
         raise VerificationFailure(mismatches)
 
@@ -1908,6 +2519,57 @@ def _state_command(args: argparse.Namespace) -> None:
             default_branch=args.default_branch,
         )
     _write_json(args.output, state)
+
+
+def _download_command(args: argparse.Namespace) -> None:
+    state = _load_json(args.state)
+    mismatches: list[dict[str, Any]] = []
+    _mismatch(mismatches, "state.schema", STATE_SCHEMA, state.get("schema"))
+    tag = _at(state, "target", "tag")
+    expected_names = _release_names(tag) if isinstance(tag, str) else set()
+    assets = _assets_by_name(
+        _at(state, "target", "assets"),
+        "state.target.assets",
+        expected_names,
+        mismatches,
+    )
+    _validate_asset_fields(assets, "state.target.assets", mismatches)
+    _require(
+        mismatches,
+        args.asset_name in assets,
+        "download.asset_name",
+        sorted(expected_names),
+        args.asset_name,
+    )
+    if args.asset_name in assets:
+        _require(
+            mismatches,
+            isinstance(assets[args.asset_name].get("browser_download_url"), str),
+            f"state.target.assets[{args.asset_name}].browser_download_url",
+            "HTTPS URL string",
+            assets[args.asset_name].get("browser_download_url"),
+        )
+    _mismatch(
+        mismatches,
+        "download.partial_output.name",
+        f"{args.asset_name}.partial",
+        args.partial_output.name,
+    )
+    if mismatches:
+        raise VerificationFailure(mismatches)
+
+    asset = assets[args.asset_name]
+    report = download_anonymous_asset(
+        asset_name=args.asset_name,
+        url=asset["browser_download_url"],
+        partial_output=args.partial_output,
+        expected_size=asset["size"],
+        expected_digest=asset["digest"],
+        connect_timeout_seconds=args.connect_timeout_seconds,
+        body_timeout_seconds=args.body_timeout_seconds,
+        total_timeout_seconds=args.total_timeout_seconds,
+    )
+    _write_json(args.report, report)
 
 
 def _aab_command(args: argparse.Namespace) -> None:
@@ -2119,6 +2781,19 @@ def _parser() -> argparse.ArgumentParser:
     state.add_argument("--repository-metadata", type=Path)
     state.add_argument("--output", type=Path, required=True)
     state.set_defaults(handler=_state_command)
+
+    download = subparsers.add_parser(
+        "download",
+        help="Anonymously stream one state-owned asset into a byte-bounded partial file.",
+    )
+    download.add_argument("--state", type=Path, required=True)
+    download.add_argument("--asset-name", required=True)
+    download.add_argument("--partial-output", type=Path, required=True)
+    download.add_argument("--report", type=Path, required=True)
+    download.add_argument("--connect-timeout-seconds", type=float, required=True)
+    download.add_argument("--body-timeout-seconds", type=float, required=True)
+    download.add_argument("--total-timeout-seconds", type=float, required=True)
+    download.set_defaults(handler=_download_command)
 
     aab = subparsers.add_parser(
         "aab", help="Strictly verify every AAB payload entry using its pinned signer."

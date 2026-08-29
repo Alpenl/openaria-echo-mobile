@@ -548,6 +548,7 @@ class WorkflowGateTest {
         )
         assertContains(workflow, "group: openaria-mobile-release-publication")
         assertContains(releaseFile.readText(), "group: openaria-mobile-release-publication")
+        assertContains(workflow, "timeout-minutes: 30")
         assertContains(workflow, "actions/runs/\${SOURCE_RUN_ID}")
         assertContains(workflow, "attempts/\${source_run_attempt}/jobs")
         assertContains(workflow, "attempts/\${SOURCE_RUN_ATTEMPT}/jobs")
@@ -566,11 +567,24 @@ class WorkflowGateTest {
         assertContains(workflow, "scripts/verify_android_release_postpublish.py complete")
         assertContains(workflow, "diagnostic-context.json")
         assertContains(workflow, "Download closed public asset set anonymously")
-        assertContains(workflow, "curl --fail --location --retry 3 --retry-all-errors")
-        assertFalse(
+        val boundedDownload =
             workflow.substringAfter("Download closed public asset set anonymously")
                 .substringBefore("Set up Java")
-                .contains("Authorization"),
+        assertContains(boundedDownload, "verify_android_release_postpublish.py download")
+        assertContains(boundedDownload, "--partial-output")
+        assertContains(boundedDownload, "--connect-timeout-seconds 10")
+        assertContains(boundedDownload, "--body-timeout-seconds 20")
+        assertContains(boundedDownload, "--total-timeout-seconds 120")
+        assertContains(boundedDownload, "stat --format='%s'")
+        assertContains(boundedDownload, "sha256sum")
+        assertContains(boundedDownload, "mv --")
+        assertTrue(
+            boundedDownload.indexOf("actual_size=") < boundedDownload.indexOf("mv --") &&
+                boundedDownload.indexOf("actual_digest=") < boundedDownload.indexOf("mv --"),
+            "Exact partial size and digest must be checked before the file enters the verified asset set.",
+        )
+        assertFalse(
+            boundedDownload.contains("Authorization"),
         )
         assertContains(workflow, "SHA256SUMS.txt")
         assertContains(workflow, "apksigner verify --verbose --print-certs")
@@ -581,6 +595,12 @@ class WorkflowGateTest {
         assertContains(verifier, "-verbose:summary")
         assertContains(verifier, "aab.archive.duplicate_entries")
         assertContains(verifier, "aab.archive.signature_control_count")
+        assertContains(verifier, "AAB_MAX_ENTRY_COUNT")
+        assertContains(verifier, "AAB_MAX_ENTRY_UNCOMPRESSED_BYTES")
+        assertContains(verifier, "AAB_MAX_TOTAL_UNCOMPRESSED_BYTES")
+        assertContains(verifier, "AAB_MAX_COMPRESSION_RATIO")
+        assertContains(verifier, "normalized_name = name.upper()")
+        assertContains(verifier, "timeout=timeout_seconds")
         assertContains(workflow, "Final API recheck and write auditable evidence")
         assertTrue(
             "releases/latest".toRegex(RegexOption.LITERAL).findAll(workflow).count() == 2,
@@ -637,6 +657,10 @@ class WorkflowGateTest {
         assertContains(verifierTests, "test_tampered_signed_payload_is_rejected")
         assertContains(verifierTests, "test_duplicate_payload_name_is_rejected_even_when_bytes_match")
         assertContains(verifierTests, "test_extra_meta_inf_signature_control_is_rejected")
+        assertContains(verifierTests, "test_chunked_response_cannot_cross_expected_byte_ceiling")
+        assertContains(verifierTests, "test_zip_bomb_ratio_is_rejected_before_crc_decompression")
+        assertContains(verifierTests, "test_jarsigner_timeout_is_classified_and_truststore_is_cleaned")
+        assertContains(verifierTests, "test_jar_ignored_signature_controls_are_case_insensitive")
     }
 
     @Test

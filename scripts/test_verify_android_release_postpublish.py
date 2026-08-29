@@ -8,17 +8,23 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import warnings
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import verify_android_release_postpublish as verifier
 from verify_android_release_postpublish import (
     AAB_EVIDENCE_SCHEMA,
     PACKAGE_NAME,
     VerificationFailure,
+    download_anonymous_asset,
     validate_final_recheck,
     validate_release_state,
     validate_source_evidence,
@@ -46,6 +52,146 @@ def sha256(value: bytes) -> str:
 
 def mismatch_fields(error: VerificationFailure) -> set[str]:
     return {str(item["field"]) for item in error.mismatches}
+
+
+class AnonymousDownloadHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    exact_body = b"abcd"
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+    def do_GET(self) -> None:
+        self.close_connection = True
+        if self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", "/exact?sig=temporary-secret")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path.startswith("/exact"):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(self.exact_body)))
+            self.end_headers()
+            self.wfile.write(self.exact_body)
+            return
+        if self.path == "/oversized-content-length":
+            body = self.exact_body + b"e"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass
+            return
+        if self.path in ("/oversized-chunked", "/stalled-chunked"):
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            chunks = [self.exact_body]
+            if self.path == "/oversized-chunked":
+                chunks.append(b"e")
+            try:
+                for chunk in chunks:
+                    self.wfile.write(f"{len(chunk):X}\r\n".encode())
+                    self.wfile.write(chunk + b"\r\n")
+                    self.wfile.flush()
+                if self.path == "/stalled-chunked":
+                    time.sleep(0.2)
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except BrokenPipeError:
+                pass
+            return
+        self.send_error(404)
+
+
+class BoundedAnonymousDownloadTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), AnonymousDownloadHandler)
+        cls.server.daemon_threads = True
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base_url = f"http://127.0.0.1:{cls.server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+
+    def download(self, root: Path, route: str, *, body_timeout: float = 0.5) -> dict:
+        return download_anonymous_asset(
+            asset_name="asset.bin",
+            url=f"{self.base_url}{route}",
+            partial_output=root / "asset.bin.partial",
+            expected_size=len(AnonymousDownloadHandler.exact_body),
+            expected_digest=f"sha256:{sha256(AnonymousDownloadHandler.exact_body)}",
+            connect_timeout_seconds=0.5,
+            body_timeout_seconds=body_timeout,
+            total_timeout_seconds=2,
+            allow_http_for_tests=True,
+        )
+
+    def test_exact_anonymous_stream_is_bounded_and_kept_as_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            report = self.download(root, "/exact")
+
+            self.assertEqual(
+                AnonymousDownloadHandler.exact_body,
+                (root / "asset.bin.partial").read_bytes(),
+            )
+            self.assertEqual(4, report["limits"]["hard_max_bytes"])
+            self.assertTrue(report["partial_verified_before_publish"])
+            self.assertNotIn("Authorization", report["request_headers"])
+
+    def test_oversized_content_length_is_rejected_before_body_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            with self.assertRaises(VerificationFailure) as raised:
+                self.download(root, "/oversized-content-length")
+
+            self.assertFalse((root / "asset.bin.partial").exists())
+        self.assertIn(
+            "anonymous_downloads[asset.bin].content_length",
+            mismatch_fields(raised.exception),
+        )
+
+    def test_redirect_audit_redacts_temporary_signed_query(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            report = self.download(Path(temporary_directory), "/redirect")
+
+        serialized = json.dumps(report, sort_keys=True)
+        self.assertNotIn("temporary-secret", serialized)
+        self.assertNotIn("?", report["response"]["final_url"])
+        self.assertTrue(report["response"]["signed_query_parameters_redacted"])
+
+    def test_chunked_response_cannot_cross_expected_byte_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            with self.assertRaises(VerificationFailure) as raised:
+                self.download(root, "/oversized-chunked")
+
+            self.assertFalse((root / "asset.bin.partial").exists())
+        self.assertIn(
+            "anonymous_downloads[asset.bin].max_bytes",
+            mismatch_fields(raised.exception),
+        )
+
+    def test_stalled_chunked_body_has_independent_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            with self.assertRaises(VerificationFailure) as raised:
+                self.download(root, "/stalled-chunked", body_timeout=0.05)
+
+            self.assertFalse((root / "asset.bin.partial").exists())
+        self.assertIn(
+            "anonymous_downloads[asset.bin].body_timeout_seconds",
+            mismatch_fields(raised.exception),
+        )
 
 
 class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
@@ -431,8 +577,14 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
                     "digest": f"sha256:{sha256(aab)}",
                 },
                 "archive": {
+                    "entry_count": 5,
                     "payload_entry_count": 2,
                     "signature_control_entries": [
+                        "META-INF/FIXTURE.RSA",
+                        "META-INF/FIXTURE.SF",
+                        "META-INF/MANIFEST.MF",
+                    ],
+                    "jarsigner_ignored_meta_inf_entries": [
                         "META-INF/FIXTURE.RSA",
                         "META-INF/FIXTURE.SF",
                         "META-INF/MANIFEST.MF",
@@ -440,6 +592,18 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
                     "duplicate_entries": False,
                     "canonical_paths": True,
                     "crc": "exact",
+                    "resources": {
+                        "total_uncompressed_bytes": 100,
+                        "max_entry_uncompressed_bytes": 50,
+                        "max_compression_ratio": 2.0,
+                        "limits": {
+                            "entry_count": verifier.AAB_MAX_ENTRY_COUNT,
+                            "entry_uncompressed_bytes": verifier.AAB_MAX_ENTRY_UNCOMPRESSED_BYTES,
+                            "total_uncompressed_bytes": verifier.AAB_MAX_TOTAL_UNCOMPRESSED_BYTES,
+                            "compression_ratio": verifier.AAB_MAX_COMPRESSION_RATIO,
+                        },
+                        "checked_before_crc_decompression": True,
+                    },
                 },
                 "certificate_sha256": CERTIFICATE,
                 "certificate_count": 1,
@@ -629,6 +793,13 @@ class StrictAabVerifierTest(unittest.TestCase):
         self.assertEqual(0, evidence["jarsigner_exit_code"])
         self.assertEqual(1, evidence["trust_anchor_count"])
         self.assertEqual(2, evidence["archive"]["payload_entry_count"])
+        self.assertTrue(
+            evidence["archive"]["resources"]["checked_before_crc_decompression"]
+        )
+        self.assertLessEqual(
+            evidence["archive"]["resources"]["max_compression_ratio"],
+            verifier.AAB_MAX_COMPRESSION_RATIO,
+        )
 
     def test_appended_unsigned_payload_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -745,6 +916,128 @@ class StrictAabVerifierTest(unittest.TestCase):
         fields = mismatch_fields(raised.exception)
         self.assertIn("aab.archive.signature_file_count", fields)
         self.assertIn("aab.archive.signature_control_count", fields)
+
+    def test_jar_ignored_signature_controls_are_case_insensitive(self) -> None:
+        ignored_controls = (
+            "META-INF/EVIL.sf",
+            "META-INF/EVIL.rSa",
+            "meta-inf/EVIL.SF",
+            "MeTa-InF/SiG-EvIl",
+        )
+        for ignored_control in ignored_controls:
+            with self.subTest(ignored_control=ignored_control):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    aab = self.copy_fixture(root)
+                    with zipfile.ZipFile(aab, "a", zipfile.ZIP_DEFLATED) as archive:
+                        archive.writestr(ignored_control, b"ignored by jarsigner")
+
+                    with self.assertRaises(VerificationFailure) as raised:
+                        self.verify(aab, root)
+
+                fields = mismatch_fields(raised.exception)
+                self.assertTrue(
+                    "aab.archive.signature_control_count" in fields
+                    or "aab.archive.signature_controls" in fields
+                    or any(
+                        field.endswith(".signature_control_case") for field in fields
+                    )
+                )
+
+    def test_zip_bomb_ratio_is_rejected_before_crc_decompression(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            aab = root / "compression-bomb.aab"
+            with zipfile.ZipFile(aab, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("base/assets/compression-bomb.bin", b"\0" * 1048576)
+
+            with (
+                mock.patch.object(
+                    zipfile.ZipFile,
+                    "testzip",
+                    side_effect=AssertionError("CRC decompression must not run"),
+                ),
+                self.assertRaises(VerificationFailure) as raised,
+            ):
+                verifier._audit_aab_archive(aab)
+
+        self.assertTrue(
+            any(
+                field.endswith(".compression_ratio")
+                for field in mismatch_fields(raised.exception)
+            )
+        )
+
+    def test_entry_and_uncompressed_byte_limits_precede_crc(self) -> None:
+        cases = (
+            ("AAB_MAX_ENTRY_COUNT", 1, "aab.archive.entry_count"),
+            (
+                "AAB_MAX_ENTRY_UNCOMPRESSED_BYTES",
+                1,
+                "uncompressed_bytes",
+            ),
+            (
+                "AAB_MAX_TOTAL_UNCOMPRESSED_BYTES",
+                1,
+                "aab.archive.total_uncompressed_bytes",
+            ),
+        )
+        for constant, limit, expected_field in cases:
+            with self.subTest(constant=constant):
+                with (
+                    mock.patch.object(verifier, constant, limit),
+                    mock.patch.object(
+                        zipfile.ZipFile,
+                        "testzip",
+                        side_effect=AssertionError("CRC decompression must not run"),
+                    ),
+                    self.assertRaises(VerificationFailure) as raised,
+                ):
+                    verifier._audit_aab_archive(self.base_aab)
+
+                fields = mismatch_fields(raised.exception)
+                if expected_field == "uncompressed_bytes":
+                    self.assertTrue(
+                        any(field.endswith(".uncompressed_bytes") for field in fields)
+                    )
+                else:
+                    self.assertIn(expected_field, fields)
+
+    def test_jarsigner_timeout_is_classified_and_truststore_is_cleaned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            aab = self.copy_fixture(root)
+            trust_parent = root / "temporary-truststores"
+            trust_parent.mkdir()
+            real_subprocess_run = subprocess.run
+
+            def run_with_jarsigner_timeout(
+                command: list[str], *args: object, **kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
+                if command[0] == "jarsigner" and "-verify" in command:
+                    raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+                return real_subprocess_run(command, *args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    verifier.subprocess,
+                    "run",
+                    side_effect=run_with_jarsigner_timeout,
+                ),
+                self.assertRaises(VerificationFailure) as raised,
+            ):
+                verify_aab_signature(
+                    aab_path=aab,
+                    expected_certificate_sha256=self.certificate,
+                    report_dir=root / "reports",
+                    temporary_parent=trust_parent,
+                )
+
+            self.assertEqual([], list(trust_parent.iterdir()))
+        self.assertIn(
+            "aab.jarsigner.strict.timeout_seconds",
+            mismatch_fields(raised.exception),
+        )
 
 
 if __name__ == "__main__":

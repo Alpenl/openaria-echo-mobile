@@ -60,6 +60,35 @@ class DeviceApiValidatorsTest {
     }
 
     @Test
+    fun `pins the complete v4 capability key set and constant values in the fixture`() {
+        val descriptor = fixtureMap("device-full-capabilities.json")
+        @Suppress("UNCHECKED_CAST")
+        val capabilities = descriptor.getValue("capabilities") as Map<String, Any?>
+
+        assertEquals(
+            setOf(
+                "capture",
+                "preview",
+                "range_download",
+                "network_mutation",
+                "session_list",
+                "session_detail",
+                "artifact_download",
+                "capture_status",
+                "session_deletion",
+                "calibration_capture",
+            ),
+            capabilities.keys,
+        )
+        assertEquals(true, capabilities["range_download"])
+        assertEquals(true, capabilities["session_list"])
+        assertEquals(true, capabilities["session_detail"])
+        assertEquals(true, capabilities["artifact_download"])
+        assertEquals(true, capabilities["capture_status"])
+        assertEquals(false, capabilities["session_deletion"])
+    }
+
+    @Test
     fun `rejects unknown DeviceIdentity properties because the object is closed`() {
         val descriptor = validDeviceDescriptor()
         @Suppress("UNCHECKED_CAST")
@@ -732,6 +761,25 @@ class DeviceApiValidatorsTest {
 
             assertEquals(expectedMessage, assertIs<Validation.Invalid>(result).message)
         }
+    }
+
+    @Test
+    fun `rejects legacy strings and extra fields in v3 diagnostic fixtures`() {
+        val legacyString = DeviceApiValidators.validateSessionList(
+            fixtureMap("session-list-v3-unusable-string-diagnostic.json", "invalid"),
+        )
+        val extraField = DeviceApiValidators.validateSessionList(
+            fixtureMap("session-list-v3-unusable-extra-diagnostic-key.json", "invalid"),
+        )
+
+        assertEquals(
+            "items[0].verification.diagnostics[0] must be an object",
+            assertIs<Validation.Invalid>(legacyString).message,
+        )
+        assertEquals(
+            "items[0].verification.diagnostics[0].unknown key detail",
+            assertIs<Validation.Invalid>(extraField).message,
+        )
     }
 
     @Test

@@ -11,6 +11,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
 import androidx.core.content.FileProvider;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -32,6 +33,7 @@ public final class AppUpdateManager {
     private static final String SCHEMA = "openaria.echo.mobile.android-update.v1";
     private static final String APK_MIME_TYPE = "application/vnd.android.package-archive";
     private static final String EXPECTED_PACKAGE = "com.openaria.openaria_echo_mobile";
+    static final int MAX_MANIFEST_BYTES = 256 * 1024;
     private static final Object SESSION_LOCK = new Object();
     private static SharedSession sharedSession;
 
@@ -486,7 +488,9 @@ public final class AppUpdateManager {
             InputStream stream = status >= 200 && status < 300
                     ? connection.getInputStream()
                     : connection.getErrorStream();
-            String body = stream == null ? "" : readUtf8(stream);
+            String body = stream == null
+                    ? ""
+                    : readManifestUtf8(stream, connection.getContentLengthLong());
             return new HttpResult(status, body);
         } finally {
             connection.disconnect();
@@ -513,15 +517,40 @@ public final class AppUpdateManager {
         }
     }
 
-    private static String readUtf8(InputStream stream) throws IOException {
+    static String readManifestUtf8(InputStream stream, long contentLength)
+            throws IOException, UpdateException {
         try (InputStream input = stream) {
-            byte[] buffer = new byte[8192];
-            StringBuilder builder = new StringBuilder();
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                builder.append(new String(buffer, 0, read, StandardCharsets.UTF_8));
+            if (contentLength > MAX_MANIFEST_BYTES) {
+                throw new UpdateException(
+                        "Update manifest response exceeds " + MAX_MANIFEST_BYTES + " bytes");
             }
-            return builder.toString();
+            byte[] buffer = new byte[8192];
+            int initialCapacity = contentLength >= 0
+                    ? (int) contentLength
+                    : buffer.length;
+            ByteArrayOutputStream body = new ByteArrayOutputStream(initialCapacity);
+            int total = 0;
+            while (true) {
+                int remaining = MAX_MANIFEST_BYTES + 1 - total;
+                int read = input.read(buffer, 0, Math.min(buffer.length, remaining));
+                if (read == -1) {
+                    return new String(body.toByteArray(), StandardCharsets.UTF_8);
+                }
+                if (read == 0) {
+                    int value = input.read();
+                    if (value == -1) {
+                        return new String(body.toByteArray(), StandardCharsets.UTF_8);
+                    }
+                    buffer[0] = (byte) value;
+                    read = 1;
+                }
+                total += read;
+                if (total > MAX_MANIFEST_BYTES) {
+                    throw new UpdateException(
+                            "Update manifest response exceeds " + MAX_MANIFEST_BYTES + " bytes");
+                }
+                body.write(buffer, 0, read);
+            }
         }
     }
 

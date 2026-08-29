@@ -1,10 +1,13 @@
 package com.openaria.openaria_echo_mobile
 
 import java.io.File
+import java.io.InputStream
+import java.nio.charset.StandardCharsets
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -121,6 +124,55 @@ class AppUpdateManagerTest {
             AppUpdateManager.evaluateManifestResponse(200, "not-json", installed)
         }
         assertTrue(malformed.isNotBlank())
+    }
+
+    @Test
+    fun `manifest content length above the control plane limit fails before reading`() {
+        val input = TrackingInputStream(updateManifestJson().toByteArray(StandardCharsets.UTF_8))
+
+        val exception = assertFailsWith<AppUpdateManager.UpdateException> {
+            AppUpdateManager.readManifestUtf8(
+                input,
+                AppUpdateManager.MAX_MANIFEST_BYTES + 1L,
+            )
+        }
+
+        assertContains(exception.message.orEmpty(), "exceeds")
+        assertEquals(0, input.bytesRead)
+        assertTrue(input.closed)
+    }
+
+    @Test
+    fun `chunked manifest above the control plane limit reads only limit plus one`() {
+        val oversizedJson = "{\"padding\":\"" +
+            "x".repeat(AppUpdateManager.MAX_MANIFEST_BYTES) +
+            "\"}"
+        val input = TrackingInputStream(oversizedJson.toByteArray(StandardCharsets.UTF_8))
+
+        val exception = assertFailsWith<AppUpdateManager.UpdateException> {
+            AppUpdateManager.readManifestUtf8(input, -1L)
+        }
+
+        assertContains(exception.message.orEmpty(), "exceeds")
+        assertEquals(AppUpdateManager.MAX_MANIFEST_BYTES + 1, input.bytesRead)
+        assertTrue(input.closed)
+    }
+
+    @Test
+    fun `bounded manifest reader preserves a valid release manifest`() {
+        val manifestJson = updateManifestJson()
+        val bytes = manifestJson.toByteArray(StandardCharsets.UTF_8)
+        val input = TrackingInputStream(bytes)
+
+        val body = AppUpdateManager.readManifestUtf8(input, bytes.size.toLong())
+
+        assertEquals(manifestJson, body)
+        assertEquals(bytes.size, input.bytesRead)
+        assertTrue(input.closed)
+        assertEquals(
+            AppUpdateManager.Phase.AVAILABLE,
+            AppUpdateManager.evaluateManifestResponse(200, body, installedIdentity()).phase,
+        )
     }
 
     @Test
@@ -393,4 +445,33 @@ class AppUpdateManagerTest {
         5,
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     )
+
+    private class TrackingInputStream(bytes: ByteArray) : InputStream() {
+        private val source = bytes.inputStream()
+        var bytesRead = 0
+            private set
+        var closed = false
+            private set
+
+        override fun read(): Int {
+            val value = source.read()
+            if (value != -1) {
+                bytesRead += 1
+            }
+            return value
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            val count = source.read(buffer, offset, length)
+            if (count > 0) {
+                bytesRead += count
+            }
+            return count
+        }
+
+        override fun close() {
+            closed = true
+            source.close()
+        }
+    }
 }

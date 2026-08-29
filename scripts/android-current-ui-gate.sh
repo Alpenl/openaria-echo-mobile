@@ -124,6 +124,14 @@ current_surface_rotation() {
   local output value
   output="$(adb_shell dumpsys input | tr -d '\r')" || return $?
   value="$(printf '%s\n' "$output" | sed -n 's/.*SurfaceOrientation:[[:space:]]*\([0-3]\).*/\1/p' | head -n 1)"
+  if [[ -z "$value" ]]; then
+    output="$(adb_shell dumpsys window displays | tr -d '\r')" || return $?
+    value="$(
+      printf '%s\n' "$output" |
+        sed -n 's/^[[:space:]]*mRotation=\([0-3]\)[[:space:]]\+mDeferredRotationPauseCount=.*/\1/p' |
+        LC_ALL=C sort -u
+    )"
+  fi
   [[ "$value" =~ ^[0-3]$ ]] || return 1
   printf '%s\n' "$value"
 }

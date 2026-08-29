@@ -97,10 +97,19 @@ def shell(args: list[str]) -> int:
         return 0
     if args == ["dumpsys", "input"]:
         print("Input Reader State:")
-        print(f"  SurfaceOrientation: {state['surface_rotation']}")
+        if os.environ.get("FAKE_API35_ROTATION_OUTPUT") == "1":
+            print("  InputDeviceOrientation: Rotation0")
+        else:
+            print(f"  SurfaceOrientation: {state['surface_rotation']}")
         return 0
     if args == ["dumpsys", "window", "displays"]:
-        print(f"Display rotation={state['surface_rotation']} cutout={state.get('cutout_overlay')}")
+        if os.environ.get("FAKE_API35_ROTATION_OUTPUT") == "1":
+            print(
+                f"  mRotation={state['surface_rotation']} "
+                "mDeferredRotationPauseCount=0"
+            )
+        else:
+            print(f"Display rotation={state['surface_rotation']} cutout={state.get('cutout_overlay')}")
         return 0
     if args == ["dumpsys", "window", "windows"]:
         print("mCurrentFocus=Window{42 u0 com.openaria.openaria_echo_mobile/.MainActivity}")
@@ -293,6 +302,17 @@ class AndroidCurrentUiGateBehaviorTest(unittest.TestCase):
             self.assertTrue((self.evidence / f"{profile}.json").is_file())
             self.assertIn("gate=PASS", (self.evidence / f"{profile}-preflight-state.txt").read_text(encoding="utf-8"))
         self.assertTrue((self.evidence / "SHA256SUMS.txt").is_file())
+        self.assert_initial_state_restored()
+
+    def test_api35_window_rotation_fallback_runs_all_profiles_and_restores_state(self) -> None:
+        result = self.run_gate(FAKE_API35_ROTATION_OUTPUT="1")
+
+        self.assertEqual(0, result.returncode, result.stdout)
+        self.assertIn("surface_rotation=0", (self.evidence / "initial-state-snapshot.env").read_text(encoding="utf-8"))
+        self.assertEqual(
+            ["small_gesture", "small_three_button", "landscape_gesture", "cutout_three_button"],
+            self.calls_path.read_text(encoding="utf-8").splitlines(),
+        )
         self.assert_initial_state_restored()
 
     def test_instrumentation_failure_preserves_code_and_finally_collects_evidence(self) -> None:

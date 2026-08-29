@@ -65,6 +65,8 @@ class VisualEvidenceBaselineTest {
         assertContains(landscapeThreeButtonTestSource, "WindowInsetsCompat.Type.displayCutout()")
         assertContains(landscapeThreeButtonTestSource, "PREVIEW_CONTROL_RESOURCES")
         assertContains(landscapeThreeButtonTestSource, "assertRectInside")
+        assertContains(landscapeThreeButtonTestSource, "grantRuntimePermission")
+        assertContains(landscapeThreeButtonTestSource, "Manifest.permission.POST_NOTIFICATIONS")
         assertFalse(testSource.contains("screencap -p"), "An unvalidated second screencap must never be uploaded.")
         assertContains(runnerSource, "\"\$adb_bin\" pull")
         assertFalse(runnerSource.contains("exec-out run-as"), "AGP uninstalls the app before host-side evidence export.")

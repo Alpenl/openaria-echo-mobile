@@ -84,6 +84,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -244,7 +245,12 @@ fun EchoApp(
     val previewFrameGate = remember { PreviewFrameGate() }
     val previewFrameWorkerDispatcher = remember { Dispatchers.Default.limitedParallelism(1) }
     val selectedTab = EchoTab.valueOf(selectedTabName)
-    val safeDrawing = WindowInsets.safeDrawing.asPaddingValues()
+    // Platform insets are reported in physical pixels. Use the resource density
+    // for conversion so synthetic density overrides (for responsive UI tests)
+    // cannot turn a 15dp system bar into a 48dp content reservation.
+    val safeDrawing = WindowInsets.safeDrawing.asPaddingValues(
+        Density(context.resources.displayMetrics.density, 1f),
+    )
     val layoutDirection = LocalLayoutDirection.current
     val bottomNavigationReserve = safeDrawing.calculateBottomPadding() + 86.dp
     val captureReconciliationGate = remember(connectionGeneration) {
@@ -1288,6 +1294,7 @@ private fun PreviewFrame(
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val compactLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE &&
             maxWidth >= 540.dp
+        val shortLandscape = compactLandscape && LocalConfiguration.current.screenHeightDp <= 480
         val compactStatusWidth = (maxWidth - 310.dp).coerceIn(230.dp, 260.dp)
 
         Panel(
@@ -1316,11 +1323,18 @@ private fun PreviewFrame(
                 }
                 if (showPreviewStatusOverlay) {
                     val statusAreaModifier = if (compactLandscape) {
-                        Modifier
-                            .align(Alignment.BottomStart)
-                            .width(compactStatusWidth)
-                            .heightIn(min = 96.dp)
-                            .padding(start = 20.dp, bottom = 10.dp)
+                        if (shortLandscape) {
+                            Modifier
+                                .align(Alignment.TopStart)
+                                .width(compactStatusWidth)
+                                .padding(start = 20.dp, top = 58.dp)
+                        } else {
+                            Modifier
+                                .align(Alignment.BottomStart)
+                                .width(compactStatusWidth)
+                                .heightIn(min = 96.dp)
+                                .padding(start = 20.dp, bottom = 10.dp)
+                        }
                     } else {
                         Modifier
                             .align(Alignment.Center)

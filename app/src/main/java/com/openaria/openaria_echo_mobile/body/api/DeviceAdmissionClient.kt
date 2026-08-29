@@ -9,7 +9,7 @@ data class DeviceAdmissionCandidate(
     val origin: String,
     val bearerToken: String?,
 ) {
-    val normalizedOrigin: String = origin.trim()
+    val normalizedOrigin: String = EndpointPolicy.canonicalOrigin(origin) ?: origin.trim()
     val normalizedBearerToken: String? = bearerToken?.trim()?.takeIf(String::isNotEmpty)
 
     internal fun matches(connection: DeviceConnection): Boolean {

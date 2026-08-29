@@ -89,6 +89,32 @@ class ConnectionAdmissionFenceTest {
         assertEquals("backup-token", tokenForSameTarget)
     }
 
+    @Test
+    fun `token target matching uses the canonical challenged origin`() {
+        val candidates = buildAdmissionCandidates(
+            origins = listOf("http://RP-YLX.LOCAL:80/"),
+            primaryOrigin = "http://RP-YLX.LOCAL:80/",
+            authorizationOrigin = "http://rp-ylx.local",
+            typedToken = "backup-token",
+            storedTokenForOrigin = { error("stored tokens are not read during an explicit retry") },
+        )
+
+        assertEquals("http://rp-ylx.local", candidates.single().normalizedOrigin)
+        assertEquals("backup-token", candidates.single().normalizedBearerToken)
+    }
+
+    @Test
+    fun `equivalent canonical origins retain a typed token across a challenge`() {
+        assertEquals(
+            "backup-token",
+            typedTokenAfterAuthorizationTargetChange(
+                currentAuthorizationOrigin = "http://RP-YLX.LOCAL:80/",
+                nextAuthorizationOrigin = "http://rp-ylx.local",
+                typedToken = "backup-token",
+            ),
+        )
+    }
+
     private fun connection(origin: String, token: String?): DeviceConnection {
         val target = assertIs<EndpointPolicy.Decision.Allowed>(EndpointPolicy.validate(origin)).target
         return DeviceConnection(

@@ -202,7 +202,7 @@ class DeviceAdmissionClientTest {
             val challenged = DeviceAdmissionClient().admit(
                 candidates = listOf(
                     DeviceAdmissionCandidate(unreachable, null),
-                    DeviceAdmissionCandidate(server.origin(), null),
+                    DeviceAdmissionCandidate("${server.origin()}/", null),
                 ),
                 isAttemptCurrent = { true },
             )

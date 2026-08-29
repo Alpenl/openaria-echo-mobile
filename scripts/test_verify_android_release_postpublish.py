@@ -3,18 +3,26 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from verify_android_release_postpublish import (
+    AAB_EVIDENCE_SCHEMA,
     PACKAGE_NAME,
     VerificationFailure,
+    validate_final_recheck,
     validate_release_state,
     validate_source_evidence,
+    verify_aab_signature,
     verify_downloaded_release,
 )
 
@@ -25,10 +33,19 @@ TAG = "v0.1.7"
 COMMIT = "83147d60a6c41395a7cec2d5b5586a9694090c37"
 RELEASE_ID = 378992098
 CERTIFICATE = "a" * 64
+FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "android-release-v0.1.7-postpublish.json"
+)
 
 
 def sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def mismatch_fields(error: VerificationFailure) -> set[str]:
+    return {str(item["field"]) for item in error.mismatches}
 
 
 class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
@@ -44,6 +61,7 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
         self.latest = copy.deepcopy(self.published)
         self.by_tag = copy.deepcopy(self.published)
         self.tag_ref = {"object": {"type": "commit", "sha": COMMIT}}
+        self.fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
 
     @staticmethod
     def _ownership(asset_values: dict[str, tuple[int, str]]) -> dict[str, object]:
@@ -82,6 +100,7 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
             "prerelease": False,
             "immutable": True,
             "published_at": "2026-08-29T13:17:54Z",
+            "target_commitish": COMMIT,
             "assets": [
                 {
                     "name": name,
@@ -111,6 +130,34 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
         arguments.update(overrides)
         return validate_release_state(**arguments)  # type: ignore[arg-type]
 
+    def fixture_state(self) -> dict[str, object]:
+        release = self.fixture["published_release"]
+        return validate_release_state(
+            ownership=self.fixture["ownership"],
+            latest_release=release,
+            published_release=release,
+            published_by_tag=release,
+            tag_ref=self.fixture["tag_ref"],
+            repository=REPOSITORY,
+            source_run_id=RUN_ID,
+            source_run_attempt=RUN_ATTEMPT,
+            tag=TAG,
+            commit=COMMIT,
+        )
+
+    def validate_fixture_source(self, **overrides: object) -> None:
+        arguments: dict[str, object] = {
+            "state": self.fixture_state(),
+            "ownership": self.fixture["ownership"],
+            "repository_metadata": self.fixture["repository"],
+            "source_run": self.fixture["source_run"],
+            "source_jobs": self.fixture["source_jobs"],
+            "ownership_artifact": self.fixture["ownership_artifact"],
+            "default_branch": "main",
+        }
+        arguments.update(overrides)
+        validate_source_evidence(**arguments)  # type: ignore[arg-type]
+
     def test_draft_urls_change_but_content_identity_and_public_urls_pass(self) -> None:
         state = self.validate()
 
@@ -127,14 +174,13 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
         with self.assertRaises(VerificationFailure) as raised:
             self.validate(source_run_id="33253867764")
 
-        fields = {item["field"] for item in raised.exception.mismatches}
-        self.assertIn("ownership.run_id", fields)
+        self.assertIn("ownership.run_id", mismatch_fields(raised.exception))
 
     def test_wrong_tag_is_rejected(self) -> None:
         with self.assertRaises(VerificationFailure) as raised:
             self.validate(tag="v0.1.8")
 
-        fields = {item["field"] for item in raised.exception.mismatches}
+        fields = mismatch_fields(raised.exception)
         self.assertIn("ownership.target.tag", fields)
         self.assertIn("published.tag_name", fields)
 
@@ -145,8 +191,7 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
         with self.assertRaises(VerificationFailure) as raised:
             self.validate(ownership=tampered)
 
-        fields = {item["field"] for item in raised.exception.mismatches}
-        self.assertIn("published.id", fields)
+        self.assertIn("published.id", mismatch_fields(raised.exception))
 
     def test_tampered_receipt_digest_is_rejected(self) -> None:
         tampered = copy.deepcopy(self.ownership)
@@ -155,65 +200,158 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
         with self.assertRaises(VerificationFailure) as raised:
             self.validate(ownership=tampered)
 
-        fields = {item["field"] for item in raised.exception.mismatches}
         self.assertTrue(
             any(
                 field.endswith(".digest") and field.startswith("published.assets")
-                for field in fields
+                for field in mismatch_fields(raised.exception)
             )
         )
 
     def test_wrong_public_url_has_field_level_diagnostic(self) -> None:
         published = copy.deepcopy(self.published)
         published["assets"][0]["browser_download_url"] = (
-            f"https://github.com/{REPOSITORY}/releases/download/untagged-stale/SHA256SUMS.txt"
+            f"https://github.com/{REPOSITORY}/releases/download/"
+            "untagged-stale/SHA256SUMS.txt"
         )
 
         with self.assertRaises(VerificationFailure) as raised:
             self.validate(published_release=published)
 
-        fields = {item["field"] for item in raised.exception.mismatches}
-        self.assertIn("published.assets[SHA256SUMS.txt].browser_download_url", fields)
-
-    def test_source_run_and_ownership_artifact_are_strictly_bound(self) -> None:
-        state = self.validate()
-        source_run = {
-            "id": int(RUN_ID),
-            "run_attempt": int(RUN_ATTEMPT),
-            "head_sha": COMMIT,
-            "path": ".github/workflows/mobile-release.yml",
-            "event": "workflow_dispatch",
-            "status": "completed",
-            "conclusion": "failure",
-            "repository": {"id": 10, "full_name": REPOSITORY},
-            "head_repository": {"id": 10, "full_name": REPOSITORY},
-        }
-        artifact = {
-            "id": 9715378093,
-            "name": f"android-release-ownership-{TAG}-{RUN_ID}-{RUN_ATTEMPT}",
-            "size_in_bytes": 1383,
-            "digest": "sha256:" + "b" * 64,
-            "expired": False,
-            "workflow_run": {
-                "id": int(RUN_ID),
-                "repository_id": 10,
-                "head_repository_id": 10,
-                "head_sha": COMMIT,
-            },
-        }
-
-        validate_source_evidence(
-            state=state, source_run=source_run, ownership_artifact=artifact
+        self.assertIn(
+            "published.assets[SHA256SUMS.txt].browser_download_url",
+            mismatch_fields(raised.exception),
         )
-        artifact["workflow_run"]["head_sha"] = "0" * 40
-        with self.assertRaises(VerificationFailure) as raised:
-            validate_source_evidence(
-                state=state, source_run=source_run, ownership_artifact=artifact
-            )
+
+    def test_real_sanitized_v017_api_receipt_and_job_chain_replays(self) -> None:
+        state = self.fixture_state()
+        self.validate_fixture_source(state=state)
+
         self.assertEqual(
-            "ownership_artifact.workflow_run.head_sha",
-            raised.exception.mismatches[0]["field"],
+            "openaria.mobile.release-post-publish-state.v2", state["schema"]
         )
+        self.assertEqual("2026-08-29T13:17:54Z", state["target"]["published_at"])
+        self.assertEqual(378992098, state["target"]["release_id"])
+
+    def test_source_chain_rejects_missing_or_failed_success_step(self) -> None:
+        jobs = copy.deepcopy(self.fixture["source_jobs"])
+        publication = next(
+            job for job in jobs["jobs"] if job["name"] == "Assemble release"
+        )
+        publish = next(
+            step
+            for step in publication["steps"]
+            if step["name"] == "Publish the receipt-owned GitHub Release"
+        )
+        publish["conclusion"] = "failure"
+
+        with self.assertRaises(VerificationFailure) as raised:
+            self.validate_fixture_source(source_jobs=jobs)
+
+        self.assertIn(
+            "source_jobs[Assemble release].steps[Publish the receipt-owned GitHub Release].conclusion",
+            mismatch_fields(raised.exception),
+        )
+
+    def test_source_chain_rejects_duplicate_jobs_and_wrong_step_order(self) -> None:
+        jobs = copy.deepcopy(self.fixture["source_jobs"])
+        jobs["jobs"].append(copy.deepcopy(jobs["jobs"][0]))
+        publication = next(
+            job for job in jobs["jobs"] if job["name"] == "Assemble release"
+        )
+        publication["steps"][-1]["number"] = 10
+
+        with self.assertRaises(VerificationFailure) as raised:
+            self.validate_fixture_source(source_jobs=jobs)
+
+        fields = mismatch_fields(raised.exception)
+        self.assertIn("source_jobs.duplicate_names", fields)
+        self.assertIn("source_jobs[Assemble release].publication_step_order", fields)
+
+    def test_source_chain_rejects_wrong_owner_actor_and_default_branch(self) -> None:
+        source_run = copy.deepcopy(self.fixture["source_run"])
+        source_run["triggering_actor"]["login"] = "not-the-owner"
+        repository = copy.deepcopy(self.fixture["repository"])
+        repository["default_branch"] = "release"
+
+        with self.assertRaises(VerificationFailure) as raised:
+            self.validate_fixture_source(
+                source_run=source_run, repository_metadata=repository
+            )
+
+        fields = mismatch_fields(raised.exception)
+        self.assertIn("source_run.triggering_actor.login", fields)
+        self.assertIn("repository", fields)
+
+    def test_receipt_preflight_rejects_wrong_head_tag_raw_hash_and_time(self) -> None:
+        ownership = copy.deepcopy(self.fixture["ownership"])
+        preflight = ownership["immutable_releases_preflight"]
+        preflight["default_branch_head"] = "0" * 40
+        preflight["release_tag"] = "v0.1.8"
+        preflight["response_sha256"] = "0" * 64
+        preflight["checked_at"] = "2026-08-29T12:00:00Z"
+
+        with self.assertRaises(VerificationFailure) as raised:
+            self.validate_fixture_source(ownership=ownership)
+
+        fields = mismatch_fields(raised.exception)
+        self.assertIn(
+            "ownership.immutable_releases_preflight.default_branch_head", fields
+        )
+        self.assertIn("ownership.immutable_releases_preflight.release_tag", fields)
+        self.assertIn("ownership.immutable_releases_preflight.response_sha256", fields)
+        self.assertIn(
+            "ownership.immutable_releases_preflight.dispatch_delay_seconds", fields
+        )
+
+    def test_publish_and_artifact_timestamps_must_be_inside_success_steps(self) -> None:
+        state = copy.deepcopy(self.fixture_state())
+        state["target"]["published_at"] = "2026-08-29T13:18:00Z"
+        artifact = copy.deepcopy(self.fixture["ownership_artifact"])
+        artifact["created_at"] = "2026-08-29T13:15:00Z"
+
+        with self.assertRaises(VerificationFailure) as raised:
+            self.validate_fixture_source(state=state, ownership_artifact=artifact)
+
+        fields = mismatch_fields(raised.exception)
+        self.assertIn("state.target.published_at", fields)
+        self.assertIn("ownership_artifact.created_at", fields)
+
+    def test_source_chain_rejects_expired_or_wrong_numeric_artifact(self) -> None:
+        artifact = copy.deepcopy(self.fixture["ownership_artifact"])
+        artifact["expired"] = True
+        artifact["workflow_run"]["id"] += 1
+
+        with self.assertRaises(VerificationFailure) as raised:
+            self.validate_fixture_source(ownership_artifact=artifact)
+
+        fields = mismatch_fields(raised.exception)
+        self.assertIn("ownership_artifact.expired", fields)
+        self.assertIn("ownership_artifact.workflow_run.id", fields)
+
+    def test_final_recheck_rejects_latest_or_artifact_digest_drift(self) -> None:
+        state = self.fixture_state()
+        final_state = copy.deepcopy(state)
+        final_state["target"]["latest"] = False
+        final_artifact = copy.deepcopy(self.fixture["ownership_artifact"])
+        final_artifact["digest"] = "sha256:" + "0" * 64
+
+        with self.assertRaises(VerificationFailure) as raised:
+            validate_final_recheck(
+                initial_state=state,
+                final_state=final_state,
+                initial_repository=self.fixture["repository"],
+                final_repository=self.fixture["repository"],
+                initial_source_run=self.fixture["source_run"],
+                final_source_run=self.fixture["source_run"],
+                initial_source_jobs=self.fixture["source_jobs"],
+                final_source_jobs=self.fixture["source_jobs"],
+                initial_ownership_artifact=self.fixture["ownership_artifact"],
+                final_ownership_artifact=final_artifact,
+            )
+
+        fields = mismatch_fields(raised.exception)
+        self.assertIn("final_recheck.release_state", fields)
+        self.assertIn("final_recheck.ownership_artifact", fields)
 
     def test_anonymous_assets_manifest_checksums_package_and_signers_are_exact(
         self,
@@ -278,8 +416,6 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
             apk_package = reports / "apk-package.txt"
             apk_version_name = reports / "apk-version-name.txt"
             apk_version_code = reports / "apk-version-code.txt"
-            aab_signature = reports / "jarsigner.txt"
-            aab_certificate = reports / "aab-certificate.txt"
             apk_signature.write_text(
                 f"Signer #1 certificate SHA-256 digest: {CERTIFICATE}\n",
                 encoding="utf-8",
@@ -287,12 +423,34 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
             apk_package.write_text(f"{PACKAGE_NAME}\n", encoding="utf-8")
             apk_version_name.write_text("0.1.7\n", encoding="utf-8")
             apk_version_code.write_text("10\n", encoding="utf-8")
-            aab_signature.write_text("jar verified.\n", encoding="utf-8")
-            colon_digest = ":".join(
-                CERTIFICATE[index : index + 2].upper()
-                for index in range(0, len(CERTIFICATE), 2)
-            )
-            aab_certificate.write_text(f"SHA256: {colon_digest}\n", encoding="utf-8")
+            aab_verification = {
+                "schema": AAB_EVIDENCE_SCHEMA,
+                "aab": {
+                    "name": aab_name,
+                    "size": len(aab),
+                    "digest": f"sha256:{sha256(aab)}",
+                },
+                "archive": {
+                    "payload_entry_count": 2,
+                    "signature_control_entries": [
+                        "META-INF/FIXTURE.RSA",
+                        "META-INF/FIXTURE.SF",
+                        "META-INF/MANIFEST.MF",
+                    ],
+                    "duplicate_entries": False,
+                    "canonical_paths": True,
+                    "crc": "exact",
+                },
+                "certificate_sha256": CERTIFICATE,
+                "certificate_count": 1,
+                "strict": True,
+                "jarsigner_exit_code": 0,
+                "trust_anchor_count": 1,
+                "trust_anchor": "ephemeral-extracted-pinned-certificate",
+                "alias_bound": True,
+                "ephemeral_truststore_cleaned": True,
+                "all_payload_entries_signed": True,
+            }
 
             evidence = verify_downloaded_release(
                 state=state,
@@ -302,14 +460,291 @@ class AndroidReleasePostPublishVerifierTest(unittest.TestCase):
                 apk_package_report=apk_package,
                 apk_version_name_report=apk_version_name,
                 apk_version_code_report=apk_version_code,
-                aab_signature_report=aab_signature,
-                aab_certificate_report=aab_certificate,
+                aab_verification=aab_verification,
             )
 
             self.assertEqual(4, len(evidence["assets"]))
             self.assertEqual(10, evidence["application"]["version_code"])
             self.assertEqual("exact", evidence["signature_identity"]["apk"])
-            self.assertEqual("exact", evidence["signature_identity"]["aab"])
+            self.assertEqual(
+                "strict-all-entries-exact", evidence["signature_identity"]["aab"]
+            )
+
+            aab_verification["aab"]["digest"] = "sha256:" + "0" * 64
+            with self.assertRaises(VerificationFailure) as raised:
+                verify_downloaded_release(
+                    state=state,
+                    asset_dir=root,
+                    expected_certificate_sha256=CERTIFICATE,
+                    apk_signature_report=apk_signature,
+                    apk_package_report=apk_package,
+                    apk_version_name_report=apk_version_name,
+                    apk_version_code_report=apk_version_code,
+                    aab_verification=aab_verification,
+                )
+            self.assertIn(
+                "aab.strict_verification.aab.digest",
+                mismatch_fields(raised.exception),
+            )
+
+
+class StrictAabVerifierTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        for tool in ("keytool", "jarsigner"):
+            if shutil.which(tool) is None:
+                raise RuntimeError(f"{tool} is required for strict AAB verifier tests")
+        cls._temporary = tempfile.TemporaryDirectory()
+        cls.root = Path(cls._temporary.name)
+        cls.keystore = cls.root / "fixture-signers.p12"
+        cls.password = "fixture-password"
+        cls._run(
+            "keytool",
+            "-genkeypair",
+            "-noprompt",
+            "-alias",
+            "fixture",
+            "-keyalg",
+            "RSA",
+            "-keysize",
+            "2048",
+            "-validity",
+            "3650",
+            "-dname",
+            "CN=OpenAria AAB Test Fixture",
+            "-keystore",
+            str(cls.keystore),
+            "-storetype",
+            "PKCS12",
+            "-storepass",
+            cls.password,
+            "-keypass",
+            cls.password,
+        )
+        cls.base_aab = cls.root / "base-signed.aab"
+        with zipfile.ZipFile(cls.base_aab, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("BundleConfig.pb", b"bundle configuration")
+            archive.writestr(
+                "base/manifest/AndroidManifest.xml", b"compiled manifest fixture"
+            )
+        cls._run(
+            "jarsigner",
+            "-keystore",
+            str(cls.keystore),
+            "-storetype",
+            "PKCS12",
+            "-storepass",
+            cls.password,
+            "-keypass",
+            cls.password,
+            str(cls.base_aab),
+            "fixture",
+        )
+        certificate_der = cls.root / "fixture.der"
+        cls._run(
+            "keytool",
+            "-exportcert",
+            "-alias",
+            "fixture",
+            "-keystore",
+            str(cls.keystore),
+            "-storetype",
+            "PKCS12",
+            "-storepass",
+            cls.password,
+            "-file",
+            str(certificate_der),
+        )
+        cls.certificate = hashlib.sha256(certificate_der.read_bytes()).hexdigest()
+        cls._run(
+            "keytool",
+            "-genkeypair",
+            "-noprompt",
+            "-alias",
+            "second",
+            "-keyalg",
+            "RSA",
+            "-keysize",
+            "2048",
+            "-validity",
+            "3650",
+            "-dname",
+            "CN=Second OpenAria AAB Test Fixture",
+            "-keystore",
+            str(cls.keystore),
+            "-storetype",
+            "PKCS12",
+            "-storepass",
+            cls.password,
+            "-keypass",
+            cls.password,
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._temporary.cleanup()
+
+    @staticmethod
+    def _run(*command: str) -> None:
+        environment = dict(os.environ)
+        environment["LC_ALL"] = "C"
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+    def copy_fixture(self, root: Path) -> Path:
+        destination = root / "fixture.aab"
+        shutil.copyfile(self.base_aab, destination)
+        return destination
+
+    def verify(self, aab: Path, root: Path, certificate: str | None = None) -> dict:
+        trust_parent = root / "temporary-truststores"
+        trust_parent.mkdir()
+        evidence = verify_aab_signature(
+            aab_path=aab,
+            expected_certificate_sha256=certificate or self.certificate,
+            report_dir=root / "reports",
+            temporary_parent=trust_parent,
+        )
+        self.assertEqual([], list(trust_parent.iterdir()))
+        return evidence
+
+    def test_valid_self_signed_aab_passes_strict_with_cleaned_ephemeral_anchor(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            evidence = self.verify(self.copy_fixture(root), root)
+            strict_report = (root / "reports" / "jarsigner-strict.txt").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn(str(root), strict_report)
+            self.assertNotIn(".p12", strict_report)
+
+        self.assertTrue(evidence["all_payload_entries_signed"])
+        self.assertEqual(0, evidence["jarsigner_exit_code"])
+        self.assertEqual(1, evidence["trust_anchor_count"])
+        self.assertEqual(2, evidence["archive"]["payload_entry_count"])
+
+    def test_appended_unsigned_payload_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            aab = self.copy_fixture(root)
+            with zipfile.ZipFile(aab, "a", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("base/assets/unsigned.pb", b"unsigned")
+
+            with self.assertRaises(VerificationFailure) as raised:
+                self.verify(aab, root)
+
+        fields = mismatch_fields(raised.exception)
+        self.assertTrue(
+            "aab.jarsigner.strict_exit_code" in fields
+            or "aab.keytool.printcert_rfc.exit_code" in fields
+        )
+
+    def test_tampered_signed_payload_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            aab = self.copy_fixture(root)
+            replacement = root / "tampered.aab"
+            with (
+                zipfile.ZipFile(aab) as source,
+                zipfile.ZipFile(replacement, "w") as target,
+            ):
+                for entry in source.infolist():
+                    value = source.read(entry.filename)
+                    if entry.filename == "BundleConfig.pb":
+                        value += b" tampered"
+                    target.writestr(entry, value)
+            replacement.replace(aab)
+
+            with self.assertRaises(VerificationFailure) as raised:
+                self.verify(aab, root)
+
+        fields = mismatch_fields(raised.exception)
+        self.assertTrue(
+            "aab.jarsigner.strict_exit_code" in fields
+            or "aab.keytool.printcert_rfc.exit_code" in fields
+        )
+
+    def test_wrong_certificate_pin_is_rejected_before_trust(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            aab = self.copy_fixture(root)
+            trust_parent = root / "temporary-truststores"
+            trust_parent.mkdir()
+
+            with self.assertRaises(VerificationFailure) as raised:
+                verify_aab_signature(
+                    aab_path=aab,
+                    expected_certificate_sha256="0" * 64,
+                    report_dir=root / "reports",
+                    temporary_parent=trust_parent,
+                )
+
+            self.assertEqual([], list(trust_parent.iterdir()))
+        self.assertIn("aab.signingCertificateSha256", mismatch_fields(raised.exception))
+
+    def test_second_signer_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            aab = self.copy_fixture(root)
+            self._run(
+                "jarsigner",
+                "-keystore",
+                str(self.keystore),
+                "-storetype",
+                "PKCS12",
+                "-storepass",
+                self.password,
+                "-keypass",
+                self.password,
+                str(aab),
+                "second",
+            )
+
+            with self.assertRaises(VerificationFailure) as raised:
+                self.verify(aab, root)
+
+        fields = mismatch_fields(raised.exception)
+        self.assertTrue(
+            "aab.archive.signature_file_count" in fields
+            or "aab.certificate.pem_count" in fields
+        )
+
+    def test_duplicate_payload_name_is_rejected_even_when_bytes_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            aab = self.copy_fixture(root)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                with zipfile.ZipFile(aab, "a", zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr("BundleConfig.pb", b"bundle configuration")
+
+            with self.assertRaises(VerificationFailure) as raised:
+                self.verify(aab, root)
+
+        self.assertIn(
+            "aab.archive.duplicate_entries", mismatch_fields(raised.exception)
+        )
+
+    def test_extra_meta_inf_signature_control_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            aab = self.copy_fixture(root)
+            with zipfile.ZipFile(aab, "a", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("META-INF/EVIL.SF", b"ignored by jarsigner")
+
+            with self.assertRaises(VerificationFailure) as raised:
+                self.verify(aab, root)
+
+        fields = mismatch_fields(raised.exception)
+        self.assertIn("aab.archive.signature_file_count", fields)
+        self.assertIn("aab.archive.signature_control_count", fields)
 
 
 if __name__ == "__main__":

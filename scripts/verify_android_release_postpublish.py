@@ -1,19 +1,32 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
+import os
 import re
+import secrets
+import stat
+import subprocess
 import sys
+import tempfile
+import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 REPOSITORY = "Alpenl/openaria-echo-mobile"
 PACKAGE_NAME = "com.openaria.openaria_echo_mobile"
 OWNERSHIP_SCHEMA = "openaria.mobile.release-ownership.v1"
-STATE_SCHEMA = "openaria.mobile.release-post-publish-state.v1"
-EVIDENCE_SCHEMA = "openaria.mobile.read-only-post-publish-verification.v1"
+STATE_SCHEMA = "openaria.mobile.release-post-publish-state.v2"
+EVIDENCE_SCHEMA = "openaria.mobile.read-only-post-publish-verification.v2"
+AAB_EVIDENCE_SCHEMA = "openaria.mobile.aab-strict-verification.v1"
+SOURCE_WORKFLOW = ".github/workflows/mobile-release.yml"
+SOURCE_WORKFLOW_NAME = "Mobile Release"
+BUILD_JOB = "Build Android release"
+ASSEMBLE_JOB = "Assemble release"
 HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -334,6 +347,7 @@ def validate_release_state(
         ("draft", False),
         ("prerelease", False),
         ("immutable", True),
+        ("target_commitish", commit),
     ):
         _mismatch(
             mismatches, f"published.{field}", expected, published_release.get(field)
@@ -345,13 +359,25 @@ def validate_release_state(
             published_by_tag.get(field),
         )
         _mismatch(mismatches, f"latest.{field}", expected, latest_release.get(field))
+    published_at = published_release.get("published_at")
     _require(
         mismatches,
-        isinstance(published_release.get("published_at"), str)
-        and bool(published_release.get("published_at")),
+        isinstance(published_at, str) and bool(published_at),
         "published.published_at",
         "non-empty timestamp",
-        published_release.get("published_at"),
+        published_at,
+    )
+    _mismatch(
+        mismatches,
+        "published_by_tag.published_at",
+        published_at,
+        published_by_tag.get("published_at"),
+    )
+    _mismatch(
+        mismatches,
+        "latest.published_at",
+        published_at,
+        latest_release.get("published_at"),
     )
     _mismatch(
         mismatches, "tag_ref.object.type", "commit", _at(tag_ref, "object", "type")
@@ -380,6 +406,7 @@ def validate_release_state(
             "tag": tag,
             "release_id": release_id,
             "tag_commit": commit,
+            "published_at": published_at,
             "immutable": True,
             "latest": True,
             "assets": assets,
@@ -461,11 +488,239 @@ def _certificate_digests(report: str, pattern: re.Pattern[str]) -> list[str]:
     return [match.replace(":", "").lower() for match in pattern.findall(report)]
 
 
+def _source_run_projection(source_run: dict[str, Any]) -> dict[str, Any]:
+    def identity(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {"id": None, "login": None, "type": None}
+        return {key: value.get(key) for key in ("id", "login", "type")}
+
+    return {
+        "id": source_run.get("id"),
+        "run_attempt": source_run.get("run_attempt"),
+        "head_sha": source_run.get("head_sha"),
+        "head_branch": source_run.get("head_branch"),
+        "path": source_run.get("path"),
+        "event": source_run.get("event"),
+        "status": source_run.get("status"),
+        "conclusion": source_run.get("conclusion"),
+        "created_at": source_run.get("created_at"),
+        "actor": identity(source_run.get("actor")),
+        "triggering_actor": identity(source_run.get("triggering_actor")),
+        "repository": {
+            "id": _at(source_run, "repository", "id"),
+            "full_name": _at(source_run, "repository", "full_name"),
+            "owner": identity(_at(source_run, "repository", "owner")),
+        },
+        "head_repository": {
+            "id": _at(source_run, "head_repository", "id"),
+            "full_name": _at(source_run, "head_repository", "full_name"),
+        },
+    }
+
+
+def _repository_projection(repository_metadata: dict[str, Any]) -> dict[str, Any]:
+    owner = repository_metadata.get("owner")
+    return {
+        "id": repository_metadata.get("id"),
+        "full_name": repository_metadata.get("full_name"),
+        "default_branch": repository_metadata.get("default_branch"),
+        "owner": {
+            key: owner.get(key) if isinstance(owner, dict) else None
+            for key in ("id", "login", "type")
+        },
+    }
+
+
+def _source_jobs_projection(source_jobs: dict[str, Any]) -> list[dict[str, Any]]:
+    jobs = source_jobs.get("jobs")
+    if not isinstance(jobs, list):
+        return []
+    projected: list[dict[str, Any]] = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        steps = job.get("steps")
+        projected.append(
+            {
+                "id": job.get("id"),
+                "name": job.get("name"),
+                "run_id": job.get("run_id"),
+                "run_attempt": job.get("run_attempt"),
+                "run_url": job.get("run_url"),
+                "workflow_name": job.get("workflow_name"),
+                "head_branch": job.get("head_branch"),
+                "head_sha": job.get("head_sha"),
+                "status": job.get("status"),
+                "conclusion": job.get("conclusion"),
+                "steps": [
+                    {
+                        "number": step.get("number"),
+                        "name": step.get("name"),
+                        "status": step.get("status"),
+                        "conclusion": step.get("conclusion"),
+                        "started_at": step.get("started_at"),
+                        "completed_at": step.get("completed_at"),
+                    }
+                    for step in steps
+                    if isinstance(step, dict)
+                ]
+                if isinstance(steps, list)
+                else steps,
+            }
+        )
+    return sorted(projected, key=lambda job: str(job.get("name")))
+
+
+def _ownership_artifact_projection(
+    ownership_artifact: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": ownership_artifact.get("id"),
+        "name": ownership_artifact.get("name"),
+        "size_in_bytes": ownership_artifact.get("size_in_bytes"),
+        "digest": ownership_artifact.get("digest"),
+        "expired": ownership_artifact.get("expired"),
+        "created_at": ownership_artifact.get("created_at"),
+        "expires_at": ownership_artifact.get("expires_at"),
+        "workflow_run": {
+            "id": _at(ownership_artifact, "workflow_run", "id"),
+            "repository_id": _at(ownership_artifact, "workflow_run", "repository_id"),
+            "head_repository_id": _at(
+                ownership_artifact, "workflow_run", "head_repository_id"
+            ),
+            "head_branch": _at(ownership_artifact, "workflow_run", "head_branch"),
+            "head_sha": _at(ownership_artifact, "workflow_run", "head_sha"),
+        },
+    }
+
+
+def _jobs_by_name(
+    source_jobs: dict[str, Any], mismatches: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    jobs = source_jobs.get("jobs")
+    if not isinstance(jobs, list):
+        mismatches.append(
+            {
+                "field": "source_jobs.jobs",
+                "expected": "array",
+                "actual": type(jobs).__name__,
+            }
+        )
+        return {}
+    by_name: dict[str, dict[str, Any]] = {}
+    duplicates: list[str] = []
+    invalid_entries = 0
+    for job in jobs:
+        if not isinstance(job, dict) or not isinstance(job.get("name"), str):
+            invalid_entries += 1
+            continue
+        name = job["name"]
+        if name in by_name:
+            duplicates.append(name)
+        by_name[name] = job
+    _mismatch(mismatches, "source_jobs.invalid_entries", 0, invalid_entries)
+    _mismatch(mismatches, "source_jobs.duplicate_names", [], sorted(set(duplicates)))
+    _mismatch(
+        mismatches,
+        "source_jobs.names",
+        sorted((BUILD_JOB, ASSEMBLE_JOB)),
+        sorted(by_name),
+    )
+    return by_name
+
+
+def _timestamp(
+    value: Any, field: str, mismatches: list[dict[str, Any]]
+) -> datetime | None:
+    if not isinstance(value, str):
+        mismatches.append(
+            {"field": field, "expected": "RFC3339 timestamp", "actual": value}
+        )
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None:
+        mismatches.append(
+            {"field": field, "expected": "RFC3339 timestamp", "actual": value}
+        )
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_required_steps(
+    *,
+    job: dict[str, Any],
+    job_field: str,
+    required: dict[str, str],
+    mismatches: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        mismatches.append(
+            {
+                "field": f"{job_field}.steps",
+                "expected": "array",
+                "actual": type(steps).__name__,
+            }
+        )
+        return {}
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for step in steps:
+        if isinstance(step, dict) and isinstance(step.get("name"), str):
+            by_name.setdefault(step["name"], []).append(step)
+    for name, expected_conclusion in required.items():
+        matches = by_name.get(name, [])
+        _mismatch(mismatches, f"{job_field}.steps[{name}].count", 1, len(matches))
+        if len(matches) != 1:
+            continue
+        step = matches[0]
+        _mismatch(
+            mismatches,
+            f"{job_field}.steps[{name}].status",
+            "completed",
+            step.get("status"),
+        )
+        _mismatch(
+            mismatches,
+            f"{job_field}.steps[{name}].conclusion",
+            expected_conclusion,
+            step.get("conclusion"),
+        )
+        _require(
+            mismatches,
+            isinstance(step.get("number"), int) and step["number"] > 0,
+            f"{job_field}.steps[{name}].number",
+            "positive integer",
+            step.get("number"),
+        )
+        _timestamp(
+            step.get("started_at"),
+            f"{job_field}.steps[{name}].started_at",
+            mismatches,
+        )
+        _timestamp(
+            step.get("completed_at"),
+            f"{job_field}.steps[{name}].completed_at",
+            mismatches,
+        )
+    return {
+        name: matches[0]
+        for name in required
+        if len(matches := by_name.get(name, [])) == 1
+    }
+
+
 def validate_source_evidence(
     *,
     state: dict[str, Any],
+    ownership: dict[str, Any],
+    repository_metadata: dict[str, Any],
     source_run: dict[str, Any],
+    source_jobs: dict[str, Any],
     ownership_artifact: dict[str, Any],
+    default_branch: str,
 ) -> None:
     mismatches: list[dict[str, Any]] = []
     run_id = int(state["source_run_id"])
@@ -479,11 +734,8 @@ def validate_source_evidence(
         ("source_run.id", run_id, source_run.get("id")),
         ("source_run.run_attempt", run_attempt, source_run.get("run_attempt")),
         ("source_run.head_sha", commit, source_run.get("head_sha")),
-        (
-            "source_run.path",
-            ".github/workflows/mobile-release.yml",
-            source_run.get("path"),
-        ),
+        ("source_run.head_branch", default_branch, source_run.get("head_branch")),
+        ("source_run.path", SOURCE_WORKFLOW, source_run.get("path")),
         ("source_run.event", "workflow_dispatch", source_run.get("event")),
         ("source_run.status", "completed", source_run.get("status")),
         ("source_run.conclusion", "failure", source_run.get("conclusion")),
@@ -507,6 +759,11 @@ def validate_source_evidence(
             "ownership_artifact.workflow_run.id",
             run_id,
             _at(ownership_artifact, "workflow_run", "id"),
+        ),
+        (
+            "ownership_artifact.workflow_run.head_branch",
+            default_branch,
+            _at(ownership_artifact, "workflow_run", "head_branch"),
         ),
         (
             "ownership_artifact.workflow_run.head_sha",
@@ -541,8 +798,24 @@ def validate_source_evidence(
         "sha256:<64 lowercase hex>",
         artifact_digest,
     )
+    artifact_created_at = _timestamp(
+        ownership_artifact.get("created_at"),
+        "ownership_artifact.created_at",
+        mismatches,
+    )
+    _timestamp(
+        ownership_artifact.get("expires_at"),
+        "ownership_artifact.expires_at",
+        mismatches,
+    )
     repository_id = _at(source_run, "repository", "id")
     head_repository_id = _at(source_run, "head_repository", "id")
+    _mismatch(
+        mismatches,
+        "source_run.head_repository.id",
+        repository_id,
+        head_repository_id,
+    )
     _mismatch(
         mismatches,
         "ownership_artifact.workflow_run.repository_id",
@@ -555,8 +828,734 @@ def validate_source_evidence(
         head_repository_id,
         _at(ownership_artifact, "workflow_run", "head_repository_id"),
     )
+
+    repository_owner = _at(source_run, "repository", "owner")
+    actor = source_run.get("actor")
+    triggering_actor = source_run.get("triggering_actor")
+    _mismatch(
+        mismatches,
+        "repository",
+        {
+            "id": _at(source_run, "repository", "id"),
+            "full_name": repository,
+            "default_branch": default_branch,
+            "owner": {
+                key: repository_owner.get(key)
+                if isinstance(repository_owner, dict)
+                else None
+                for key in ("id", "login", "type")
+            },
+        },
+        _repository_projection(repository_metadata),
+    )
+    for identity_field in ("id", "login", "type"):
+        expected_owner_identity = (
+            repository_owner.get(identity_field)
+            if isinstance(repository_owner, dict)
+            else None
+        )
+        actual_actor_identity = (
+            actor.get(identity_field) if isinstance(actor, dict) else None
+        )
+        actual_triggering_identity = (
+            triggering_actor.get(identity_field)
+            if isinstance(triggering_actor, dict)
+            else None
+        )
+        _mismatch(
+            mismatches,
+            f"source_run.actor.{identity_field}",
+            expected_owner_identity,
+            actual_actor_identity,
+        )
+        _mismatch(
+            mismatches,
+            f"source_run.triggering_actor.{identity_field}",
+            actual_actor_identity,
+            actual_triggering_identity,
+        )
+
+    preflight = ownership.get("immutable_releases_preflight")
+    if not isinstance(preflight, dict):
+        mismatches.append(
+            {
+                "field": "ownership.immutable_releases_preflight",
+                "expected": "object",
+                "actual": type(preflight).__name__,
+            }
+        )
+        preflight = {}
+    actor_login = actor.get("login") if isinstance(actor, dict) else None
+    for field, expected in (
+        ("schema", "openaria.github.immutable-releases-preflight.v1"),
+        ("repository", repository),
+        ("actor", actor_login),
+        ("source_commit", commit),
+        ("default_branch", default_branch),
+        ("default_branch_head", commit),
+        ("release_tag", tag),
+        ("run_created_at", source_run.get("created_at")),
+        ("endpoint", f"GET /repos/{repository}/immutable-releases"),
+        ("api_version", "2026-03-10"),
+        ("enabled", True),
+    ):
+        _mismatch(
+            mismatches,
+            f"ownership.immutable_releases_preflight.{field}",
+            expected,
+            preflight.get(field),
+        )
+    _mismatch(
+        mismatches,
+        "ownership.immutable_releases_preflight.response.enabled",
+        True,
+        _at(preflight, "response", "enabled"),
+    )
+    response = preflight.get("response")
+    _require(
+        mismatches,
+        isinstance(response, dict)
+        and sorted(response) == ["enabled", "enforced_by_owner"]
+        and response.get("enabled") is True
+        and isinstance(response.get("enforced_by_owner"), bool),
+        "ownership.immutable_releases_preflight.response",
+        "exact enabled/enforced_by_owner object",
+        response,
+    )
+    legacy_authorization = preflight.get("allow_legacy_baseline_bootstrap")
+    _require(
+        mismatches,
+        isinstance(legacy_authorization, bool),
+        "ownership.immutable_releases_preflight.allow_legacy_baseline_bootstrap",
+        "boolean",
+        legacy_authorization,
+    )
+    _mismatch(
+        mismatches,
+        "ownership.immutable_releases_preflight.allow_legacy_baseline_bootstrap",
+        _at(ownership, "baseline", "legacy_bootstrap_authorized"),
+        legacy_authorization,
+    )
+
+    raw_base64 = preflight.get("response_raw_base64")
+    raw_response: bytes | None = None
+    if isinstance(raw_base64, str):
+        try:
+            raw_response = base64.b64decode(raw_base64, validate=True)
+        except (binascii.Error, ValueError):
+            raw_response = None
+    _require(
+        mismatches,
+        raw_response is not None,
+        "ownership.immutable_releases_preflight.response_raw_base64",
+        "valid canonical base64",
+        "invalid" if raw_response is None else "valid",
+    )
+    response_sha256 = preflight.get("response_sha256")
+    _require(
+        mismatches,
+        isinstance(response_sha256, str)
+        and SHA256.fullmatch(response_sha256) is not None,
+        "ownership.immutable_releases_preflight.response_sha256",
+        "64 lowercase hex",
+        response_sha256,
+    )
+    if raw_response is not None:
+        _mismatch(
+            mismatches,
+            "ownership.immutable_releases_preflight.response_sha256",
+            hashlib.sha256(raw_response).hexdigest(),
+            response_sha256,
+        )
+        try:
+            decoded_response = json.loads(raw_response)
+        except json.JSONDecodeError:
+            decoded_response = None
+        _mismatch(
+            mismatches,
+            "ownership.immutable_releases_preflight.response_raw",
+            response,
+            decoded_response,
+        )
+
+    checked_at = _timestamp(
+        preflight.get("checked_at"),
+        "ownership.immutable_releases_preflight.checked_at",
+        mismatches,
+    )
+    run_created_at = _timestamp(
+        source_run.get("created_at"), "source_run.created_at", mismatches
+    )
+    if checked_at is not None and run_created_at is not None:
+        dispatch_delay = (run_created_at - checked_at).total_seconds()
+        _require(
+            mismatches,
+            -60 <= dispatch_delay <= 300,
+            "ownership.immutable_releases_preflight.dispatch_delay_seconds",
+            "between -60 and 300 inclusive",
+            dispatch_delay,
+        )
+
+    jobs = _jobs_by_name(source_jobs, mismatches)
+    run_url = f"https://api.github.com/repos/{repository}/actions/runs/{run_id}"
+    for job_name, expected_conclusion in (
+        (BUILD_JOB, "success"),
+        (ASSEMBLE_JOB, "failure"),
+    ):
+        job = jobs.get(job_name, {})
+        job_field = f"source_jobs[{job_name}]"
+        for field, expected in (
+            ("run_id", run_id),
+            ("run_attempt", run_attempt),
+            ("run_url", run_url),
+            ("workflow_name", SOURCE_WORKFLOW_NAME),
+            ("head_branch", default_branch),
+            ("head_sha", commit),
+            ("status", "completed"),
+            ("conclusion", expected_conclusion),
+        ):
+            _mismatch(mismatches, f"{job_field}.{field}", expected, job.get(field))
+
+    _validate_required_steps(
+        job=jobs.get(BUILD_JOB, {}),
+        job_field=f"source_jobs[{BUILD_JOB}]",
+        required={
+            "Validate release metadata": "success",
+            "Upload immutable-release preflight evidence": "success",
+            "Build Android release artifacts": "success",
+            "Verify APK identity and generate update manifest": "success",
+            "Upload Android artifacts": "success",
+        },
+        mismatches=mismatches,
+    )
+    assemble_steps = _validate_required_steps(
+        job=jobs.get(ASSEMBLE_JOB, {}),
+        job_field=f"source_jobs[{ASSEMBLE_JOB}]",
+        required={
+            "Reject stale release rerun preflight": "success",
+            "Upload exact-run pre-publish ownership receipt": "success",
+            "Upgrade previous production through the staged production updater": "success",
+            "Upload pre-publish in-app upgrade evidence": "success",
+            "Publish the receipt-owned GitHub Release": "success",
+            "Post-publish verification": "failure",
+        },
+        mismatches=mismatches,
+    )
+    ordered_step_names = (
+        "Upload exact-run pre-publish ownership receipt",
+        "Upgrade previous production through the staged production updater",
+        "Upload pre-publish in-app upgrade evidence",
+        "Publish the receipt-owned GitHub Release",
+        "Post-publish verification",
+    )
+    step_numbers = [
+        assemble_steps[name].get("number")
+        for name in ordered_step_names
+        if name in assemble_steps
+    ]
+    _require(
+        mismatches,
+        len(step_numbers) == len(ordered_step_names)
+        and all(isinstance(number, int) for number in step_numbers)
+        and step_numbers == sorted(step_numbers)
+        and len(set(step_numbers)) == len(step_numbers),
+        f"source_jobs[{ASSEMBLE_JOB}].publication_step_order",
+        list(ordered_step_names),
+        step_numbers,
+    )
+
+    publish_step = assemble_steps.get("Publish the receipt-owned GitHub Release")
+    if publish_step is not None:
+        publish_started_at = _timestamp(
+            publish_step.get("started_at"),
+            f"source_jobs[{ASSEMBLE_JOB}].steps[Publish the receipt-owned GitHub Release].started_at",
+            mismatches,
+        )
+        publish_completed_at = _timestamp(
+            publish_step.get("completed_at"),
+            f"source_jobs[{ASSEMBLE_JOB}].steps[Publish the receipt-owned GitHub Release].completed_at",
+            mismatches,
+        )
+        published_at = _timestamp(
+            _at(state, "target", "published_at"),
+            "state.target.published_at",
+            mismatches,
+        )
+        if (
+            publish_started_at is not None
+            and publish_completed_at is not None
+            and published_at is not None
+        ):
+            _require(
+                mismatches,
+                publish_started_at <= published_at <= publish_completed_at,
+                "state.target.published_at",
+                "inside successful receipt-owned publication step",
+                _at(state, "target", "published_at"),
+            )
+
+    receipt_step = assemble_steps.get("Upload exact-run pre-publish ownership receipt")
+    if receipt_step is not None and artifact_created_at is not None:
+        receipt_started_at = _timestamp(
+            receipt_step.get("started_at"),
+            f"source_jobs[{ASSEMBLE_JOB}].steps[Upload exact-run pre-publish ownership receipt].started_at",
+            mismatches,
+        )
+        receipt_completed_at = _timestamp(
+            receipt_step.get("completed_at"),
+            f"source_jobs[{ASSEMBLE_JOB}].steps[Upload exact-run pre-publish ownership receipt].completed_at",
+            mismatches,
+        )
+        if receipt_started_at is not None and receipt_completed_at is not None:
+            _require(
+                mismatches,
+                receipt_started_at <= artifact_created_at <= receipt_completed_at,
+                "ownership_artifact.created_at",
+                "inside successful ownership receipt upload step",
+                ownership_artifact.get("created_at"),
+            )
     if mismatches:
         raise VerificationFailure(mismatches)
+
+
+def validate_final_recheck(
+    *,
+    initial_state: dict[str, Any],
+    final_state: dict[str, Any],
+    initial_repository: dict[str, Any],
+    final_repository: dict[str, Any],
+    initial_source_run: dict[str, Any],
+    final_source_run: dict[str, Any],
+    initial_source_jobs: dict[str, Any],
+    final_source_jobs: dict[str, Any],
+    initial_ownership_artifact: dict[str, Any],
+    final_ownership_artifact: dict[str, Any],
+) -> None:
+    mismatches: list[dict[str, Any]] = []
+    _mismatch(mismatches, "final_recheck.release_state", initial_state, final_state)
+    _mismatch(
+        mismatches,
+        "final_recheck.repository",
+        _repository_projection(initial_repository),
+        _repository_projection(final_repository),
+    )
+    _mismatch(
+        mismatches,
+        "final_recheck.source_run",
+        _source_run_projection(initial_source_run),
+        _source_run_projection(final_source_run),
+    )
+    _mismatch(
+        mismatches,
+        "final_recheck.source_jobs",
+        _source_jobs_projection(initial_source_jobs),
+        _source_jobs_projection(final_source_jobs),
+    )
+    _mismatch(
+        mismatches,
+        "final_recheck.ownership_artifact",
+        _ownership_artifact_projection(initial_ownership_artifact),
+        _ownership_artifact_projection(final_ownership_artifact),
+    )
+    if mismatches:
+        raise VerificationFailure(mismatches)
+
+
+def _run_tool(command: list[str], field: str) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ)
+    environment["LC_ALL"] = "C"
+    try:
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+        )
+    except OSError as error:
+        raise VerificationFailure(
+            [{"field": field, "expected": "executable tool", "actual": str(error)}]
+        ) from error
+
+
+def _safe_tool_output(
+    result: subprocess.CompletedProcess[str], replacements: tuple[str, ...] = ()
+) -> str:
+    output = result.stdout
+    if result.stderr:
+        output += ("\n" if output and not output.endswith("\n") else "") + result.stderr
+    for replacement in replacements:
+        if replacement:
+            output = output.replace(replacement, "<ephemeral>")
+    return output
+
+
+def _audit_aab_archive(aab_path: Path) -> dict[str, Any]:
+    mismatches: list[dict[str, Any]] = []
+    try:
+        with zipfile.ZipFile(aab_path) as archive:
+            entries = archive.infolist()
+            names = [entry.filename for entry in entries]
+            duplicates = sorted(name for name in set(names) if names.count(name) != 1)
+            _mismatch(mismatches, "aab.archive.duplicate_entries", [], duplicates)
+
+            payload_entries: list[str] = []
+            signature_files: list[tuple[str, str]] = []
+            signature_blocks: list[tuple[str, str]] = []
+            signature_controls: list[str] = []
+            for entry in entries:
+                name = entry.filename
+                stripped_name = name.removesuffix("/")
+                path = PurePosixPath(stripped_name) if stripped_name else None
+                canonical = (
+                    bool(stripped_name)
+                    and "\\" not in name
+                    and not name.startswith("/")
+                    and "//" not in name
+                    and path is not None
+                    and all(part not in ("", ".", "..") for part in path.parts)
+                    and str(path) == stripped_name
+                )
+                _require(
+                    mismatches,
+                    canonical,
+                    f"aab.archive.entries[{name}].canonical_path",
+                    True,
+                    False,
+                )
+                _require(
+                    mismatches,
+                    not bool(entry.flag_bits & 0x1),
+                    f"aab.archive.entries[{name}].encrypted",
+                    False,
+                    bool(entry.flag_bits & 0x1),
+                )
+                unix_mode = entry.external_attr >> 16
+                _require(
+                    mismatches,
+                    not stat.S_ISLNK(unix_mode),
+                    f"aab.archive.entries[{name}].symlink",
+                    False,
+                    stat.S_ISLNK(unix_mode),
+                )
+                if entry.is_dir():
+                    continue
+                if name == "META-INF/MANIFEST.MF":
+                    signature_controls.append(name)
+                    continue
+                signature_file = re.fullmatch(r"META-INF/([^/]+)\.SF", name)
+                if signature_file is not None:
+                    signature_files.append((signature_file.group(1), name))
+                    signature_controls.append(name)
+                    continue
+                signature_block = re.fullmatch(r"META-INF/([^/]+)\.(RSA|DSA|EC)", name)
+                if signature_block is not None:
+                    signature_blocks.append((signature_block.group(1), name))
+                    signature_controls.append(name)
+                    continue
+                if re.fullmatch(r"META-INF/SIG-[^/]+", name) is not None:
+                    signature_controls.append(name)
+                    mismatches.append(
+                        {
+                            "field": "aab.archive.signature_controls",
+                            "expected": "no SIG-* controls",
+                            "actual": name,
+                        }
+                    )
+                    continue
+                payload_entries.append(name)
+
+            _mismatch(
+                mismatches,
+                "aab.archive.manifest_count",
+                1,
+                names.count("META-INF/MANIFEST.MF"),
+            )
+            _mismatch(
+                mismatches,
+                "aab.archive.signature_file_count",
+                1,
+                len(signature_files),
+            )
+            _mismatch(
+                mismatches,
+                "aab.archive.signature_block_count",
+                1,
+                len(signature_blocks),
+            )
+            if len(signature_files) == 1 and len(signature_blocks) == 1:
+                _mismatch(
+                    mismatches,
+                    "aab.archive.signature_control_basename",
+                    signature_files[0][0],
+                    signature_blocks[0][0],
+                )
+            _mismatch(
+                mismatches,
+                "aab.archive.signature_control_count",
+                3,
+                len(signature_controls),
+            )
+            _require(
+                mismatches,
+                len(payload_entries) > 0,
+                "aab.archive.payload_entry_count",
+                "positive integer",
+                len(payload_entries),
+            )
+            bad_crc_entry = archive.testzip()
+            _mismatch(mismatches, "aab.archive.bad_crc_entry", None, bad_crc_entry)
+    except (OSError, zipfile.BadZipFile) as error:
+        raise VerificationFailure(
+            [
+                {
+                    "field": "aab.archive",
+                    "expected": "readable ZIP archive",
+                    "actual": str(error),
+                }
+            ]
+        ) from error
+    if mismatches:
+        raise VerificationFailure(mismatches)
+    return {
+        "entry_count": len(entries),
+        "payload_entry_count": len(payload_entries),
+        "signature_control_entries": sorted(signature_controls),
+        "duplicate_entries": False,
+        "canonical_paths": True,
+        "crc": "exact",
+    }
+
+
+def verify_aab_signature(
+    *,
+    aab_path: Path,
+    expected_certificate_sha256: str,
+    report_dir: Path,
+    temporary_parent: Path | None = None,
+) -> dict[str, Any]:
+    mismatches: list[dict[str, Any]] = []
+    normalized_expected_certificate = expected_certificate_sha256.lower()
+    _require(
+        mismatches,
+        SHA256.fullmatch(normalized_expected_certificate) is not None,
+        "expected_certificate_sha256",
+        "64 hex characters",
+        "invalid" if not SHA256.fullmatch(normalized_expected_certificate) else "valid",
+    )
+    _require(
+        mismatches,
+        aab_path.is_file(),
+        "aab.path",
+        "existing regular file",
+        str(aab_path),
+    )
+    if mismatches:
+        raise VerificationFailure(mismatches)
+
+    report_dir.mkdir(parents=True, exist_ok=True)
+    archive_evidence = _audit_aab_archive(aab_path)
+    certificate_pem_result = _run_tool(
+        ["keytool", "-printcert", "-rfc", "-jarfile", str(aab_path)],
+        "aab.keytool.printcert_rfc",
+    )
+    certificate_text_result = _run_tool(
+        ["keytool", "-printcert", "-jarfile", str(aab_path)],
+        "aab.keytool.printcert",
+    )
+    certificate_pem_output = certificate_pem_result.stdout
+    certificate_text = _safe_tool_output(certificate_text_result)
+    _mismatch(
+        mismatches,
+        "aab.keytool.printcert_rfc.exit_code",
+        0,
+        certificate_pem_result.returncode,
+    )
+    _mismatch(
+        mismatches,
+        "aab.keytool.printcert.exit_code",
+        0,
+        certificate_text_result.returncode,
+    )
+    pem_blocks = re.findall(
+        r"-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\r\n]+?)\s*-----END CERTIFICATE-----",
+        certificate_pem_output,
+    )
+    _mismatch(mismatches, "aab.certificate.pem_count", 1, len(pem_blocks))
+    certificate_pem = ""
+    certificate_digest: str | None = None
+    if len(pem_blocks) == 1:
+        encoded_der = re.sub(r"\s+", "", pem_blocks[0])
+        try:
+            certificate_der = base64.b64decode(encoded_der, validate=True)
+        except (binascii.Error, ValueError) as error:
+            mismatches.append(
+                {
+                    "field": "aab.certificate.pem",
+                    "expected": "valid base64 DER certificate",
+                    "actual": type(error).__name__,
+                }
+            )
+        else:
+            certificate_digest = hashlib.sha256(certificate_der).hexdigest()
+            certificate_pem = (
+                "-----BEGIN CERTIFICATE-----\n"
+                + "\n".join(
+                    encoded_der[index : index + 64]
+                    for index in range(0, len(encoded_der), 64)
+                )
+                + "\n-----END CERTIFICATE-----\n"
+            )
+        _require(
+            mismatches,
+            certificate_digest == normalized_expected_certificate,
+            "aab.signingCertificateSha256",
+            "protected release certificate",
+            "different certificate"
+            if certificate_digest != normalized_expected_certificate
+            else "protected release certificate",
+        )
+    (report_dir / "aab-certificate.pem").write_text(certificate_pem, encoding="utf-8")
+    (report_dir / "aab-certificate.txt").write_text(certificate_text, encoding="utf-8")
+    if mismatches:
+        raise VerificationFailure(mismatches)
+
+    truststore_password = secrets.token_hex(24)
+    truststore_path: Path | None = None
+    strict_result: subprocess.CompletedProcess[str] | None = None
+    import_result: subprocess.CompletedProcess[str] | None = None
+    truststore_list_result: subprocess.CompletedProcess[str] | None = None
+    trust_anchor_count: int | None = None
+    with tempfile.TemporaryDirectory(
+        prefix="openaria-aab-trust-",
+        dir=str(temporary_parent) if temporary_parent is not None else None,
+    ) as temporary_directory:
+        temporary_path = Path(temporary_directory)
+        temporary_path.chmod(0o700)
+        truststore_path = temporary_path / "pinned-release-certificate.p12"
+        import_result = _run_tool(
+            [
+                "keytool",
+                "-importcert",
+                "-noprompt",
+                "-alias",
+                "openaria-release-anchor",
+                "-file",
+                str(report_dir / "aab-certificate.pem"),
+                "-keystore",
+                str(truststore_path),
+                "-storetype",
+                "PKCS12",
+                "-storepass",
+                truststore_password,
+            ],
+            "aab.keytool.import_pinned_trust_anchor",
+        )
+        if import_result.returncode == 0:
+            truststore_list_result = _run_tool(
+                [
+                    "keytool",
+                    "-list",
+                    "-keystore",
+                    str(truststore_path),
+                    "-storetype",
+                    "PKCS12",
+                    "-storepass",
+                    truststore_password,
+                ],
+                "aab.keytool.list_pinned_trust_anchor",
+            )
+            truststore_output = _safe_tool_output(
+                truststore_list_result, (truststore_password, str(truststore_path))
+            )
+            anchor_count_match = re.search(
+                r"Your keystore contains ([0-9]+) entr(?:y|ies)", truststore_output
+            )
+            if anchor_count_match is not None:
+                trust_anchor_count = int(anchor_count_match.group(1))
+            (report_dir / "aab-truststore.txt").write_text(
+                truststore_output, encoding="utf-8"
+            )
+            strict_result = _run_tool(
+                [
+                    "jarsigner",
+                    "-verify",
+                    "-strict",
+                    "-verbose:summary",
+                    "-certs",
+                    "-keystore",
+                    str(truststore_path),
+                    "-storetype",
+                    "PKCS12",
+                    "-storepass",
+                    truststore_password,
+                    str(aab_path),
+                    "openaria-release-anchor",
+                ],
+                "aab.jarsigner.strict",
+            )
+            strict_output = _safe_tool_output(
+                strict_result, (truststore_password, str(truststore_path))
+            )
+        else:
+            strict_output = _safe_tool_output(
+                import_result, (truststore_password, str(truststore_path))
+            )
+        (report_dir / "jarsigner-strict.txt").write_text(
+            strict_output, encoding="utf-8"
+        )
+
+    _require(
+        mismatches,
+        truststore_path is not None and not truststore_path.parent.exists(),
+        "aab.ephemeral_truststore.cleaned",
+        True,
+        False,
+    )
+    _mismatch(
+        mismatches,
+        "aab.keytool.import_pinned_trust_anchor.exit_code",
+        0,
+        import_result.returncode if import_result is not None else None,
+    )
+    _mismatch(
+        mismatches,
+        "aab.keytool.list_pinned_trust_anchor.exit_code",
+        0,
+        truststore_list_result.returncode
+        if truststore_list_result is not None
+        else None,
+    )
+    _mismatch(mismatches, "aab.trust_anchor_count", 1, trust_anchor_count)
+    _mismatch(
+        mismatches,
+        "aab.jarsigner.strict_exit_code",
+        0,
+        strict_result.returncode if strict_result is not None else None,
+    )
+    if mismatches:
+        raise VerificationFailure(mismatches)
+
+    return {
+        "schema": AAB_EVIDENCE_SCHEMA,
+        "aab": {
+            "name": aab_path.name,
+            "size": aab_path.stat().st_size,
+            "digest": f"sha256:{_sha256(aab_path)}",
+        },
+        "archive": archive_evidence,
+        "certificate_sha256": normalized_expected_certificate,
+        "certificate_count": 1,
+        "strict": True,
+        "jarsigner_exit_code": 0,
+        "trust_anchor_count": 1,
+        "trust_anchor": "ephemeral-extracted-pinned-certificate",
+        "alias_bound": True,
+        "ephemeral_truststore_cleaned": True,
+        "all_payload_entries_signed": True,
+    }
 
 
 def verify_downloaded_release(
@@ -568,8 +1567,7 @@ def verify_downloaded_release(
     apk_package_report: Path,
     apk_version_name_report: Path,
     apk_version_code_report: Path,
-    aab_signature_report: Path,
-    aab_certificate_report: Path,
+    aab_verification: dict[str, Any],
 ) -> dict[str, Any]:
     mismatches: list[dict[str, Any]] = []
     if state.get("schema") != STATE_SCHEMA:
@@ -772,30 +1770,70 @@ def verify_downloaded_release(
     _mismatch(mismatches, "apk.version", version, apk_version_name)
     _mismatch(mismatches, "apk.versionCode", str(version_code), apk_version_code)
 
-    aab_signature = aab_signature_report.read_text(encoding="utf-8")
+    expected_aab = assets[aab_name]
+    for field, expected, actual in (
+        ("schema", AAB_EVIDENCE_SCHEMA, aab_verification.get("schema")),
+        ("aab.name", aab_name, _at(aab_verification, "aab", "name")),
+        ("aab.size", expected_aab["size"], _at(aab_verification, "aab", "size")),
+        (
+            "aab.digest",
+            expected_aab["digest"],
+            _at(aab_verification, "aab", "digest"),
+        ),
+        (
+            "certificate_sha256",
+            normalized_expected_certificate,
+            aab_verification.get("certificate_sha256"),
+        ),
+        ("strict", True, aab_verification.get("strict")),
+        ("jarsigner_exit_code", 0, aab_verification.get("jarsigner_exit_code")),
+        (
+            "trust_anchor",
+            "ephemeral-extracted-pinned-certificate",
+            aab_verification.get("trust_anchor"),
+        ),
+        ("certificate_count", 1, aab_verification.get("certificate_count")),
+        ("trust_anchor_count", 1, aab_verification.get("trust_anchor_count")),
+        ("alias_bound", True, aab_verification.get("alias_bound")),
+        (
+            "ephemeral_truststore_cleaned",
+            True,
+            aab_verification.get("ephemeral_truststore_cleaned"),
+        ),
+        (
+            "all_payload_entries_signed",
+            True,
+            aab_verification.get("all_payload_entries_signed"),
+        ),
+        (
+            "archive.duplicate_entries",
+            False,
+            _at(aab_verification, "archive", "duplicate_entries"),
+        ),
+        (
+            "archive.canonical_paths",
+            True,
+            _at(aab_verification, "archive", "canonical_paths"),
+        ),
+        ("archive.crc", "exact", _at(aab_verification, "archive", "crc")),
+    ):
+        _mismatch(mismatches, f"aab.strict_verification.{field}", expected, actual)
     _require(
         mismatches,
-        "jar verified." in aab_signature.splitlines(),
-        "aab.jarsigner",
-        "jar verified.",
-        "verification marker absent",
+        isinstance(_at(aab_verification, "archive", "payload_entry_count"), int)
+        and _at(aab_verification, "archive", "payload_entry_count") > 0,
+        "aab.strict_verification.archive.payload_entry_count",
+        "positive integer",
+        _at(aab_verification, "archive", "payload_entry_count"),
     )
-    aab_certificate = aab_certificate_report.read_text(encoding="utf-8")
-    aab_digests = _certificate_digests(
-        aab_certificate,
-        re.compile(r"^[ \t]*SHA256: ([0-9A-Fa-f:]{64,95})$", re.MULTILINE),
+    _require(
+        mismatches,
+        isinstance(_at(aab_verification, "archive", "signature_control_entries"), list)
+        and len(_at(aab_verification, "archive", "signature_control_entries")) == 3,
+        "aab.strict_verification.archive.signature_control_entries",
+        "exact three-entry JAR signature closure",
+        _at(aab_verification, "archive", "signature_control_entries"),
     )
-    _mismatch(mismatches, "aab.signer_count", 1, len(aab_digests))
-    if len(aab_digests) == 1:
-        _require(
-            mismatches,
-            aab_digests[0] == normalized_expected_certificate,
-            "aab.signingCertificateSha256",
-            "protected release certificate",
-            "different certificate"
-            if aab_digests[0] != normalized_expected_certificate
-            else "protected release certificate",
-        )
     if mismatches:
         raise VerificationFailure(mismatches)
 
@@ -810,7 +1848,7 @@ def verify_downloaded_release(
             "certificate_sha256": normalized_expected_certificate,
             "manifest": "exact",
             "apk": "exact",
-            "aab": "exact",
+            "aab": "strict-all-entries-exact",
         },
     }
 
@@ -829,8 +1867,9 @@ def _print_failure(error: VerificationFailure) -> None:
 
 
 def _state_command(args: argparse.Namespace) -> None:
+    ownership = _load_json(args.ownership)
     state = validate_release_state(
-        ownership=_load_json(args.ownership),
+        ownership=ownership,
         latest_release=_load_json(args.latest_release),
         published_release=_load_json(args.published_release),
         published_by_tag=_load_json(args.published_by_tag),
@@ -841,17 +1880,77 @@ def _state_command(args: argparse.Namespace) -> None:
         tag=args.tag,
         commit=args.commit,
     )
+    source_arguments = (
+        args.repository_metadata,
+        args.source_run_metadata,
+        args.source_jobs_metadata,
+        args.ownership_artifact_metadata,
+        args.default_branch,
+    )
+    if any(value is not None for value in source_arguments):
+        if not all(value is not None for value in source_arguments):
+            raise VerificationFailure(
+                [
+                    {
+                        "field": "state.source_evidence_arguments",
+                        "expected": "all five source evidence arguments",
+                        "actual": "partial source evidence arguments",
+                    }
+                ]
+            )
+        validate_source_evidence(
+            state=state,
+            ownership=ownership,
+            repository_metadata=_load_json(args.repository_metadata),
+            source_run=_load_json(args.source_run_metadata),
+            source_jobs=_load_json(args.source_jobs_metadata),
+            ownership_artifact=_load_json(args.ownership_artifact_metadata),
+            default_branch=args.default_branch,
+        )
     _write_json(args.output, state)
 
 
+def _aab_command(args: argparse.Namespace) -> None:
+    evidence = verify_aab_signature(
+        aab_path=args.aab,
+        expected_certificate_sha256=args.expected_certificate_sha256,
+        report_dir=args.report_dir,
+    )
+    _write_json(args.output, evidence)
+
+
 def _complete_command(args: argparse.Namespace) -> None:
-    state = _load_json(args.state)
-    source_run = _load_json(args.source_run_metadata)
-    ownership_artifact = _load_json(args.ownership_artifact_metadata)
+    initial_state = _load_json(args.initial_state)
+    state = _load_json(args.final_state)
+    ownership = _load_json(args.ownership)
+    initial_repository = _load_json(args.initial_repository_metadata)
+    final_repository = _load_json(args.final_repository_metadata)
+    initial_source_run = _load_json(args.initial_source_run_metadata)
+    final_source_run = _load_json(args.final_source_run_metadata)
+    initial_source_jobs = _load_json(args.initial_source_jobs_metadata)
+    final_source_jobs = _load_json(args.final_source_jobs_metadata)
+    initial_ownership_artifact = _load_json(args.initial_ownership_artifact_metadata)
+    final_ownership_artifact = _load_json(args.final_ownership_artifact_metadata)
     validate_source_evidence(
         state=state,
-        source_run=source_run,
-        ownership_artifact=ownership_artifact,
+        ownership=ownership,
+        repository_metadata=final_repository,
+        source_run=final_source_run,
+        source_jobs=final_source_jobs,
+        ownership_artifact=final_ownership_artifact,
+        default_branch=args.default_branch,
+    )
+    validate_final_recheck(
+        initial_state=initial_state,
+        final_state=state,
+        initial_repository=initial_repository,
+        final_repository=final_repository,
+        initial_source_run=initial_source_run,
+        final_source_run=final_source_run,
+        initial_source_jobs=initial_source_jobs,
+        final_source_jobs=final_source_jobs,
+        initial_ownership_artifact=initial_ownership_artifact,
+        final_ownership_artifact=final_ownership_artifact,
     )
     byte_evidence = verify_downloaded_release(
         state=state,
@@ -861,8 +1960,7 @@ def _complete_command(args: argparse.Namespace) -> None:
         apk_package_report=args.apk_package_report,
         apk_version_name_report=args.apk_version_name_report,
         apk_version_code_report=args.apk_version_code_report,
-        aab_signature_report=args.aab_signature_report,
-        aab_certificate_report=args.aab_certificate_report,
+        aab_verification=_load_json(args.aab_verification),
     )
     run_id = args.verification_run_id
     run_attempt = args.verification_run_attempt
@@ -889,13 +1987,43 @@ def _complete_command(args: argparse.Namespace) -> None:
         "40 lowercase hex",
         commit,
     )
+    _mismatch(
+        mismatches,
+        "ownership_receipt.relative_path",
+        "release-ownership.json",
+        args.ownership.name,
+    )
+    _mismatch(
+        mismatches,
+        "ownership_receipt.root_directory",
+        "ownership",
+        args.ownership.parent.name,
+    )
+    _require(
+        mismatches,
+        args.ownership.is_file() and not args.ownership.is_symlink(),
+        "ownership_receipt.file_type",
+        "regular non-symlink file",
+        "invalid",
+    )
     if mismatches:
         raise VerificationFailure(mismatches)
 
+    ownership_receipt_evidence = {
+        "relative_path": "release-ownership.json",
+        "size": args.ownership.stat().st_size,
+        "digest": f"sha256:{_sha256(args.ownership)}",
+    }
+    verified_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    jobs_by_name = {
+        job["name"]: job
+        for job in final_source_jobs["jobs"]
+        if isinstance(job, dict) and isinstance(job.get("name"), str)
+    }
     evidence = {
         "schema": EVIDENCE_SCHEMA,
         "repository": state["repository"],
-        "verified_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "verified_at": verified_at,
         "read_only": True,
         "verification_run": {
             "run_id": run_id,
@@ -906,13 +2034,31 @@ def _complete_command(args: argparse.Namespace) -> None:
             "run_id": state["source_run_id"],
             "run_attempt": state["source_run_attempt"],
             "commit": state["source_commit"],
-            "workflow": ".github/workflows/mobile-release.yml",
-            "conclusion": source_run["conclusion"],
+            "branch": args.default_branch,
+            "workflow": SOURCE_WORKFLOW,
+            "conclusion": final_source_run["conclusion"],
+            "actor": final_source_run["actor"]["login"],
+            "triggering_actor": final_source_run["triggering_actor"]["login"],
+            "jobs": {
+                "build": {
+                    "id": jobs_by_name[BUILD_JOB]["id"],
+                    "name": BUILD_JOB,
+                    "conclusion": "success",
+                },
+                "publication": {
+                    "id": jobs_by_name[ASSEMBLE_JOB]["id"],
+                    "name": ASSEMBLE_JOB,
+                    "conclusion": "failure",
+                    "ownership_staged_upgrade_and_publish": "success",
+                    "post_publish_verification": "failure",
+                },
+            },
             "ownership_artifact": {
-                "id": ownership_artifact["id"],
-                "name": ownership_artifact["name"],
-                "size_in_bytes": ownership_artifact["size_in_bytes"],
-                "digest": ownership_artifact["digest"],
+                "id": final_ownership_artifact["id"],
+                "name": final_ownership_artifact["name"],
+                "size_in_bytes": final_ownership_artifact["size_in_bytes"],
+                "digest": final_ownership_artifact["digest"],
+                "receipt": ownership_receipt_evidence,
             },
         },
         "target": {
@@ -921,15 +2067,27 @@ def _complete_command(args: argparse.Namespace) -> None:
         },
         "application": byte_evidence["application"],
         "signature_identity": byte_evidence["signature_identity"],
+        "final_recheck": {
+            "verified_at": verified_at,
+            "after_anonymous_download_and_signature_verification": True,
+            "source_run": "exact_and_unchanged",
+            "repository_default_branch_and_owner": "exact_and_unchanged",
+            "source_jobs": "exact_and_unchanged",
+            "ownership_artifact_id_size_digest": "exact_and_unchanged",
+            "latest_release_id_tag_and_assets": "exact_and_unchanged",
+            "release_by_id": "exact_and_unchanged",
+            "release_by_tag": "exact_and_unchanged",
+            "tag_ref": "exact_and_unchanged",
+        },
         "verification": {
-            "source_run_and_ownership_receipt": "exact",
+            "source_run_jobs_actor_and_ownership_receipt": "exact",
             "release_id_latest_immutable_and_tag_commit": "exact",
             "public_asset_urls": "exact",
             "anonymous_asset_bytes_and_digests": "exact",
             "checksum_closure": "exact",
             "manifest_identity": "exact",
             "apk_identity_and_signer": "exact",
-            "aab_signer": "exact",
+            "aab_all_payload_entries_and_signer": "strict-exact",
         },
     }
     _write_json(args.output, evidence)
@@ -954,23 +2112,49 @@ def _parser() -> argparse.ArgumentParser:
     state.add_argument("--source-run-attempt", required=True)
     state.add_argument("--tag", required=True)
     state.add_argument("--commit", required=True)
+    state.add_argument("--source-run-metadata", type=Path)
+    state.add_argument("--source-jobs-metadata", type=Path)
+    state.add_argument("--ownership-artifact-metadata", type=Path)
+    state.add_argument("--default-branch")
+    state.add_argument("--repository-metadata", type=Path)
     state.add_argument("--output", type=Path, required=True)
     state.set_defaults(handler=_state_command)
+
+    aab = subparsers.add_parser(
+        "aab", help="Strictly verify every AAB payload entry using its pinned signer."
+    )
+    aab.add_argument("--aab", type=Path, required=True)
+    aab.add_argument("--expected-certificate-sha256", required=True)
+    aab.add_argument("--report-dir", type=Path, required=True)
+    aab.add_argument("--output", type=Path, required=True)
+    aab.set_defaults(handler=_aab_command)
 
     complete = subparsers.add_parser(
         "complete", help="Verify anonymous bytes, identities, and source evidence."
     )
-    complete.add_argument("--state", type=Path, required=True)
-    complete.add_argument("--source-run-metadata", type=Path, required=True)
-    complete.add_argument("--ownership-artifact-metadata", type=Path, required=True)
+    complete.add_argument("--initial-state", type=Path, required=True)
+    complete.add_argument("--final-state", type=Path, required=True)
+    complete.add_argument("--ownership", type=Path, required=True)
+    complete.add_argument("--initial-repository-metadata", type=Path, required=True)
+    complete.add_argument("--final-repository-metadata", type=Path, required=True)
+    complete.add_argument("--initial-source-run-metadata", type=Path, required=True)
+    complete.add_argument("--final-source-run-metadata", type=Path, required=True)
+    complete.add_argument("--initial-source-jobs-metadata", type=Path, required=True)
+    complete.add_argument("--final-source-jobs-metadata", type=Path, required=True)
+    complete.add_argument(
+        "--initial-ownership-artifact-metadata", type=Path, required=True
+    )
+    complete.add_argument(
+        "--final-ownership-artifact-metadata", type=Path, required=True
+    )
+    complete.add_argument("--default-branch", required=True)
     complete.add_argument("--asset-dir", type=Path, required=True)
     complete.add_argument("--expected-certificate-sha256", required=True)
     complete.add_argument("--apk-signature-report", type=Path, required=True)
     complete.add_argument("--apk-package-report", type=Path, required=True)
     complete.add_argument("--apk-version-name-report", type=Path, required=True)
     complete.add_argument("--apk-version-code-report", type=Path, required=True)
-    complete.add_argument("--aab-signature-report", type=Path, required=True)
-    complete.add_argument("--aab-certificate-report", type=Path, required=True)
+    complete.add_argument("--aab-verification", type=Path, required=True)
     complete.add_argument("--verification-run-id", required=True)
     complete.add_argument("--verification-run-attempt", required=True)
     complete.add_argument("--verification-commit", required=True)

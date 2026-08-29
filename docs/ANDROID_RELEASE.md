@@ -57,12 +57,27 @@ gh workflow run mobile-release-readonly-postpublish.yml \
   -f source_commit=<40-character-published-commit>
 ```
 
-That workflow has only `actions: read` and `contents: read`. It downloads the
-exact source-run ownership receipt, binds its numeric Release ID, anonymously
-downloads the closed four-asset public set, and verifies latest/immutable/tag,
-checksums, package/version, and APK/AAB signer identity. Its only output is an
-auditable Actions artifact; it has no Release, tag, workflow, or repository
-mutation path.
+That workflow has only `actions: read` and `contents: read`, and it shares the
+literal `openaria-mobile-release-publication` concurrency group with the
+publication workflow. It binds the exact attempt-specific jobs and step order:
+the ownership receipt, staged upgrade and its evidence, and publication must
+have succeeded before the original post-publish verification failed. The
+source and triggering actors must still be the repository owner, and the
+receipt's raw immutable-release preflight, default-branch head, source, tag,
+and dispatch time are revalidated.
+
+The supplement selects the unique ownership artifact and downloads it by its
+numeric artifact ID into an exact one-file root. It anonymously downloads the
+closed four-asset public set, checks bytes, manifest, checksums,
+package/version, and APK identity, and verifies the AAB with a pinned
+certificate in an ephemeral one-entry truststore plus strict full-entry JAR
+verification. Duplicate ZIP entries and extra signature-control entries are
+rejected. After all downloads and signature checks, it refetches the source
+run, attempt jobs, numeric artifact metadata and digest, latest Release,
+Release by ID, Release by tag, and tag ref. The v2 evidence is written only if
+that final state exactly matches the initial state. Its only successful output
+is an auditable Actions artifact; it has no Release, tag, workflow, or
+repository mutation path.
 
 The mutable v0.1.6 migration is disabled by default. Its only authorized use is
 the exact v0.1.7, versionCode 10 release from the frozen v0.1.6 Release ID, tag

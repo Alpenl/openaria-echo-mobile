@@ -5,7 +5,8 @@ set -uo pipefail
 
 readonly package_name="com.openaria.openaria_echo_mobile"
 readonly test_class="com.openaria.openaria_echo_mobile.CurrentUiVisualGateTest"
-readonly app_evidence_relative_root="cache/openaria-current-ui"
+readonly test_method="currentApkKeepsSemanticsAndGeometryInsideTheRealSystemSafeArea"
+readonly shell_evidence_root="/data/local/tmp/openaria-current-ui"
 readonly host_evidence_root="${1:-android-current-ui-evidence}"
 readonly adb_bin="${OPENARIA_UI_GATE_ADB:-adb}"
 readonly gradlew_bin="${OPENARIA_UI_GATE_GRADLEW:-./gradlew}"
@@ -33,6 +34,7 @@ initial_effective_density=""
 initial_accelerometer_rotation=""
 initial_user_rotation=""
 initial_surface_rotation=""
+initial_fixed_to_user_rotation=""
 initial_navigation_overlays=""
 initial_navigation_mode=""
 initial_cutout_overlays=""
@@ -53,6 +55,7 @@ evidence_json_status=0
 evidence_results_status=0
 evidence_state_status=0
 evidence_identity_status=0
+profile_evidence_nonce=""
 
 if [[ ! "$poll_attempts" =~ ^[1-9][0-9]*$ ]]; then
   printf 'OPENARIA_UI_GATE_MAX_ATTEMPTS must be a positive integer; got %s\n' "$poll_attempts" >&2
@@ -136,6 +139,17 @@ current_surface_rotation() {
   printf '%s\n' "$value"
 }
 
+current_fixed_to_user_rotation() {
+  local output value
+  output="$(adb_shell wm fixed-to-user-rotation | tr -d '\r')" || return $?
+  value="$(printf '%s' "$output" | tr -d '[:space:]')"
+  case "$value" in
+    default | enabled | disabled | enabled_if_no_auto_rotation) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$value"
+}
+
 enabled_overlays_with_prefix() {
   local prefix="$1"
   local output
@@ -210,6 +224,7 @@ capture_device_state() {
     capture_probe 'wm density' adb_shell wm density
     capture_probe 'accelerometer_rotation' adb_shell settings get system accelerometer_rotation
     capture_probe 'user_rotation' adb_shell settings get system user_rotation
+    capture_probe 'fixed-to-user-rotation' adb_shell wm fixed-to-user-rotation
     capture_probe 'input rotation' adb_shell dumpsys input
     capture_probe 'overlay list' adb_shell cmd overlay list
     capture_probe 'navigation interaction resource' adb_shell cmd overlay lookup android android:integer/config_navBarInteractionMode
@@ -223,9 +238,10 @@ capture_device_state() {
 write_state_gate() {
   local destination="$1" label="$2" expected_size="$3" expected_density="$4"
   local expected_rotation="$5" expected_accelerometer="$6" expected_user_rotation="$7"
-  local expected_navigation_overlays="$8" expected_navigation_mode="$9"
-  local expected_cutout_overlays="${10}" expected_cutout_state="${11}"
+  local expected_fixed_to_user_rotation="$8" expected_navigation_overlays="$9"
+  local expected_navigation_mode="${10}" expected_cutout_overlays="${11}" expected_cutout_state="${12}"
   local actual_size actual_density actual_rotation actual_accelerometer actual_user_rotation
+  local actual_fixed_to_user_rotation
   local actual_navigation_overlays actual_navigation_mode actual_cutout_overlays actual_cutout_state
   local probe_status gate_failed=0
 
@@ -239,6 +255,8 @@ write_state_gate() {
   if (( probe_status != 0 )); then actual_accelerometer="<probe-error:${probe_status}>"; gate_failed=1; fi
   actual_user_rotation="$(current_setting user_rotation)"; probe_status=$?
   if (( probe_status != 0 )); then actual_user_rotation="<probe-error:${probe_status}>"; gate_failed=1; fi
+  actual_fixed_to_user_rotation="$(current_fixed_to_user_rotation)"; probe_status=$?
+  if (( probe_status != 0 )); then actual_fixed_to_user_rotation="<probe-error:${probe_status}>"; gate_failed=1; fi
   actual_navigation_overlays="$(enabled_navigation_mode_overlays)"; probe_status=$?
   if (( probe_status != 0 )); then actual_navigation_overlays="<probe-error:${probe_status}>"; gate_failed=1; fi
   actual_navigation_mode="$(current_navigation_mode)"; probe_status=$?
@@ -253,6 +271,7 @@ write_state_gate() {
   [[ "$actual_rotation" == "$expected_rotation" ]] || gate_failed=1
   [[ "$actual_accelerometer" == "$expected_accelerometer" ]] || gate_failed=1
   [[ "$actual_user_rotation" == "$expected_user_rotation" ]] || gate_failed=1
+  [[ "$actual_fixed_to_user_rotation" == "$expected_fixed_to_user_rotation" ]] || gate_failed=1
   [[ "$actual_navigation_overlays" == "$expected_navigation_overlays" ]] || gate_failed=1
   [[ "$actual_navigation_mode" == "$expected_navigation_mode" ]] || gate_failed=1
   [[ "$actual_cutout_overlays" == "$expected_cutout_overlays" ]] || gate_failed=1
@@ -265,6 +284,8 @@ write_state_gate() {
     printf 'expected_surface_rotation=%s\nactual_surface_rotation=%s\n' "$expected_rotation" "$actual_rotation"
     printf 'expected_accelerometer_rotation=%s\nactual_accelerometer_rotation=%s\n' "$expected_accelerometer" "$actual_accelerometer"
     printf 'expected_user_rotation=%s\nactual_user_rotation=%s\n' "$expected_user_rotation" "$actual_user_rotation"
+    printf 'expected_fixed_to_user_rotation=%s\nactual_fixed_to_user_rotation=%s\n' \
+      "$expected_fixed_to_user_rotation" "$actual_fixed_to_user_rotation"
     printf 'expected_navigation_overlays=%s\nactual_navigation_overlays=%s\n' \
       "$(display_list "$expected_navigation_overlays")" "$(display_list "$actual_navigation_overlays")"
     printf 'expected_navigation_mode=%s\nactual_navigation_mode=%s\n' "$expected_navigation_mode" "$actual_navigation_mode"
@@ -279,13 +300,15 @@ write_state_gate() {
 wait_for_state_convergence() {
   local label="$1" state_path="$2" convergence_log="$3" expected_size="$4"
   local expected_density="$5" expected_rotation="$6" expected_accelerometer="$7"
-  local expected_user_rotation="$8" expected_navigation_overlays="$9"
-  local expected_navigation_mode="${10}" expected_cutout_overlays="${11}" expected_cutout_state="${12}"
+  local expected_user_rotation="$8" expected_fixed_to_user_rotation="$9"
+  local expected_navigation_overlays="${10}" expected_navigation_mode="${11}"
+  local expected_cutout_overlays="${12}" expected_cutout_state="${13}"
   local attempt gate_status temporary_state="${state_path}.tmp"
   : > "$convergence_log"
   for (( attempt=1; attempt<=poll_attempts; attempt+=1 )); do
     write_state_gate "$temporary_state" "$label" "$expected_size" "$expected_density" \
       "$expected_rotation" "$expected_accelerometer" "$expected_user_rotation" \
+      "$expected_fixed_to_user_rotation" \
       "$expected_navigation_overlays" "$expected_navigation_mode" \
       "$expected_cutout_overlays" "$expected_cutout_state"
     gate_status=$?
@@ -385,6 +408,8 @@ configure_profile() {
       run_mutation 'reset wm density' adb_shell wm density reset
       ;;
   esac
+  run_mutation 'enable fixed-to-user rotation mode' \
+    adb_shell wm fixed-to-user-rotation enabled
   run_mutation 'disable accelerometer rotation' adb_shell settings put system accelerometer_rotation 0
   run_mutation 'set user rotation' adb_shell settings put system user_rotation "$profile_expected_rotation"
   run_mutation 'lock WindowManager user rotation' \
@@ -400,7 +425,7 @@ configure_profile() {
   wait_for_state_convergence "$profile" \
     "$host_evidence_root/${profile}-preflight-state.txt" "$host_evidence_root/${profile}-convergence.log" \
     "$profile_expected_wm_size" "$profile_expected_density" "$profile_expected_rotation" 0 \
-    "$profile_expected_rotation" "$profile_expected_navigation_overlay" "$profile_expected_navigation_mode" \
+    "$profile_expected_rotation" enabled "$profile_expected_navigation_overlay" "$profile_expected_navigation_mode" \
     "$profile_expected_cutout_overlays" "$profile_expected_cutout_state"
   convergence_status=$?
   if (( mutation_status != 0 )); then return "$mutation_status"; fi
@@ -417,19 +442,80 @@ copy_gradle_results() {
     return $missing_test_results_failure
   fi
   cp -a "$result_root/." "$destination/"
+  validate_gradle_results "$profile" "$destination" || return $missing_test_results_failure
+}
+
+validate_gradle_results() {
+  local profile="$1" destination="$2"
+  python3 - "$profile" "$test_class" "$test_method" "$destination" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+profile, test_class, test_method, destination_name = sys.argv[1:]
+destination = Path(destination_name)
+xml_files = sorted(destination.rglob("TEST-*.xml"))
+if len(xml_files) != 1:
+    raise SystemExit(f"{profile}: expected exactly one TEST-*.xml, found {len(xml_files)}")
+
+try:
+    suite = ET.parse(xml_files[0]).getroot()
+except (ET.ParseError, OSError) as error:
+    raise SystemExit(f"{profile}: invalid Android test XML: {error}") from error
+
+if suite.tag.rsplit("}", 1)[-1] != "testsuite" or suite.get("name") != test_class:
+    raise SystemExit(f"{profile}: Android test suite does not identify {test_class}")
+try:
+    counters = tuple(int(suite.get(name, "-1")) for name in ("tests", "failures", "errors", "skipped"))
+except ValueError as error:
+    raise SystemExit(f"{profile}: Android test counters are not integers") from error
+if counters != (1, 0, 0, 0):
+    raise SystemExit(
+        f"{profile}: expected tests/failures/errors/skipped=1/0/0/0, got "
+        + "/".join(str(value) for value in counters)
+    )
+test_cases = [child for child in suite if child.tag.rsplit("}", 1)[-1] == "testcase"]
+if len(test_cases) != 1:
+    raise SystemExit(f"{profile}: expected exactly one testcase, found {len(test_cases)}")
+test_case = test_cases[0]
+if test_case.get("classname") != test_class or test_case.get("name") != test_method:
+    raise SystemExit(f"{profile}: Android testcase identity does not match the requested method")
+PY
+}
+
+generate_evidence_nonce() {
+  python3 - <<'PY'
+import secrets
+
+print(secrets.token_hex(16))
+PY
+}
+
+prepare_profile_evidence_paths() {
+  local profile="$1" nonce="$2" extension remote_path command_status first_failure=0
+  for extension in png json; do
+    remote_path="$shell_evidence_root/${profile}-${nonce}.${extension}"
+    adb_shell rm -f "$remote_path"
+    command_status=$?
+    if (( command_status != 0 && first_failure == 0 )); then first_failure=$command_status; fi
+    adb_shell test ! -e "$remote_path"
+    command_status=$?
+    if (( command_status != 0 && first_failure == 0 )); then first_failure=$command_status; fi
+  done
+  return "$first_failure"
 }
 
 verify_pulled_evidence() {
-  local profile="$1"
+  local profile="$1" nonce="$2"
   local screenshot_path="$host_evidence_root/${profile}.png"
   local geometry_path="$host_evidence_root/${profile}.json"
-  python3 - "$profile" "$package_name" "$screenshot_path" "$geometry_path" <<'PY'
+  python3 - "$profile" "$nonce" "$package_name" "$screenshot_path" "$geometry_path" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-profile, package_name, screenshot_name, geometry_name = sys.argv[1:]
+profile, nonce, package_name, screenshot_name, geometry_name = sys.argv[1:]
 screenshot_path = Path(screenshot_name)
 geometry = json.loads(Path(geometry_name).read_text(encoding="utf-8"))
 actual_sha256 = hashlib.sha256(screenshot_path.read_bytes()).hexdigest()
@@ -438,6 +524,8 @@ if geometry.get("schema") != "openaria.echo.mobile.current-ui-evidence.v1":
     raise SystemExit("unexpected current UI evidence schema")
 if geometry.get("profile") != profile:
     raise SystemExit("geometry profile does not match the requested profile")
+if geometry.get("evidenceNonce") != nonce:
+    raise SystemExit("geometry nonce does not identify the current instrumentation run")
 if geometry.get("targetPackage") != package_name:
     raise SystemExit("geometry target package does not match the current APK")
 if geometry.get("targetWindowFocused") is not True:
@@ -448,30 +536,35 @@ PY
 }
 
 capture_profile_evidence() {
-  local profile="$1"
+  local profile="$1" nonce="$2" instrumentation_status="$3"
   evidence_png_status=0; evidence_json_status=0; evidence_identity_status=0
   evidence_results_status=0; evidence_state_status=0
-  copy_private_app_evidence \
-    "$app_evidence_relative_root/${profile}.png" "$host_evidence_root/${profile}.png"
-  evidence_png_status=$?
-  copy_private_app_evidence \
-    "$app_evidence_relative_root/${profile}.json" "$host_evidence_root/${profile}.json"
-  evidence_json_status=$?
-  if (( evidence_png_status == 0 && evidence_json_status == 0 )); then
-    verify_pulled_evidence "$profile"
-    evidence_identity_status=$?
-    if (( evidence_identity_status != 0 )); then evidence_identity_status=$evidence_identity_failure; fi
-  else
-    evidence_identity_status=$evidence_identity_failure
-  fi
   copy_gradle_results "$profile"; evidence_results_status=$?
+  if (( instrumentation_status == 0 && evidence_results_status == 0 )); then
+    copy_shell_evidence \
+      "$shell_evidence_root/${profile}-${nonce}.png" "$host_evidence_root/${profile}.png"
+    evidence_png_status=$?
+    copy_shell_evidence \
+      "$shell_evidence_root/${profile}-${nonce}.json" "$host_evidence_root/${profile}.json"
+    evidence_json_status=$?
+    if (( evidence_png_status == 0 && evidence_json_status == 0 )); then
+      verify_pulled_evidence "$profile" "$nonce"
+      evidence_identity_status=$?
+      if (( evidence_identity_status != 0 )); then evidence_identity_status=$evidence_identity_failure; fi
+    else
+      evidence_identity_status=$evidence_identity_failure
+    fi
+  else
+    evidence_png_status=125; evidence_json_status=125; evidence_identity_status=125
+  fi
   capture_device_state "$profile-final" "$host_evidence_root/${profile}-final-device-state.txt"
   evidence_state_status=$?
 }
 
-copy_private_app_evidence() {
+copy_shell_evidence() {
   local source="$1" destination="$2" command_status
-  "$adb_bin" exec-out run-as "$package_name" cat "$source" > "$destination"
+  rm -f "$destination"
+  "$adb_bin" pull "$source" "$destination"
   command_status=$?
   if (( command_status != 0 )); then
     rm -f "$destination"
@@ -484,33 +577,48 @@ copy_private_app_evidence() {
 }
 
 run_profile() {
-  local profile="$1" configuration_status instrumentation_status primary_status=0
+  local profile="$1" configuration_status preparation_status=125 instrumentation_status=125 primary_status=0
   local result_root="app/build/outputs/androidTest-results"
+  profile_evidence_nonce=""
   printf 'profile=%s\n' "$profile"
   rm -rf "$result_root"
   configure_profile "$profile"; configuration_status=$?
   if (( configuration_status != 0 )); then
-    primary_status=$configuration_status; instrumentation_status=125
+    primary_status=$configuration_status
     printf 'Instrumentation skipped because profile convergence/configuration failed with %d.\n' "$configuration_status" >&2
   else
-    "$gradlew_bin" connectedDebugAndroidTest \
-      -Pandroid.testInstrumentationRunnerArguments.class="$test_class" \
-      -Pandroid.testInstrumentationRunnerArguments.visualProfile="$profile" \
-      -Pandroid.testInstrumentationRunnerArguments.expectedWindowWidthPx="$profile_expected_window_width" \
-      -Pandroid.testInstrumentationRunnerArguments.expectedWindowHeightPx="$profile_expected_window_height" \
-      -Pandroid.testInstrumentationRunnerArguments.expectedDensityDpi="$profile_expected_density" \
-      -Pandroid.testInstrumentationRunnerArguments.expectedRotation="$profile_expected_rotation"
-    instrumentation_status=$?
-    if (( instrumentation_status != 0 )); then primary_status=$instrumentation_status; fi
+    profile_evidence_nonce="$(generate_evidence_nonce)"
+    if [[ ! "$profile_evidence_nonce" =~ ^[0-9a-f]{32}$ ]]; then
+      preparation_status=64
+    else
+      prepare_profile_evidence_paths "$profile" "$profile_evidence_nonce"
+      preparation_status=$?
+    fi
+    if (( preparation_status != 0 )); then
+      primary_status=$preparation_status
+      printf 'Instrumentation skipped because current-run evidence preparation failed with %d.\n' "$preparation_status" >&2
+    else
+      "$gradlew_bin" connectedDebugAndroidTest \
+        -Pandroid.testInstrumentationRunnerArguments.class="$test_class" \
+        -Pandroid.testInstrumentationRunnerArguments.visualProfile="$profile" \
+        -Pandroid.testInstrumentationRunnerArguments.evidenceNonce="$profile_evidence_nonce" \
+        -Pandroid.testInstrumentationRunnerArguments.expectedWindowWidthPx="$profile_expected_window_width" \
+        -Pandroid.testInstrumentationRunnerArguments.expectedWindowHeightPx="$profile_expected_window_height" \
+        -Pandroid.testInstrumentationRunnerArguments.expectedDensityDpi="$profile_expected_density" \
+        -Pandroid.testInstrumentationRunnerArguments.expectedRotation="$profile_expected_rotation"
+      instrumentation_status=$?
+      if (( instrumentation_status != 0 )); then primary_status=$instrumentation_status; fi
+    fi
   fi
-  capture_profile_evidence "$profile"
+  capture_profile_evidence "$profile" "$profile_evidence_nonce" "$instrumentation_status"
+  if (( primary_status == 0 && evidence_results_status != 0 )); then primary_status=$evidence_results_status; fi
   if (( primary_status == 0 && evidence_png_status != 0 )); then primary_status=$evidence_png_status; fi
   if (( primary_status == 0 && evidence_json_status != 0 )); then primary_status=$evidence_json_status; fi
   if (( primary_status == 0 && evidence_identity_status != 0 )); then primary_status=$evidence_identity_status; fi
-  if (( primary_status == 0 && evidence_results_status != 0 )); then primary_status=$evidence_results_status; fi
   if (( primary_status == 0 && evidence_state_status != 0 )); then primary_status=$evidence_state_status; fi
   {
-    printf 'profile=%s\nconfiguration_status=%d\ninstrumentation_status=%d\n' "$profile" "$configuration_status" "$instrumentation_status"
+    printf 'profile=%s\nevidence_nonce=%s\nconfiguration_status=%d\nevidence_preparation_status=%d\ninstrumentation_status=%d\n' \
+      "$profile" "$profile_evidence_nonce" "$configuration_status" "$preparation_status" "$instrumentation_status"
     printf 'png_pull_status=%d\njson_pull_status=%d\n' "$evidence_png_status" "$evidence_json_status"
     printf 'evidence_identity_status=%d\n' "$evidence_identity_status"
     printf 'android_test_results_status=%d\nfinal_device_state_status=%d\n' "$evidence_results_status" "$evidence_state_status"
@@ -530,6 +638,7 @@ snapshot_initial_state() {
   initial_accelerometer_rotation="$(current_setting accelerometer_rotation)"; probe_status=$?; if (( probe_status != 0 && snapshot_status == 0 )); then snapshot_status=$probe_status; fi
   initial_user_rotation="$(current_setting user_rotation)"; probe_status=$?; if (( probe_status != 0 && snapshot_status == 0 )); then snapshot_status=$probe_status; fi
   initial_surface_rotation="$(current_surface_rotation)"; probe_status=$?; if (( probe_status != 0 && snapshot_status == 0 )); then snapshot_status=$probe_status; fi
+  initial_fixed_to_user_rotation="$(current_fixed_to_user_rotation)"; probe_status=$?; if (( probe_status != 0 && snapshot_status == 0 )); then snapshot_status=$probe_status; fi
   initial_navigation_overlays="$(enabled_navigation_mode_overlays)"; probe_status=$?; if (( probe_status != 0 && snapshot_status == 0 )); then snapshot_status=$probe_status; fi
   initial_navigation_mode="$(current_navigation_mode)"; probe_status=$?; if (( probe_status != 0 && snapshot_status == 0 )); then snapshot_status=$probe_status; fi
   initial_cutout_overlays="$(enabled_overlays_with_prefix "$cutout_overlay_prefix")"; probe_status=$?; if (( probe_status != 0 && snapshot_status == 0 )); then snapshot_status=$probe_status; fi
@@ -540,6 +649,7 @@ snapshot_initial_state() {
     printf 'physical_size=%s\nsize_override=%s\neffective_size=%s\n' "$initial_physical_size" "${initial_size_override:-<none>}" "$initial_effective_size"
     printf 'physical_density=%s\ndensity_override=%s\neffective_density=%s\n' "$initial_physical_density" "${initial_density_override:-<none>}" "$initial_effective_density"
     printf 'accelerometer_rotation=%s\nuser_rotation=%s\nsurface_rotation=%s\n' "$initial_accelerometer_rotation" "$initial_user_rotation" "$initial_surface_rotation"
+    printf 'fixed_to_user_rotation=%s\n' "$initial_fixed_to_user_rotation"
     printf 'navigation_overlays=%s\nnavigation_mode=%s\n' "$(display_list "$initial_navigation_overlays")" "$initial_navigation_mode"
     printf 'cutout_overlays=%s\ncutout_resource=%s\nsnapshot_status=%d\n' "$(display_list "$initial_cutout_overlays")" "$initial_cutout_state" "$snapshot_status"
   } > "$host_evidence_root/initial-state-snapshot.env"
@@ -590,9 +700,13 @@ restore_initial_state() {
   restore_step 'disable current cutout overlays' disable_enabled_overlays "$cutout_overlay_prefix"
   restore_step 'restore initial cutout overlays' enable_overlay_snapshot "$initial_cutout_overlays"
   restore_step 'temporarily disable accelerometer rotation' adb_shell settings put system accelerometer_rotation 0
+  restore_step 'temporarily enable fixed-to-user rotation mode' \
+    adb_shell wm fixed-to-user-rotation enabled
   restore_step 'restore initial surface rotation' \
     adb_shell wm user-rotation lock "$initial_surface_rotation"
   restore_step 'wait for initial surface rotation' wait_for_surface_rotation "$initial_surface_rotation"
+  restore_step 'restore fixed-to-user rotation mode' \
+    adb_shell wm fixed-to-user-rotation "$initial_fixed_to_user_rotation"
   if [[ "$initial_accelerometer_rotation" == "1" ]]; then
     restore_step 'restore accelerometer rotation' adb_shell settings put system accelerometer_rotation 1
     restore_step 'restore saved user rotation while sensor mode is active' adb_shell settings put system user_rotation "$initial_user_rotation"
@@ -604,7 +718,8 @@ restore_initial_state() {
   wait_for_state_convergence restored "$host_evidence_root/restored-state-gate.txt" \
     "$host_evidence_root/restored-state-convergence.log" "$initial_effective_size" "$initial_effective_density" \
     "$initial_surface_rotation" "$initial_accelerometer_rotation" "$initial_user_rotation" \
-    "$initial_navigation_overlays" "$initial_navigation_mode" "$initial_cutout_overlays" "$initial_cutout_state"
+    "$initial_fixed_to_user_rotation" "$initial_navigation_overlays" "$initial_navigation_mode" \
+    "$initial_cutout_overlays" "$initial_cutout_state"
   convergence_status=$?
   printf 'restore_convergence_status=%d\n' "$convergence_status"
   if (( convergence_status != 0 && restore_status == 0 )); then restore_status=$convergence_status; fi
@@ -667,8 +782,16 @@ clear_previous_host_evidence() {
   return "$first_failure"
 }
 
+initialize_shell_evidence_root() {
+  adb_shell rm -rf "$shell_evidence_root" || return $?
+  adb_shell mkdir -p "$shell_evidence_root" || return $?
+}
+
 clear_previous_host_evidence || exit $missing_evidence_failure
 "$adb_bin" wait-for-device > "$host_evidence_root/initialization.log" 2>&1
+initialization_status=$?
+if (( initialization_status != 0 )); then exit "$initialization_status"; fi
+initialize_shell_evidence_root >> "$host_evidence_root/initialization.log" 2>&1
 initialization_status=$?
 if (( initialization_status != 0 )); then exit "$initialization_status"; fi
 snapshot_initial_state >> "$host_evidence_root/initialization.log" 2>&1

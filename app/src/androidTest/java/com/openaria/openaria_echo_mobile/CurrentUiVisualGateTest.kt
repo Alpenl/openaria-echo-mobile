@@ -1,6 +1,7 @@
 package com.openaria.openaria_echo_mobile
 
 import android.Manifest
+import android.app.UiAutomation
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -8,6 +9,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -19,6 +21,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import kotlin.math.abs
@@ -67,6 +70,7 @@ class CurrentUiVisualGateTest {
         assumeTrue("The profile matrix supplies $PROFILE_ARGUMENT.", !profileName.isNullOrBlank())
         val profile = VisualProfile.from(profileName!!)
         val expectation = runnerExpectation(instrumentationArguments)
+        val evidenceNonce = requiredEvidenceNonce(instrumentationArguments)
         profile.assertRunnerExpectation(expectation)
 
         compose.waitForIdle()
@@ -225,6 +229,7 @@ class CurrentUiVisualGateTest {
         val evidence = JSONObject()
             .put("schema", "openaria.echo.mobile.current-ui-evidence.v1")
             .put("profile", profile.value)
+            .put("evidenceNonce", evidenceNonce)
             .put("targetPackage", activity.packageName)
             .put("targetActivity", activity.componentName.className)
             .put("targetWindowFocused", activity.window.decorView.hasWindowFocus())
@@ -261,6 +266,13 @@ class CurrentUiVisualGateTest {
             "The persisted geometry must identify the exact profile that produced it.",
             profile.value,
             JSONObject(geometryFile.readText(Charsets.UTF_8)).getString("profile"),
+        )
+        exportEvidenceToShell(
+            uiAutomation = instrumentation.uiAutomation,
+            profile = profile,
+            evidenceNonce = evidenceNonce,
+            screenshotFile = screenshotFile,
+            geometryFile = geometryFile,
         )
         println("OPENARIA_CURRENT_UI_GEOMETRY=$evidence")
     }
@@ -428,6 +440,112 @@ class CurrentUiVisualGateTest {
         .digest(file.readBytes())
         .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
+    private fun exportEvidenceToShell(
+        uiAutomation: UiAutomation,
+        profile: VisualProfile,
+        evidenceNonce: String,
+        screenshotFile: File,
+        geometryFile: File,
+    ) {
+        check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            "Current UI evidence export requires Android 12 (API 31) or newer."
+        }
+        val remotePrefix = "$SHELL_EVIDENCE_ROOT/${profile.value}-$evidenceNonce"
+        val rootReady = executeShellScript(
+            uiAutomation,
+            """
+            set -eu
+            mkdir -p '$SHELL_EVIDENCE_ROOT'
+            test -d '$SHELL_EVIDENCE_ROOT'
+            printf ready
+            """.trimIndent(),
+        )
+        assertShellResult("prepare the shell-owned evidence directory", rootReady, expectedStdout = "ready")
+        publishFileToShell(uiAutomation, screenshotFile, "$remotePrefix.png")
+        publishFileToShell(uiAutomation, geometryFile, "$remotePrefix.json")
+    }
+
+    private fun publishFileToShell(
+        uiAutomation: UiAutomation,
+        source: File,
+        destination: String,
+    ) {
+        val temporaryDestination = "$destination.tmp"
+        val pathReady = executeShellScript(
+            uiAutomation,
+            """
+            set -eu
+            rm -f '$temporaryDestination'
+            test ! -e '$destination'
+            printf ready
+            """.trimIndent(),
+        )
+        assertShellResult("prepare the exact current-run evidence path", pathReady, expectedStdout = "ready")
+
+        val descriptors = uiAutomation.executeShellCommandRw("dd of=$temporaryDestination bs=65536")
+        assertEquals("A writable shell command must expose stdout and stdin descriptors.", 2, descriptors.size)
+        ParcelFileDescriptor.AutoCloseOutputStream(descriptors[1]).use { destinationStream ->
+            FileInputStream(source).use { sourceStream ->
+                sourceStream.copyTo(destinationStream)
+            }
+            destinationStream.flush()
+        }
+        val commandOutput = ParcelFileDescriptor.AutoCloseInputStream(descriptors[0]).use { output ->
+            output.readBytes().toString(Charsets.UTF_8).trim()
+        }
+        assertEquals("Streaming evidence to shell storage must not emit command errors.", "", commandOutput)
+
+        val expectedSha256 = sha256(source)
+        val stagedSha256 = shellSha256(uiAutomation, temporaryDestination)
+        assertEquals("Shell staging bytes must match the exact instrumentation evidence.", expectedSha256, stagedSha256)
+        val published = executeShellScript(
+            uiAutomation,
+            """
+            set -eu
+            mv '$temporaryDestination' '$destination'
+            sha256sum '$destination'
+            """.trimIndent(),
+        )
+        assertTrue("Publishing shell evidence must not emit stderr: ${published.stderr}", published.stderr.isBlank())
+        assertEquals(
+            "Published shell evidence must retain the exact instrumentation digest.",
+            expectedSha256,
+            published.stdout.substringBefore(' ').trim(),
+        )
+    }
+
+    private fun shellSha256(uiAutomation: UiAutomation, path: String): String {
+        val result = executeShellScript(uiAutomation, "set -eu\nsha256sum '$path'")
+        assertTrue("Hashing shell evidence must not emit stderr: ${result.stderr}", result.stderr.isBlank())
+        val digest = result.stdout.substringBefore(' ').trim()
+        assertTrue(
+            "Shell evidence SHA-256 must be lowercase hexadecimal; got ${result.stdout}",
+            SHA256_REGEX.matches(digest),
+        )
+        return digest
+    }
+
+    private fun executeShellScript(uiAutomation: UiAutomation, script: String): ShellResult {
+        val descriptors = uiAutomation.executeShellCommandRwe("/system/bin/sh")
+        assertEquals("A shell script must expose stdout, stdin, and stderr descriptors.", 3, descriptors.size)
+        ParcelFileDescriptor.AutoCloseOutputStream(descriptors[1]).use { input ->
+            input.write((script + "\n").toByteArray(Charsets.UTF_8))
+            input.flush()
+        }
+        val stdout = ParcelFileDescriptor.AutoCloseInputStream(descriptors[0]).use { output ->
+            output.readBytes().toString(Charsets.UTF_8).trim()
+        }
+        val stderr = ParcelFileDescriptor.AutoCloseInputStream(descriptors[2]).use { error ->
+            error.readBytes().toString(Charsets.UTF_8).trim()
+        }
+        return ShellResult(stdout = stdout, stderr = stderr)
+    }
+
+    private fun assertShellResult(action: String, result: ShellResult, expectedStdout: String) {
+        assertEquals("Shell must $action without stderr.", "", result.stderr)
+        assertEquals("Shell must $action and emit its completion marker.", expectedStdout, result.stdout)
+    }
+
     private fun runnerExpectation(arguments: Bundle): RunnerExpectation = RunnerExpectation(
         windowWidthPx = requiredIntegerArgument(arguments, EXPECTED_WINDOW_WIDTH_ARGUMENT, minimum = 1),
         windowHeightPx = requiredIntegerArgument(arguments, EXPECTED_WINDOW_HEIGHT_ARGUMENT, minimum = 1),
@@ -436,6 +554,16 @@ class CurrentUiVisualGateTest {
             require(rotation in 0..3) { "The expected display rotation must be in 0..3; got $rotation." }
         },
     )
+
+    private fun requiredEvidenceNonce(arguments: Bundle): String {
+        val nonce = requireNotNull(arguments.getString(EVIDENCE_NONCE_ARGUMENT)) {
+            "The profile runner must supply $EVIDENCE_NONCE_ARGUMENT."
+        }
+        require(EVIDENCE_NONCE_REGEX.matches(nonce)) {
+            "$EVIDENCE_NONCE_ARGUMENT must be exactly 32 lowercase hexadecimal characters."
+        }
+        return nonce
+    }
 
     private fun requiredIntegerArgument(arguments: Bundle, name: String, minimum: Int): Int {
         val raw = requireNotNull(arguments.getString(name)) { "The profile runner must supply $name." }
@@ -461,6 +589,11 @@ class CurrentUiVisualGateTest {
         val windowHeightPx: Int,
         val densityDpi: Int,
         val rotation: Int,
+    )
+
+    private data class ShellResult(
+        val stdout: String,
+        val stderr: String,
     )
 
     private enum class VisualLayout {
@@ -551,12 +684,16 @@ class CurrentUiVisualGateTest {
         const val EXPECTED_WINDOW_HEIGHT_ARGUMENT = "expectedWindowHeightPx"
         const val EXPECTED_DENSITY_ARGUMENT = "expectedDensityDpi"
         const val EXPECTED_ROTATION_ARGUMENT = "expectedRotation"
+        const val EVIDENCE_NONCE_ARGUMENT = "evidenceNonce"
         const val EVIDENCE_DIRECTORY_NAME = "openaria-current-ui"
+        const val SHELL_EVIDENCE_ROOT = "/data/local/tmp/openaria-current-ui"
         const val NAVIGATION_MODE_THREE_BUTTON = 0
         const val NAVIGATION_MODE_GESTURAL = 2
         const val SCREENSHOT_SAMPLE_GRID = 32
         const val GEOMETRY_TOLERANCE_PX = 2f
         const val WINDOW_FOCUS_TIMEOUT_MILLIS = 10_000L
         const val PNG_QUALITY = 100
+        val EVIDENCE_NONCE_REGEX = Regex("^[0-9a-f]{32}$")
+        val SHA256_REGEX = Regex("^[0-9a-f]{64}$")
     }
 }

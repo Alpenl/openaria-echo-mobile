@@ -42,23 +42,24 @@ class VisualEvidenceBaselineTest {
         assertContains(testSource, "BitmapFactory.decodeFile")
         assertContains(testSource, "assertBitmapsHaveIdenticalPixels")
         assertContains(testSource, "screenshotPngSha256")
-        assertFalse(
-            testSource.contains("/data/local/tmp/openaria-current-ui"),
-            "Instrumentation must keep evidence in app-owned storage instead of crossing UID boundaries.",
-        )
-        assertFalse(
-            testSource.contains("executeShellCommand"),
-            "Instrumentation must not export evidence through an in-app shell command.",
-        )
+        assertContains(testSource, "/data/local/tmp/openaria-current-ui")
+        assertContains(testSource, "executeShellCommandRw")
+        assertContains(testSource, "executeShellCommandRwe(\"/system/bin/sh\")")
+        assertContains(testSource, "dd of=")
+        assertContains(testSource, "evidenceNonce")
         assertContains(testSource, "hasWindowFocus()")
         assertContains(testSource, "expectedWindowWidthPx")
         assertContains(testSource, "must explicitly have no display cutout")
         assertFalse(testSource.contains("screencap -p"), "An unvalidated second screencap must never be uploaded.")
-        assertContains(runnerSource, "\"\$adb_bin\" exec-out run-as \"\$package_name\" cat")
-        assertContains(runnerSource, "cache/openaria-current-ui")
+        assertContains(runnerSource, "\"\$adb_bin\" pull")
+        assertFalse(runnerSource.contains("exec-out run-as"), "AGP uninstalls the app before host-side evidence export.")
+        assertContains(runnerSource, "/data/local/tmp/openaria-current-ui")
         assertContains(runnerSource, "wm user-rotation lock")
+        assertContains(runnerSource, "wm fixed-to-user-rotation enabled")
         assertContains(runnerSource, "android.testInstrumentationRunnerArguments.visualProfile")
+        assertContains(runnerSource, "android.testInstrumentationRunnerArguments.evidenceNonce")
         assertContains(runnerSource, "android.testInstrumentationRunnerArguments.expectedDensityDpi")
+        assertContains(runnerSource, "validate_gradle_results")
         assertContains(runnerSource, "wait_for_state_convergence")
         assertContains(runnerSource, "capture_profile_evidence")
         assertContains(runnerSource, "verify_pulled_evidence")

@@ -2,6 +2,7 @@ package com.openaria.openaria_echo_mobile.ui
 
 import com.openaria.openaria_echo_mobile.body.api.DeviceAdmissionCandidate
 import com.openaria.openaria_echo_mobile.body.api.DeviceConnection
+import com.openaria.openaria_echo_mobile.security.EndpointPolicy
 import java.util.concurrent.atomic.AtomicLong
 
 internal data class ConnectionAdmissionAttempt(
@@ -47,13 +48,14 @@ internal fun buildAdmissionCandidates(
     storedTokenForOrigin: (String) -> String?,
 ): List<DeviceAdmissionCandidate> {
     val token = typedToken.trim()
-    val typedTokenTarget = (authorizationOrigin ?: primaryOrigin).trim()
+    val typedTokenTarget = canonicalAdmissionOrigin(authorizationOrigin ?: primaryOrigin)
     return origins.map { candidateOrigin ->
+        val candidate = DeviceAdmissionCandidate(candidateOrigin, null)
         DeviceAdmissionCandidate(
-            origin = candidateOrigin,
+            origin = candidate.normalizedOrigin,
             bearerToken = when {
-                token.isEmpty() -> storedTokenForOrigin(candidateOrigin)
-                candidateOrigin.trim() == typedTokenTarget -> token
+                token.isEmpty() -> storedTokenForOrigin(candidate.normalizedOrigin)
+                candidate.normalizedOrigin == typedTokenTarget -> token
                 else -> null
             },
         )
@@ -65,9 +67,15 @@ internal fun typedTokenAfterAuthorizationTargetChange(
     nextAuthorizationOrigin: String,
     typedToken: String,
 ): String {
-    return if (currentAuthorizationOrigin?.trim() == nextAuthorizationOrigin.trim()) {
+    return if (currentAuthorizationOrigin
+            ?.let(::canonicalAdmissionOrigin) == canonicalAdmissionOrigin(nextAuthorizationOrigin)
+    ) {
         typedToken
     } else {
         ""
     }
+}
+
+internal fun canonicalAdmissionOrigin(origin: String): String {
+    return EndpointPolicy.canonicalOrigin(origin) ?: origin.trim()
 }

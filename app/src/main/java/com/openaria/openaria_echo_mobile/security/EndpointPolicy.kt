@@ -7,6 +7,11 @@ import java.net.URISyntaxException
 import java.util.Locale
 
 object EndpointPolicy {
+    /** Returns the origin identity used for requests and credential binding. */
+    fun canonicalOrigin(raw: String): String? {
+        return (validate(raw) as? Decision.Allowed)?.target?.origin?.toString()
+    }
+
     fun validate(raw: String): Decision {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) {

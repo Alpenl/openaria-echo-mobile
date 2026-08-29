@@ -11,7 +11,8 @@ class UiShellSourceTest {
     fun `app shell uses cutout aware safe drawing and fixed bottom navigation`() {
         val source = echoAppSource()
 
-        assertContains(source, "WindowInsets.safeDrawing.asPaddingValues()")
+        assertContains(source, "WindowInsets.safeDrawing.asPaddingValues(")
+        assertContains(source, "Density(context.resources.displayMetrics.density, 1f)")
         assertContains(source, "val layoutDirection = LocalLayoutDirection.current")
         assertContains(source, "safeDrawing.calculateLeftPadding(layoutDirection) + 12.dp")
         assertContains(source, "safeDrawing.calculateRightPadding(layoutDirection) + 12.dp")

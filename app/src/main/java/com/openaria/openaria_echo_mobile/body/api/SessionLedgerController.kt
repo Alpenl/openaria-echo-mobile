@@ -40,16 +40,23 @@ class SessionLedgerController<Target, TransportCancellation>(
         failure = null
         if (repository.isRefreshing) {
             operationGeneration += 1L
-            pendingRefresh = PendingSessionLedgerRefresh(
+            val queued = queueRefresh(
                 target = target,
                 query = desiredQuery,
                 catalogRecovery = false,
+            )
+            check(
+                repository.beginRefresh(
+                    takeId = queued.query.takeId,
+                    limit = queued.query.limit,
+                    catalogRecovery = queued.catalogRecovery,
+                ) == null,
             )
             publish()
             return
         }
         if (pendingRefresh != null) {
-            pendingRefresh = PendingSessionLedgerRefresh(target, desiredQuery, catalogRecovery = false)
+            queueRefresh(target, desiredQuery, catalogRecovery = false)
             publish()
             return
         }
@@ -59,7 +66,7 @@ class SessionLedgerController<Target, TransportCancellation>(
             repository.cancelLoadMore()
         }
         pendingLoadMore = null
-        pendingRefresh = PendingSessionLedgerRefresh(target, desiredQuery, catalogRecovery = false)
+        queueRefresh(target, desiredQuery, catalogRecovery = false)
         publish()
         ensureWorker()
     }
@@ -195,11 +202,12 @@ class SessionLedgerController<Target, TransportCancellation>(
         val result = try {
             transport(target, request, cancellation)
         } catch (exception: CancellationException) {
-            repository.cancel(request)
+            releaseRequest(target, request)
+            publish()
             throw exception
         } catch (_: Throwable) {
             cancelTransport(cancellation)
-            repository.cancel(request)
+            releaseRequest(target, request)
             if (requestGeneration == operationGeneration) {
                 failure = SessionLedgerFailure.UnexpectedTransport
                 publish()
@@ -210,7 +218,7 @@ class SessionLedgerController<Target, TransportCancellation>(
         }
 
         if (requestGeneration != operationGeneration) {
-            repository.cancel(request)
+            releaseRequest(target, request)
             publish()
             return
         }
@@ -227,7 +235,7 @@ class SessionLedgerController<Target, TransportCancellation>(
             is SessionLedgerApplyResult.Failed -> failure = result.failure
             is SessionLedgerApplyResult.RefreshRequired -> {
                 desiredQuery = DesiredSessionQuery(result.takeId, result.limit)
-                pendingRefresh = PendingSessionLedgerRefresh(
+                queueRefresh(
                     target = target,
                     query = desiredQuery,
                     catalogRecovery =
@@ -237,6 +245,36 @@ class SessionLedgerController<Target, TransportCancellation>(
             }
         }
         publish()
+    }
+
+    private fun releaseRequest(
+        fallbackTarget: Target,
+        request: SessionLedgerRequest,
+    ) {
+        val release = repository.cancel(request)
+        if (release !is SessionLedgerApplyResult.RefreshRequired) return
+
+        val queued = pendingRefresh
+        desiredQuery = DesiredSessionQuery(release.takeId, release.limit)
+        queueRefresh(
+            target = queued?.target ?: fallbackTarget,
+            query = desiredQuery,
+            catalogRecovery = queued?.catalogRecovery == true ||
+                release.reason == SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED,
+        )
+    }
+
+    private fun queueRefresh(
+        target: Target,
+        query: DesiredSessionQuery,
+        catalogRecovery: Boolean,
+    ): PendingSessionLedgerRefresh<Target> {
+        pendingRefresh = PendingSessionLedgerRefresh(
+            target = target,
+            query = query,
+            catalogRecovery = catalogRecovery || pendingRefresh?.catalogRecovery == true,
+        )
+        return checkNotNull(pendingRefresh)
     }
 
     private fun publish() {

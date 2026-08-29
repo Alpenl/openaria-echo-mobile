@@ -245,6 +245,20 @@ class UiShellSourceTest {
     }
 
     @Test
+    fun `empty SSE completion degrades both event domains with bounded reconnects`() {
+        val uiSource = echoAppSource()
+        val clientSource = File("src/main/java/com/openaria/openaria_echo_mobile/body/api/DeviceHttpClient.kt").readText()
+
+        assertContains(clientSource, "CaptureEventsResult.NoEvents")
+        assertContains(clientSource, "NetworkEventsResult.NoEvents")
+        assertContains(uiSource, "CaptureEventsResult.NoEvents ->")
+        assertContains(uiSource, "NetworkEventsResult.NoEvents ->")
+        assertContains(uiSource, "EventStreamReconnectState()")
+        assertContains(uiSource, "ConnectionRequestPolicy.nextFallbackDelay(retryDelayMs)")
+        assertFalse(uiSource.contains("delay(if (eventResult.events.isEmpty()) 1_000L else 250L)"))
+    }
+
+    @Test
     fun `preview keeps stale frames from being presented as live`() {
         val uiSource = echoAppSource()
         val clientSource = File("src/main/java/com/openaria/openaria_echo_mobile/body/api/DeviceHttpClient.kt").readText()

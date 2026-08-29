@@ -13,6 +13,7 @@ import com.openaria.openaria_echo_mobile.security.EndpointPolicy
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
+import java.util.IdentityHashMap
 import java.util.Locale
 import kotlin.math.absoluteValue
 
@@ -120,11 +121,19 @@ class DeviceDiscoveryClient internal constructor(
                     val key = service.instanceKey()
                     val existing = session.services[key]
                     if (existing != null) {
+                        session.serviceObservations[service.nativeHandle] = ServiceObservation(
+                            serviceKey = key,
+                            serviceRevision = existing.revision,
+                        )
                         return@synchronized false
                     }
                     session.nextServiceRevision += 1L
                     val revision = session.nextServiceRevision
-                    session.services[key] = ServiceRecord(service, revision)
+                    session.services[key] = ServiceRecord(revision)
+                    session.serviceObservations[service.nativeHandle] = ServiceObservation(
+                        serviceKey = key,
+                        serviceRevision = revision,
+                    )
                     resolutionQueue.removeAll {
                         it.generation == generation && it.serviceKey == key
                     }
@@ -148,9 +157,19 @@ class DeviceDiscoveryClient internal constructor(
                     }
                     val key = service.instanceKey()
                     val record = session.services[key] ?: return@synchronized null
-                    if (record.service.nativeHandle !== service.nativeHandle) {
+                    val knownObservation = session.serviceObservations[service.nativeHandle]
+                    // Android may create a fresh NsdServiceInfo for lost. Reject only handles
+                    // that are known to belong to a different service revision.
+                    val lostMayApplyToCurrentRevision = knownObservation == null ||
+                        (knownObservation.serviceKey == key &&
+                            knownObservation.serviceRevision == record.revision)
+                    if (!lostMayApplyToCurrentRevision) {
                         return@synchronized null
                     }
+                    session.serviceObservations[service.nativeHandle] = ServiceObservation(
+                        serviceKey = key,
+                        serviceRevision = record.revision,
+                    )
                     session.services.remove(key)
                     session.bodiesByService[key]?.let { body ->
                         session.bodiesByService[key] = body.copy(isOnline = false)
@@ -537,6 +556,7 @@ class DeviceDiscoveryClient internal constructor(
         val generation: Long,
         val onStateChanged: (DiscoveryState) -> Unit,
         val services: LinkedHashMap<String, ServiceRecord> = linkedMapOf(),
+        val serviceObservations: IdentityHashMap<Any, ServiceObservation> = IdentityHashMap(),
         val bodiesByService: LinkedHashMap<String, DiscoveredBody> = linkedMapOf(),
         val resolutionWarnings: LinkedHashMap<String, Int> = linkedMapOf(),
         var discoveryHandle: Any? = null,
@@ -559,9 +579,11 @@ class DeviceDiscoveryClient internal constructor(
         )
     }
 
-    private data class ServiceRecord(
-        val service: DiscoveryService,
-        val revision: Long,
+    private data class ServiceRecord(val revision: Long)
+
+    private data class ServiceObservation(
+        val serviceKey: String,
+        val serviceRevision: Long,
     )
 
     private data class ResolutionRequest(

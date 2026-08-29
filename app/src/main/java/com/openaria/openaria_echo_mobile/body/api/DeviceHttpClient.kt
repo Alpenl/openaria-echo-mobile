@@ -1380,7 +1380,11 @@ class DeviceHttpClient {
             }
         }
 
-        return CaptureEventsResult.Batch(events, lastProcessedEventId)
+        return if (events.isEmpty()) {
+            CaptureEventsResult.NoEvents
+        } else {
+            CaptureEventsResult.Batch(events, lastProcessedEventId)
+        }
     }
 
     private fun parseNetworkEventStream(
@@ -1491,7 +1495,11 @@ class DeviceHttpClient {
             }
         }
 
-        return NetworkEventsResult.Batch(events, lastProcessedEventId)
+        return if (events.isEmpty()) {
+            NetworkEventsResult.NoEvents
+        } else {
+            NetworkEventsResult.Batch(events, lastProcessedEventId)
+        }
     }
 
     private fun captureRevisionRelation(
@@ -1627,6 +1635,7 @@ sealed interface CaptureStatusResult {
 
 sealed interface CaptureEventsResult {
     data class Batch(val events: List<CaptureStreamEvent>, val lastEventId: String?) : CaptureEventsResult
+    data object NoEvents : CaptureEventsResult
     data object AuthenticationRequired : CaptureEventsResult
     data object Forbidden : CaptureEventsResult
     data class InvalidRequest(val message: String) : CaptureEventsResult
@@ -1847,6 +1856,7 @@ sealed interface NetworkMutationResult {
 
 sealed interface NetworkEventsResult {
     data class Batch(val events: List<NetworkStreamEvent>, val lastEventId: String?) : NetworkEventsResult
+    data object NoEvents : NetworkEventsResult
     data object AuthenticationRequired : NetworkEventsResult
     data object Forbidden : NetworkEventsResult
     data class InvalidRequest(val message: String) : NetworkEventsResult

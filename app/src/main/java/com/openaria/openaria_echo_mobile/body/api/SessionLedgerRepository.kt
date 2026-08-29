@@ -37,10 +37,11 @@ class SessionLedgerRepository {
     ): SessionLedgerRequest? {
         require(limit in 1..200) { "limit must be in 1..200" }
         if (activeRefresh != null) {
+            val pendingCatalogRecovery = catalogRecovery || pendingRefresh?.catalogRecovery == true
             pendingRefresh = PendingSessionRefresh(
                 takeId = takeId,
                 limit = limit,
-                catalogRecovery = catalogRecovery,
+                catalogRecovery = pendingCatalogRecovery,
             )
             return null
         }
@@ -85,16 +86,20 @@ class SessionLedgerRepository {
         }
     }
 
-    fun cancel(request: SessionLedgerRequest) {
-        when (request.kind) {
+    /** Releases [request] and hands any coalesced refresh intent back to the controller. */
+    fun cancel(request: SessionLedgerRequest): SessionLedgerApplyResult {
+        return when (request.kind) {
             SessionLedgerRequestKind.REFRESH -> {
                 if (activeRefresh === request) {
                     activeRefresh = null
-                    pendingRefresh = null
+                    takePendingRefresh() ?: SessionLedgerApplyResult.Ignored
+                } else {
+                    SessionLedgerApplyResult.Ignored
                 }
             }
             SessionLedgerRequestKind.APPEND -> {
                 if (activeAppend === request) activeAppend = null
+                SessionLedgerApplyResult.Ignored
             }
         }
     }
@@ -130,18 +135,7 @@ class SessionLedgerRepository {
                 ),
             )
         }
-        pendingRefresh?.let { pending ->
-            pendingRefresh = null
-            return SessionLedgerApplyResult.RefreshRequired(
-                takeId = pending.takeId,
-                limit = pending.limit,
-                reason = if (pending.catalogRecovery) {
-                    SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED
-                } else {
-                    SessionLedgerRefreshReason.REQUESTED
-                },
-            )
-        }
+        takePendingRefresh()?.let { return it }
 
         return when (result) {
             is SessionListResult.Page -> {
@@ -362,6 +356,20 @@ class SessionLedgerRepository {
         takeId = nextTakeId
         consumedCursors.clear()
         page = null
+    }
+
+    private fun takePendingRefresh(): SessionLedgerApplyResult.RefreshRequired? {
+        val pending = pendingRefresh ?: return null
+        pendingRefresh = null
+        return SessionLedgerApplyResult.RefreshRequired(
+            takeId = pending.takeId,
+            limit = pending.limit,
+            reason = if (pending.catalogRecovery) {
+                SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED
+            } else {
+                SessionLedgerRefreshReason.REQUESTED
+            },
+        )
     }
 
     private fun newRequest(

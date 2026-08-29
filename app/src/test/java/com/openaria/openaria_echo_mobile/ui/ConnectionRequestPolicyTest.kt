@@ -30,6 +30,39 @@ class ConnectionRequestPolicyTest {
     }
 
     @Test
+    fun `consecutive empty SSE batches stay degraded and bound GETs in a virtual minute`() {
+        val streamState = EventStreamReconnectState()
+        var nowMs = 0L
+        val requestTimes = mutableListOf<Long>()
+
+        while (nowMs < 60_000L) {
+            requestTimes += nowMs
+            val decision = streamState.onBatch(eventCount = 0)
+            assertEquals(EventStreamHealth.Degraded, decision.health)
+            nowMs += decision.nextRequestDelayMs
+        }
+
+        assertEquals(listOf(0L, 2_000L, 6_000L, 14_000L, 30_000L), requestTimes)
+        assertTrue(requestTimes.size <= 5)
+    }
+
+    @Test
+    fun `non-empty SSE batch marks healthy and resets empty retry backoff`() {
+        val streamState = EventStreamReconnectState()
+
+        assertEquals(2_000L, streamState.onBatch(eventCount = 0).nextRequestDelayMs)
+        assertEquals(4_000L, streamState.onBatch(eventCount = 0).nextRequestDelayMs)
+
+        val healthy = streamState.onBatch(eventCount = 1)
+        assertEquals(EventStreamHealth.Healthy, healthy.health)
+        assertEquals(250L, healthy.nextRequestDelayMs)
+
+        val emptyAfterHealthy = streamState.onBatch(eventCount = 0)
+        assertEquals(EventStreamHealth.Degraded, emptyAfterHealthy.health)
+        assertEquals(2_000L, emptyAfterHealthy.nextRequestDelayMs)
+    }
+
+    @Test
     fun `late response is rejected after generation or revision changes`() {
         val baseline = AuthorityRevision("epoch-a", 7L)
 

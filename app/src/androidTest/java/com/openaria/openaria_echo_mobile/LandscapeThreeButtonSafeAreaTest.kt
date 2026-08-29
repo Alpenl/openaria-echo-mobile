@@ -1,7 +1,9 @@
 package com.openaria.openaria_echo_mobile
 
+import android.Manifest
 import android.content.Context
 import android.content.res.Configuration
+import android.os.Build
 import androidx.annotation.StringRes
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.Role
@@ -28,11 +30,18 @@ class LandscapeThreeButtonSafeAreaTest {
     val prepareTargetApp = TestRule { base, _ ->
         object : Statement() {
             override fun evaluate() {
-                InstrumentationRegistry.getInstrumentation().targetContext
+                val instrumentation = InstrumentationRegistry.getInstrumentation()
+                instrumentation.targetContext
                     .getSharedPreferences("openaria_echo_locale", Context.MODE_PRIVATE)
                     .edit()
                     .putString("locale_tag", "zh-CN")
                     .commit()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    instrumentation.uiAutomation.grantRuntimePermission(
+                        instrumentation.targetContext.packageName,
+                        Manifest.permission.POST_NOTIFICATIONS,
+                    )
+                }
                 base.evaluate()
             }
         }

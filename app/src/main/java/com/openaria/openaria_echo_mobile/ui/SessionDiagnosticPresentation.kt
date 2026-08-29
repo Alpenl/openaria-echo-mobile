@@ -2,12 +2,15 @@ package com.openaria.openaria_echo_mobile.ui
 
 import com.openaria.openaria_echo_mobile.body.api.GatewayVerificationDiagnostic
 import com.openaria.openaria_echo_mobile.body.api.GatewayVerificationDiagnosticCode
+import com.openaria.openaria_echo_mobile.body.api.RetainedQuarantineDiagnostic
 import com.openaria.openaria_echo_mobile.body.api.SessionDiscoveryDiagnostic
 import com.openaria.openaria_echo_mobile.body.api.SessionLedgerFailure
 import com.openaria.openaria_echo_mobile.body.api.SessionListPage
 import com.openaria.openaria_echo_mobile.body.api.SessionListResult
 import com.openaria.openaria_echo_mobile.body.api.SessionProtocolFailureReason
 import com.openaria.openaria_echo_mobile.body.api.SessionSummary
+import com.openaria.openaria_echo_mobile.body.api.toRetainedQuarantineDiagnostic
+import com.openaria.openaria_echo_mobile.body.api.toSessionListReadModel
 
 internal enum class SessionDiagnosticKind {
     QUARANTINE,
@@ -103,6 +106,10 @@ internal sealed interface UnsuccessfulOutcomeMessage {
 }
 
 internal fun SessionDiscoveryDiagnostic.toReadOnlyPresentation(): SessionDiagnosticPresentation {
+    return toRetainedQuarantineDiagnostic().toReadOnlyPresentation()
+}
+
+internal fun RetainedQuarantineDiagnostic.toReadOnlyPresentation(): SessionDiagnosticPresentation {
     return SessionDiagnosticPresentation(
         stableKey = "quarantine:$quarantineId",
         kind = SessionDiagnosticKind.QUARANTINE,
@@ -114,7 +121,7 @@ internal fun SessionDiscoveryDiagnostic.toReadOnlyPresentation(): SessionDiagnos
             else -> SessionDiagnosticReason.QUARANTINE_UNKNOWN
         },
         code = code,
-        rawDetail = message,
+        summary = summary,
         observedAt = observedAt,
         quarantineId = quarantineId,
     )
@@ -154,7 +161,7 @@ internal fun SessionSummary.verificationDiagnosticPresentations(): List<SessionD
 }
 
 internal fun SessionListPage.readOnlyDiagnosticPresentations(): List<SessionDiagnosticPresentation> {
-    return diagnostics.map { it.toReadOnlyPresentation() }
+    return toSessionListReadModel().quarantineDiagnostics.map { it.toReadOnlyPresentation() }
 }
 
 internal fun SessionLedgerFailure.toReadOnlyPresentation(): SessionDiagnosticPresentation? {

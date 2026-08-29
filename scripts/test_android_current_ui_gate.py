@@ -10,7 +10,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 SCRIPT_PATH = Path(__file__).with_name("android-current-ui-gate.sh")
 GESTURAL = "com.android.internal.systemui.navbar.gestural"
 THREE_BUTTON = "com.android.internal.systemui.navbar.threebutton"
@@ -75,6 +74,17 @@ def shell(args: list[str]) -> int:
             state["density_override"] = int(args[2])
         save_state(state)
         return 0
+    if args[:3] == ["wm", "user-rotation", "lock"]:
+        value = int(args[3])
+        state["accelerometer_rotation"] = 0
+        state["user_rotation"] = value
+        state["surface_rotation"] = value
+        save_state(state)
+        return 0
+    if args == ["wm", "user-rotation", "free"]:
+        state["accelerometer_rotation"] = 1
+        save_state(state)
+        return 0
     if args[:4] == ["settings", "get", "system", "accelerometer_rotation"]:
         print(state["accelerometer_rotation"])
         return 0
@@ -91,7 +101,10 @@ def shell(args: list[str]) -> int:
     if args[:4] == ["settings", "put", "system", "user_rotation"]:
         value = int(args[4])
         state["user_rotation"] = value
-        if state["accelerometer_rotation"] == 0:
+        if (
+            state["accelerometer_rotation"] == 0
+            and os.environ.get("FAKE_SETTINGS_ROTATION_STALE") != "1"
+        ):
             state["surface_rotation"] = value
         save_state(state)
         return 0
@@ -156,6 +169,8 @@ def shell(args: list[str]) -> int:
 def pull(args: list[str]) -> int:
     source, destination = args
     profile = Path(source).stem
+    if os.environ.get("FAKE_PULL_UNSUPPORTED") == "1":
+        return 29
     if (
         os.environ.get("FAKE_PULL_FAIL_PROFILE") == profile
         and source.endswith(".png")
@@ -185,11 +200,46 @@ def pull(args: list[str]) -> int:
     return 0
 
 
+def exec_out(args: list[str]) -> int:
+    if len(args) != 4 or args[:3] != [
+        "run-as",
+        "com.openaria.openaria_echo_mobile",
+        "cat",
+    ]:
+        print(f"unexpected fake adb exec-out command: {args!r}", file=sys.stderr)
+        return 97
+    source = args[3]
+    profile = Path(source).stem
+    if os.environ.get("FAKE_EXEC_OUT_FAIL_PROFILE") == profile:
+        return 23
+    screenshot_bytes = b"fake-current-apk-png:" + profile.encode("ascii")
+    if source.endswith(".png"):
+        sys.stdout.buffer.write(screenshot_bytes)
+    else:
+        screenshot_sha256 = hashlib.sha256(screenshot_bytes).hexdigest()
+        if os.environ.get("FAKE_BAD_HASH_PROFILE") == profile:
+            screenshot_sha256 = "0" * 64
+        sys.stdout.buffer.write(
+            json.dumps(
+                {
+                    "schema": "openaria.echo.mobile.current-ui-evidence.v1",
+                    "profile": profile,
+                    "targetPackage": "com.openaria.openaria_echo_mobile",
+                    "targetWindowFocused": True,
+                    "screenshotPngSha256": screenshot_sha256,
+                }
+            ).encode("utf-8")
+        )
+    return 0
+
+
 arguments = sys.argv[1:]
 if arguments == ["wait-for-device"]:
     raise SystemExit(0)
 if arguments and arguments[0] == "shell":
     raise SystemExit(shell(arguments[1:]))
+if arguments and arguments[0] == "exec-out":
+    raise SystemExit(exec_out(arguments[1:]))
 if arguments and arguments[0] == "pull":
     raise SystemExit(pull(arguments[1:]))
 print(f"unexpected fake adb command: {arguments!r}", file=sys.stderr)
@@ -315,6 +365,28 @@ class AndroidCurrentUiGateBehaviorTest(unittest.TestCase):
         )
         self.assert_initial_state_restored()
 
+    def test_api35_uses_window_manager_rotation_when_settings_do_not_rotate_surface(self) -> None:
+        result = self.run_gate(
+            FAKE_API35_ROTATION_OUTPUT="1",
+            FAKE_SETTINGS_ROTATION_STALE="1",
+        )
+
+        self.assertEqual(0, result.returncode, result.stdout)
+        self.assertEqual(
+            ["small_gesture", "small_three_button", "landscape_gesture", "cutout_three_button"],
+            self.calls_path.read_text(encoding="utf-8").splitlines(),
+        )
+        self.assert_initial_state_restored()
+
+    def test_exports_private_app_cache_via_host_run_as_without_device_tmp_copy(self) -> None:
+        result = self.run_gate(FAKE_PULL_UNSUPPORTED="1")
+
+        self.assertEqual(0, result.returncode, result.stdout)
+        for profile in ("small_gesture", "small_three_button", "landscape_gesture", "cutout_three_button"):
+            self.assertTrue((self.evidence / f"{profile}.png").is_file())
+            self.assertTrue((self.evidence / f"{profile}.json").is_file())
+        self.assert_initial_state_restored()
+
     def test_instrumentation_failure_preserves_code_and_finally_collects_evidence(self) -> None:
         result = self.run_gate(FAKE_GRADLE_FAIL_PROFILE="small_three_button")
 
@@ -327,8 +399,8 @@ class AndroidCurrentUiGateBehaviorTest(unittest.TestCase):
         self.assertIn("final_exit_status=17", (self.evidence / "exit-summary.env").read_text(encoding="utf-8"))
         self.assert_initial_state_restored()
 
-    def test_pull_failure_preserves_code_and_keeps_xml_log_and_device_state(self) -> None:
-        result = self.run_gate(FAKE_PULL_FAIL_PROFILE="landscape_gesture")
+    def test_private_cache_export_failure_preserves_code_and_keeps_xml_log_and_device_state(self) -> None:
+        result = self.run_gate(FAKE_EXEC_OUT_FAIL_PROFILE="landscape_gesture")
 
         self.assertEqual(23, result.returncode, result.stdout)
         profile_result = self.read_result("landscape_gesture")

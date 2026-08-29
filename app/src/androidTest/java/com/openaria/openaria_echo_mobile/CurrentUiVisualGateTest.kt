@@ -8,7 +8,6 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.os.ParcelFileDescriptor
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -263,8 +262,6 @@ class CurrentUiVisualGateTest {
             profile.value,
             JSONObject(geometryFile.readText(Charsets.UTF_8)).getString("profile"),
         )
-        exportExactEvidence(screenshotFile, "$DEVICE_EVIDENCE_ROOT/${profile.value}.png")
-        exportExactEvidence(geometryFile, "$DEVICE_EVIDENCE_ROOT/${profile.value}.json")
         println("OPENARIA_CURRENT_UI_GEOMETRY=$evidence")
     }
 
@@ -426,24 +423,6 @@ class CurrentUiVisualGateTest {
         }
     }
 
-    private fun exportExactEvidence(source: File, destination: String) {
-        val result = shell(
-            "mkdir -p $DEVICE_EVIDENCE_ROOT && " +
-                "run-as $PACKAGE_NAME cat ${source.absolutePath} > $destination && " +
-                "test -s $destination && echo OPENARIA_EXACT_EVIDENCE_OK",
-        )
-        assertEquals(
-            "The exact instrumentation-validated evidence file must be exported for adb pull.",
-            "OPENARIA_EXACT_EVIDENCE_OK",
-            result.lineSequence().lastOrNull(),
-        )
-    }
-
-    private fun shell(command: String): String {
-        val descriptor = InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(command)
-        return ParcelFileDescriptor.AutoCloseInputStream(descriptor).bufferedReader().use { it.readText().trim() }
-    }
-
     private fun sha256(file: File): String = MessageDigest
         .getInstance("SHA-256")
         .digest(file.readBytes())
@@ -573,7 +552,6 @@ class CurrentUiVisualGateTest {
         const val EXPECTED_DENSITY_ARGUMENT = "expectedDensityDpi"
         const val EXPECTED_ROTATION_ARGUMENT = "expectedRotation"
         const val EVIDENCE_DIRECTORY_NAME = "openaria-current-ui"
-        const val DEVICE_EVIDENCE_ROOT = "/data/local/tmp/openaria-current-ui"
         const val NAVIGATION_MODE_THREE_BUTTON = 0
         const val NAVIGATION_MODE_GESTURAL = 2
         const val SCREENSHOT_SAMPLE_GRID = 32

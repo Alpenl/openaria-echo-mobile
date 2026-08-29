@@ -42,13 +42,21 @@ class VisualEvidenceBaselineTest {
         assertContains(testSource, "BitmapFactory.decodeFile")
         assertContains(testSource, "assertBitmapsHaveIdenticalPixels")
         assertContains(testSource, "screenshotPngSha256")
-        assertContains(testSource, "run-as \$PACKAGE_NAME cat")
-        assertContains(testSource, "/data/local/tmp/openaria-current-ui")
+        assertFalse(
+            testSource.contains("/data/local/tmp/openaria-current-ui"),
+            "Instrumentation must keep evidence in app-owned storage instead of crossing UID boundaries.",
+        )
+        assertFalse(
+            testSource.contains("executeShellCommand"),
+            "Instrumentation must not export evidence through an in-app shell command.",
+        )
         assertContains(testSource, "hasWindowFocus()")
         assertContains(testSource, "expectedWindowWidthPx")
         assertContains(testSource, "must explicitly have no display cutout")
         assertFalse(testSource.contains("screencap -p"), "An unvalidated second screencap must never be uploaded.")
-        assertContains(runnerSource, "\"\$adb_bin\" pull")
+        assertContains(runnerSource, "\"\$adb_bin\" exec-out run-as \"\$package_name\" cat")
+        assertContains(runnerSource, "cache/openaria-current-ui")
+        assertContains(runnerSource, "wm user-rotation lock")
         assertContains(runnerSource, "android.testInstrumentationRunnerArguments.visualProfile")
         assertContains(runnerSource, "android.testInstrumentationRunnerArguments.expectedDensityDpi")
         assertContains(runnerSource, "wait_for_state_convergence")

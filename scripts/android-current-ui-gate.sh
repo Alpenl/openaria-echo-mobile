@@ -5,7 +5,7 @@ set -uo pipefail
 
 readonly package_name="com.openaria.openaria_echo_mobile"
 readonly test_class="com.openaria.openaria_echo_mobile.CurrentUiVisualGateTest"
-readonly device_evidence_root="/data/local/tmp/openaria-current-ui"
+readonly app_evidence_relative_root="cache/openaria-current-ui"
 readonly host_evidence_root="${1:-android-current-ui-evidence}"
 readonly adb_bin="${OPENARIA_UI_GATE_ADB:-adb}"
 readonly gradlew_bin="${OPENARIA_UI_GATE_GRADLEW:-./gradlew}"
@@ -387,6 +387,8 @@ configure_profile() {
   esac
   run_mutation 'disable accelerometer rotation' adb_shell settings put system accelerometer_rotation 0
   run_mutation 'set user rotation' adb_shell settings put system user_rotation "$profile_expected_rotation"
+  run_mutation 'lock WindowManager user rotation' \
+    adb_shell wm user-rotation lock "$profile_expected_rotation"
   run_mutation 'enable requested navigation overlay' \
     adb_shell cmd overlay enable-exclusive --category "$profile_expected_navigation_overlay"
   if [[ "$profile_expected_cutout_state" == "present" ]]; then
@@ -449,9 +451,11 @@ capture_profile_evidence() {
   local profile="$1"
   evidence_png_status=0; evidence_json_status=0; evidence_identity_status=0
   evidence_results_status=0; evidence_state_status=0
-  "$adb_bin" pull "$device_evidence_root/${profile}.png" "$host_evidence_root/${profile}.png"
+  copy_private_app_evidence \
+    "$app_evidence_relative_root/${profile}.png" "$host_evidence_root/${profile}.png"
   evidence_png_status=$?
-  "$adb_bin" pull "$device_evidence_root/${profile}.json" "$host_evidence_root/${profile}.json"
+  copy_private_app_evidence \
+    "$app_evidence_relative_root/${profile}.json" "$host_evidence_root/${profile}.json"
   evidence_json_status=$?
   if (( evidence_png_status == 0 && evidence_json_status == 0 )); then
     verify_pulled_evidence "$profile"
@@ -463,6 +467,20 @@ capture_profile_evidence() {
   copy_gradle_results "$profile"; evidence_results_status=$?
   capture_device_state "$profile-final" "$host_evidence_root/${profile}-final-device-state.txt"
   evidence_state_status=$?
+}
+
+copy_private_app_evidence() {
+  local source="$1" destination="$2" command_status
+  "$adb_bin" exec-out run-as "$package_name" cat "$source" > "$destination"
+  command_status=$?
+  if (( command_status != 0 )); then
+    rm -f "$destination"
+    return "$command_status"
+  fi
+  if [[ ! -s "$destination" ]]; then
+    rm -f "$destination"
+    return $missing_evidence_failure
+  fi
 }
 
 run_profile() {
@@ -572,7 +590,8 @@ restore_initial_state() {
   restore_step 'disable current cutout overlays' disable_enabled_overlays "$cutout_overlay_prefix"
   restore_step 'restore initial cutout overlays' enable_overlay_snapshot "$initial_cutout_overlays"
   restore_step 'temporarily disable accelerometer rotation' adb_shell settings put system accelerometer_rotation 0
-  restore_step 'restore initial surface rotation' adb_shell settings put system user_rotation "$initial_surface_rotation"
+  restore_step 'restore initial surface rotation' \
+    adb_shell wm user-rotation lock "$initial_surface_rotation"
   restore_step 'wait for initial surface rotation' wait_for_surface_rotation "$initial_surface_rotation"
   if [[ "$initial_accelerometer_rotation" == "1" ]]; then
     restore_step 'restore accelerometer rotation' adb_shell settings put system accelerometer_rotation 1
@@ -659,14 +678,6 @@ snapshot_complete=1
 trap cleanup_on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-adb_shell rm -rf "$device_evidence_root" >> "$host_evidence_root/initialization.log" 2>&1
-initialization_status=$?
-if (( initialization_status == 0 )); then
-  adb_shell mkdir -p "$device_evidence_root" >> "$host_evidence_root/initialization.log" 2>&1
-  initialization_status=$?
-fi
-if (( initialization_status != 0 )); then exit "$initialization_status"; fi
 
 overall_status=0
 for profile in "${profiles[@]}"; do

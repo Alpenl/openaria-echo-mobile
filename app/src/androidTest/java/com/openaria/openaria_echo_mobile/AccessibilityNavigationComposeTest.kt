@@ -1,6 +1,9 @@
 package com.openaria.openaria_echo_mobile
 
-import android.view.KeyEvent
+import android.view.View
+import androidx.activity.OnBackPressedDispatcher
+import androidx.activity.OnBackPressedDispatcherOwner
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -11,6 +14,7 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertWidthIsAtLeast
@@ -18,12 +22,19 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
-import androidx.test.platform.app.InstrumentationRegistry
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.UiController
+import androidx.test.espresso.ViewAction
+import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import com.openaria.openaria_echo_mobile.ui.BackNavigationAction
 import com.openaria.openaria_echo_mobile.ui.BackNavigationHandler
 import com.openaria.openaria_echo_mobile.ui.BackNavigationState
 import com.openaria.openaria_echo_mobile.ui.ConfirmationBlock
 import com.openaria.openaria_echo_mobile.ui.FrameToolToggle
+import org.hamcrest.Description
+import org.hamcrest.Matcher
+import org.hamcrest.TypeSafeMatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -37,7 +48,10 @@ class AccessibilityNavigationComposeTest {
     @Test
     fun systemBackDispatchesTheRecordingConfirmationAction() {
         var observed: BackNavigationAction? = null
+        lateinit var backDispatcher: OnBackPressedDispatcher
         compose.setContent {
+            backDispatcher = requireNotNull(LocalOnBackPressedDispatcherOwner.current)
+                .onBackPressedDispatcher
             BackNavigationHandler(
                 state = BackNavigationState(
                     selectedTabIsViewfinder = true,
@@ -48,8 +62,7 @@ class AccessibilityNavigationComposeTest {
             )
         }
 
-        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
-        compose.waitForIdle()
+        compose.runOnIdle { backDispatcher.onBackPressed() }
 
         assertEquals(BackNavigationAction.REQUEST_RECORDING_BACKGROUND_CONFIRMATION, observed)
     }
@@ -69,12 +82,16 @@ class AccessibilityNavigationComposeTest {
             }
         }
 
-        compose.onNode(
+        val pane = compose.onNode(
             SemanticsMatcher.expectValue(SemanticsProperties.PaneTitle, "Confirm disconnect"),
-        ).assertIsDisplayed()
-        compose.onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading)).assertIsDisplayed()
+        )
+        val heading = compose.onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading))
+        pane.assertIsDisplayed()
+        heading.assertIsDisplayed()
+        compose.waitForIdle()
+        heading.assertIsFocused()
 
-        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        onView(DialogWindowProviderMatcher).perform(DispatchDialogBack)
         compose.waitForIdle()
 
         assertFalse(visible)
@@ -129,5 +146,28 @@ class AccessibilityNavigationComposeTest {
         assertEquals(0, disconnectCalls)
         assertFalse(dismissed)
         assertTrue(backgroundHandoffs > stopCalls + disconnectCalls)
+    }
+
+    private object DispatchDialogBack : ViewAction {
+        override fun getConstraints(): Matcher<View> = isDisplayed()
+
+        override fun getDescription(): String = "dispatch back through the owning ComponentDialog"
+
+        override fun perform(uiController: UiController, view: View) {
+            val window = (view as DialogWindowProvider).window
+            val owner = requireNotNull(window.callback as? OnBackPressedDispatcherOwner) {
+                "Compose Dialog must expose its ComponentDialog back dispatcher"
+            }
+            owner.onBackPressedDispatcher.onBackPressed()
+            uiController.loopMainThreadUntilIdle()
+        }
+    }
+
+    private object DialogWindowProviderMatcher : TypeSafeMatcher<View>() {
+        override fun describeTo(description: Description) {
+            description.appendText("a Compose DialogWindowProvider")
+        }
+
+        override fun matchesSafely(view: View): Boolean = view is DialogWindowProvider
     }
 }

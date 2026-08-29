@@ -233,7 +233,7 @@ wait_for_framework
 adb shell input keyevent KEYCODE_WAKEUP
 adb shell wm dismiss-keyguard
 adb shell test -f "${ca_device_path}"
-adb shell grep -F "10.0.2.2 github.com" /system/etc/hosts >/dev/null
+adb shell "grep -F -- '10.0.2.2 github.com' /system/etc/hosts" >/dev/null
 
 touch "${request_log}" "${server_log}"
 sudo python3 "$(dirname "$0")/android-staged-update-server.py" \

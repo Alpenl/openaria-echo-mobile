@@ -443,6 +443,7 @@ class WorkflowGateTest {
         assertContains(helper, "adb reboot")
         assertContains(helper, "wait_for_framework")
         assertContains(helper, "adb shell cmp /data/local/tmp/openaria-hosts.staged /system/etc/hosts")
+        assertContains(helper, "adb shell \"grep -F -- '10.0.2.2 github.com' /system/etc/hosts\"")
         assertContains(helper, "Failed to restore Android system files after staged acceptance.")
         assertTrue(
             ensureCall >= 0 && stagedHostsCopy > ensureCall,

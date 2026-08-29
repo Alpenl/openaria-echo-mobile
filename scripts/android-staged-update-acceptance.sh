@@ -98,9 +98,73 @@ server_log="${evidence_dir}/staged-endpoint-server.log"
 server_pid=""
 ca_device_path=""
 hosts_installed=false
+system_write_probe_path="/system/etc/.openaria-staged-write-probe"
+
+wait_for_framework() {
+  local framework_ready=false
+  for attempt in $(seq 1 120); do
+    local boot_completed
+    boot_completed="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+    if [[ "${boot_completed}" == "1" ]] && adb shell pm path android >/dev/null 2>&1; then
+      framework_ready=true
+      break
+    fi
+    sleep 2
+  done
+  if [[ "${framework_ready}" != "true" ]]; then
+    echo "Android framework and package manager did not become ready." >&2
+    return 1
+  fi
+}
+
+system_is_writable() {
+  # A mount-point mode check alone is insufficient with API 33 overlayfs. Verify
+  # an actual create/delete operation in the system partition instead.
+  adb shell rm -f "${system_write_probe_path}" >/dev/null 2>&1 || true
+  if ! adb shell touch "${system_write_probe_path}" >/dev/null 2>&1; then
+    adb shell rm -f "${system_write_probe_path}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if ! adb shell test -f "${system_write_probe_path}" >/dev/null 2>&1; then
+    adb shell rm -f "${system_write_probe_path}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  adb shell rm -f "${system_write_probe_path}" >/dev/null 2>&1 || true
+  return 0
+}
+
+ensure_system_writable() {
+  local remount_output
+  local remount_attempt
+
+  # `adb remount` on API 33 can successfully configure overlayfs while leaving
+  # /system read-only until the next boot. Probe after every remount and reboot
+  # before attempting any copy when the probe fails.
+  for remount_attempt in 1 2 3; do
+    adb root >/dev/null
+    adb wait-for-device
+    remount_output="$(adb remount 2>&1)" || {
+      printf '%s\n' "${remount_output}" >&2
+      return 1
+    }
+    printf '%s\n' "${remount_output}"
+    if system_is_writable; then
+      return 0
+    fi
+    if [[ "${remount_attempt}" -eq 3 ]]; then
+      echo "Android /system remained read-only after bounded overlayfs remount attempts." >&2
+      return 1
+    fi
+    echo "Android /system overlayfs is not writable yet; rebooting before retry ${remount_attempt}/3." >&2
+    adb reboot
+    adb wait-for-device
+    wait_for_framework
+  done
+}
 
 cleanup() {
   status=$?
+  cleanup_status=0
   trap - EXIT
   set +e
   if [[ -n "${server_pid}" ]]; then
@@ -108,16 +172,23 @@ cleanup() {
     wait "${server_pid}" >/dev/null 2>&1
   fi
   if [[ "${hosts_installed}" == "true" ]]; then
-    adb root >/dev/null 2>&1
-    adb wait-for-device >/dev/null 2>&1
-    adb remount >/dev/null 2>&1
-    adb push "${original_hosts}" /data/local/tmp/openaria-hosts.original >/dev/null 2>&1
-    adb shell cp /data/local/tmp/openaria-hosts.original /system/etc/hosts >/dev/null 2>&1
-    if [[ -n "${ca_device_path}" ]]; then
-      adb shell rm -f "${ca_device_path}" >/dev/null 2>&1
+    if ensure_system_writable >/dev/null 2>&1 &&
+      adb push "${original_hosts}" /data/local/tmp/openaria-hosts.original >/dev/null 2>&1 &&
+      adb shell cp /data/local/tmp/openaria-hosts.original /system/etc/hosts >/dev/null 2>&1 &&
+      adb shell cmp /data/local/tmp/openaria-hosts.original /system/etc/hosts >/dev/null 2>&1; then
+      if [[ -n "${ca_device_path}" ]]; then
+        adb shell rm -f "${ca_device_path}" >/dev/null 2>&1 || cleanup_status=1
+      fi
+      adb shell rm -f /data/local/tmp/openaria-hosts.original /data/local/tmp/openaria-hosts.staged /data/local/tmp/openaria-staged-ca.0 >/dev/null 2>&1 || true
+    else
+      cleanup_status=1
+      echo "Failed to restore Android system files after staged acceptance." >&2
     fi
   fi
   rm -rf "${control_root}"
+  if [[ "${status}" -eq 0 && "${cleanup_status}" -ne 0 ]]; then
+    status=1
+  fi
   exit "${status}"
 }
 trap cleanup EXIT
@@ -140,9 +211,7 @@ openssl x509 -req -sha256 -days 2 \
 ca_hash="$(openssl x509 -subject_hash_old -in "${ca_cert}" -noout)"
 ca_device_path="/system/etc/security/cacerts/${ca_hash}.0"
 
-adb root >/dev/null
-adb wait-for-device
-adb remount
+ensure_system_writable
 adb pull /system/etc/hosts "${original_hosts}" >/dev/null
 if grep -Eq '(^|[[:space:]])github\.com([[:space:]]|$)' "${original_hosts}"; then
   echo "Emulator hosts already overrides github.com; refusing ambiguous interception." >&2
@@ -152,25 +221,15 @@ cp "${original_hosts}" "${staged_hosts}"
 printf '\n10.0.2.2 github.com\n' >> "${staged_hosts}"
 adb push "${staged_hosts}" /data/local/tmp/openaria-hosts.staged >/dev/null
 adb push "${ca_cert}" /data/local/tmp/openaria-staged-ca.0 >/dev/null
+hosts_installed=true
 adb shell cp /data/local/tmp/openaria-hosts.staged /system/etc/hosts
 adb shell cp /data/local/tmp/openaria-staged-ca.0 "${ca_device_path}"
 adb shell chmod 0644 /system/etc/hosts "${ca_device_path}"
-hosts_installed=true
+adb shell cmp /data/local/tmp/openaria-hosts.staged /system/etc/hosts >/dev/null
+adb shell cmp /data/local/tmp/openaria-staged-ca.0 "${ca_device_path}" >/dev/null
 adb reboot
 adb wait-for-device
-framework_ready=false
-for attempt in $(seq 1 120); do
-  boot_completed="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
-  if [[ "${boot_completed}" == "1" ]] && adb shell pm path android >/dev/null 2>&1; then
-    framework_ready=true
-    break
-  fi
-  sleep 2
-done
-if [[ "${framework_ready}" != "true" ]]; then
-  echo "Android framework and package manager did not become ready after the trust-store reboot." >&2
-  exit 1
-fi
+wait_for_framework
 adb shell input keyevent KEYCODE_WAKEUP
 adb shell wm dismiss-keyguard
 adb shell test -f "${ca_device_path}"

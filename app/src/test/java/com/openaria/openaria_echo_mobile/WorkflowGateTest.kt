@@ -428,6 +428,29 @@ class WorkflowGateTest {
     }
 
     @Test
+    fun `API 33 overlayfs writes are gated by a rebooted writable-system probe`() {
+        val helper = File("../scripts/android-staged-update-acceptance.sh").readText()
+        val ensureCall = helper.indexOf("ensure_system_writable\nadb pull /system/etc/hosts")
+        val stagedHostsCopy = helper.indexOf(
+            "adb shell cp /data/local/tmp/openaria-hosts.staged /system/etc/hosts",
+            ensureCall,
+        )
+
+        assertContains(helper, "system_is_writable()")
+        assertContains(helper, "system_write_probe_path=\"/system/etc/.openaria-staged-write-probe\"")
+        assertContains(helper, "adb shell touch \"${'$'}{system_write_probe_path}\"")
+        assertContains(helper, "for remount_attempt in 1 2 3")
+        assertContains(helper, "adb reboot")
+        assertContains(helper, "wait_for_framework")
+        assertContains(helper, "adb shell cmp /data/local/tmp/openaria-hosts.staged /system/etc/hosts")
+        assertContains(helper, "Failed to restore Android system files after staged acceptance.")
+        assertTrue(
+            ensureCall >= 0 && stagedHostsCopy > ensureCall,
+            "The staged hosts write must run only after the bounded remount/reboot writable probe.",
+        )
+    }
+
+    @Test
     fun `post publish work is bounded read only verification of exact immutable state`() {
         val release = releaseFile.readText()
         val postPublish =

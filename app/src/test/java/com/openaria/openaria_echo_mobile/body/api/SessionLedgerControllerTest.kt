@@ -1,6 +1,7 @@
 package com.openaria.openaria_echo_mobile.body.api
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
@@ -198,6 +199,126 @@ class SessionLedgerControllerTest {
             assertNull(controller.state.failure)
             assertFalse(controller.state.isRefreshing)
             assertFalse(controller.state.isLoadingMore)
+        }
+
+    @Test
+    fun `latest queued refresh drains after superseded transport is cancelled`() =
+        runBlocking {
+            val firstStarted = CompletableDeferred<Unit>()
+            val releaseFirst = CompletableDeferred<Unit>()
+            val requests = mutableListOf<SessionLedgerRequest>()
+            val controller =
+                SessionLedgerController<String, FakeCancellation>(
+                    scope = this,
+                    cancellationFactory = ::FakeCancellation,
+                    cancelTransport = FakeCancellation::cancel,
+                    transport = { _, request, _ ->
+                        requests += request
+                        if (requests.size == 1) {
+                            firstStarted.complete(Unit)
+                            releaseFirst.await()
+                            throw CancellationException("superseded request")
+                        }
+                        pageResult(
+                            revision = REVISION_C,
+                            nextCursor = null,
+                            takeId = TAKE_ID_C,
+                            limit = LATEST_LIMIT,
+                        )
+                    },
+                )
+
+            controller.refresh(
+                target = "device",
+                filterIntent = SessionFilterIntent.Exact(TAKE_ID_A),
+            )
+            firstStarted.await()
+            controller.refresh(
+                target = "device",
+                filterIntent = SessionFilterIntent.Exact(TAKE_ID_C),
+                limit = LATEST_LIMIT,
+            )
+            releaseFirst.complete(Unit)
+            controller.awaitIdle()
+
+            assertEquals(listOf(TAKE_ID_A, TAKE_ID_C), requests.map { it.takeId })
+            assertEquals(LATEST_LIMIT, requests.last().limit)
+            assertEquals(REVISION_C, controller.state.page?.catalogRevision)
+            assertNull(controller.state.failure)
+            assertFalse(controller.state.isRefreshing)
+        }
+
+    @Test
+    fun `transport cancellation without queued refresh clears the spinner`() =
+        runBlocking {
+            val controller =
+                SessionLedgerController<String, FakeCancellation>(
+                    scope = this,
+                    cancellationFactory = ::FakeCancellation,
+                    cancelTransport = FakeCancellation::cancel,
+                    transport = { _, _, _ -> throw CancellationException("request cancelled") },
+                )
+
+            controller.refresh("device")
+            controller.awaitIdle()
+
+            assertFalse(controller.state.isRefreshing)
+            assertFalse(controller.state.isLoadingMore)
+            assertNull(controller.state.page)
+            assertNull(controller.state.failure)
+        }
+
+    @Test
+    fun `lifecycle cancellation drops queued refresh until foreground requests a new one`() =
+        runBlocking {
+            val firstStarted = CompletableDeferred<Unit>()
+            val requests = mutableListOf<SessionLedgerRequest>()
+            val cancellations = mutableListOf<FakeCancellation>()
+            val controller =
+                SessionLedgerController<String, FakeCancellation>(
+                    scope = this,
+                    cancellationFactory = { FakeCancellation().also(cancellations::add) },
+                    cancelTransport = FakeCancellation::cancel,
+                    transport = { _, request, _ ->
+                        requests += request
+                        if (requests.size == 1) {
+                            firstStarted.complete(Unit)
+                            awaitCancellation()
+                        }
+                        pageResult(
+                            revision = REVISION_C,
+                            nextCursor = null,
+                            takeId = TAKE_ID_C,
+                            limit = LATEST_LIMIT,
+                        )
+                    },
+                )
+
+            controller.refresh("device", SessionFilterIntent.Exact(TAKE_ID_A))
+            firstStarted.await()
+            controller.refresh(
+                target = "device",
+                filterIntent = SessionFilterIntent.Exact(TAKE_ID_C),
+                limit = LATEST_LIMIT,
+            )
+
+            controller.cancelInFlight()
+            controller.awaitIdle()
+
+            assertEquals(1, requests.size)
+            assertTrue(cancellations.single().cancelled)
+            assertFalse(controller.state.isRefreshing)
+            assertNull(controller.state.page)
+
+            controller.refresh(
+                target = "device",
+                filterIntent = SessionFilterIntent.InheritCurrentFilter,
+                limit = LATEST_LIMIT,
+            )
+            controller.awaitIdle()
+
+            assertEquals(listOf(TAKE_ID_A, TAKE_ID_C), requests.map { it.takeId })
+            assertEquals(REVISION_C, controller.state.page?.catalogRevision)
         }
 
     @Test

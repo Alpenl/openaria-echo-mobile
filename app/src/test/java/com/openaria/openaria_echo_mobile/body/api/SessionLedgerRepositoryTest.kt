@@ -282,6 +282,48 @@ class SessionLedgerRepositoryTest {
     }
 
     @Test
+    fun `cancelling active refresh hands the latest queued intent back to the caller`() {
+        val repository = repositoryWithFirstPage()
+        val staleRefresh = requireNotNull(repository.beginRefresh(takeId = TAKE_ID))
+
+        assertNull(repository.beginRefresh(takeId = TAKE_ID_B, limit = 37))
+        assertNull(repository.beginRefresh(takeId = TAKE_ID_C, limit = 73))
+
+        val rerun = assertIs<SessionLedgerApplyResult.RefreshRequired>(
+            repository.cancel(staleRefresh),
+        )
+
+        assertEquals(TAKE_ID_C, rerun.takeId)
+        assertEquals(73, rerun.limit)
+        assertEquals(SessionLedgerRefreshReason.REQUESTED, rerun.reason)
+        assertFalse(repository.isRefreshing)
+        assertEquals(REVISION_A, repository.page?.catalogRevision)
+    }
+
+    @Test
+    fun `latest queued identity cannot downgrade a forced catalog recovery`() {
+        val repository = repositoryWithFirstPage()
+        val staleRefresh = requireNotNull(repository.beginRefresh(takeId = TAKE_ID))
+
+        assertNull(
+            repository.beginRefresh(
+                takeId = TAKE_ID_B,
+                limit = 37,
+                catalogRecovery = true,
+            ),
+        )
+        assertNull(repository.beginRefresh(takeId = TAKE_ID_C, limit = 73))
+
+        val rerun = assertIs<SessionLedgerApplyResult.RefreshRequired>(
+            repository.cancel(staleRefresh),
+        )
+
+        assertEquals(TAKE_ID_C, rerun.takeId)
+        assertEquals(73, rerun.limit)
+        assertEquals(SessionLedgerRefreshReason.CATALOG_RECOVERY_REQUIRED, rerun.reason)
+    }
+
+    @Test
     fun `cross-page duplicate session is rejected without overwriting the accumulated page`() {
         val repository = repositoryWithFirstPage()
         val append = requireNotNull(repository.beginLoadMore())
@@ -612,5 +654,6 @@ class SessionLedgerRepositoryTest {
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         const val TAKE_ID = "01991b70-7c88-7456-9234-123456789abc"
         const val TAKE_ID_B = "01991b70-7c88-7567-9234-123456789abc"
+        const val TAKE_ID_C = "01991b70-7c88-7678-9234-123456789abc"
     }
 }

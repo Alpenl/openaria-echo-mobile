@@ -57,6 +57,7 @@ class DeviceHttpClient internal constructor(
         lastAuthorityEpoch: String? = null,
         lastSourceRevision: Long? = null,
         maxEvents: Int = 8,
+        cancellation: DeviceAdmissionCancellation? = null,
     ): CaptureEventsResult {
         val eventLimit = maxEvents.coerceIn(1, 64)
         if (lastEventId != null && !lastEventId.matches(Regex("^[0-9]+$"))) {
@@ -74,6 +75,9 @@ class DeviceHttpClient internal constructor(
                 .applyEventStreamRequest(connection, lastEventId)
         } catch (exception: IOException) {
             return CaptureEventsResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
+        }
+        if (cancellation != null && !cancellation.register(http)) {
+            return CaptureEventsResult.NetworkFailure("capture event request cancelled")
         }
 
         return try {
@@ -99,12 +103,23 @@ class DeviceHttpClient internal constructor(
             }
         } catch (exception: IOException) {
             CaptureEventsResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
+        } catch (exception: RuntimeException) {
+            if (cancellation?.isCancelled() == true) {
+                CaptureEventsResult.NetworkFailure("capture event request cancelled")
+            } else {
+                throw exception
+            }
         } finally {
-            http.disconnect()
+            cancellation?.clear(http)
+            runCatching { http.disconnect() }
         }
     }
 
-    fun getPreviewJpeg(connection: DeviceConnection, fps: Int = 2): PreviewResult {
+    fun getPreviewJpeg(
+        connection: DeviceConnection,
+        fps: Int = 2,
+        cancellation: DeviceAdmissionCancellation? = null,
+    ): PreviewResult {
         val clampedFps = fps.coerceAtLeast(1)
         val http = try {
             val path = "/api/v4/preview?fps=$clampedFps"
@@ -112,6 +127,9 @@ class DeviceHttpClient internal constructor(
                 .applyPreviewRequest(connection)
         } catch (exception: IOException) {
             return PreviewResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
+        }
+        if (cancellation != null && !cancellation.register(http)) {
+            return PreviewResult.NetworkFailure("preview request cancelled")
         }
 
         return try {
@@ -135,8 +153,15 @@ class DeviceHttpClient internal constructor(
             }
         } catch (exception: IOException) {
             PreviewResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
+        } catch (exception: RuntimeException) {
+            if (cancellation?.isCancelled() == true) {
+                PreviewResult.NetworkFailure("preview request cancelled")
+            } else {
+                throw exception
+            }
         } finally {
-            http.disconnect()
+            cancellation?.clear(http)
+            runCatching { http.disconnect() }
         }
     }
 

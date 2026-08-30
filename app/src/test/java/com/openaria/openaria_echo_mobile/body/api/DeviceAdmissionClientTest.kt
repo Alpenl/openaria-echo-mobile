@@ -40,13 +40,14 @@ class DeviceAdmissionClientTest {
             assertEquals(true, admission.connection.descriptor.artifactDownloadCapable)
             assertEquals(true, admission.connection.descriptor.captureStatusCapable)
             assertEquals(false, admission.connection.descriptor.sessionDeletionCapable)
-            assertEquals("idle", admission.initialCaptureStatus.deviceState)
-            assertEquals(7L, admission.initialCaptureStatus.sourceRevision)
+            val initialCaptureStatus = requireNotNull(admission.initialCaptureStatus)
+            assertEquals("idle", initialCaptureStatus.deviceState)
+            assertEquals(7L, initialCaptureStatus.sourceRevision)
         }
     }
 
     @Test
-    fun `legacy five-key descriptor is rejected before capture status without fallback`() {
+    fun `descriptor missing optional capabilities enters workspace without status request`() {
         withServer { server ->
             server.enqueue(
                 jsonResponse(
@@ -54,15 +55,15 @@ class DeviceAdmissionClientTest {
                     fixtureText("device-legacy-five-capabilities.json", "invalid"),
                 ),
             )
-            server.enqueue(jsonResponse(200, idleCaptureStatusJson()))
-
             val result = DeviceAdmissionClient().admit(
                 candidates = listOf(DeviceAdmissionCandidate(server.origin(), null)),
                 isAttemptCurrent = { true },
             )
 
-            val invalid = assertIs<DeviceAdmissionResult.InvalidResponse>(result)
-            assertEquals("missing required key session_list", invalid.message)
+            val admission = assertIs<DeviceAdmissionResult.Verified>(result).admission
+            assertEquals(false, admission.connection.descriptor.captureStatusCapable)
+            assertEquals(false, admission.connection.descriptor.sessionListCapable)
+            assertNull(admission.initialCaptureStatus)
             assertEquals(1, server.requestCount)
             assertEquals("/api/v4/device", server.takeRecordedRequest().path)
             assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS))

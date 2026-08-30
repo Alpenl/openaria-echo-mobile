@@ -52,7 +52,7 @@ object DeviceApiValidators {
         }
 
         val capabilities = value.objectAt("capabilities") ?: return "capabilities must be an object".invalid()
-        capabilities.exactKeys(
+        capabilities.onlyKnownKeys(
             "capture",
             "preview",
             "range_download",
@@ -65,32 +65,44 @@ object DeviceApiValidators {
             "calibration_capture",
         )
             ?.let { return it.invalid() }
-        val capture = capabilities.booleanAt("capture") ?: return "capabilities.capture must be boolean".invalid()
-        val preview = capabilities.booleanAt("preview") ?: return "capabilities.preview must be boolean".invalid()
-        val rangeDownload = capabilities.booleanAt("range_download")
-            ?: return "capabilities.range_download must be boolean".invalid()
-        val networkMutation = capabilities.booleanAt("network_mutation")
-            ?: return "capabilities.network_mutation must be boolean".invalid()
-        val sessionList = capabilities.booleanAt("session_list")
-            ?: return "capabilities.session_list must be boolean".invalid()
-        val sessionDetail = capabilities.booleanAt("session_detail")
-            ?: return "capabilities.session_detail must be boolean".invalid()
-        val artifactDownload = capabilities.booleanAt("artifact_download")
-            ?: return "capabilities.artifact_download must be boolean".invalid()
-        val captureStatus = capabilities.booleanAt("capture_status")
-            ?: return "capabilities.capture_status must be boolean".invalid()
-        val sessionDeletion = capabilities.booleanAt("session_deletion")
-            ?: return "capabilities.session_deletion must be boolean".invalid()
-        val calibrationCapture = validateCalibrationCaptureCapability(
-            capabilities.objectAt("calibration_capture")
-                ?: return "capabilities.calibration_capture must be an object".invalid(),
-        ).valueOrReturn { return "capabilities.calibration_capture.$it".invalid() }
-        if (!rangeDownload) return "capabilities.range_download must be true".invalid()
-        if (!sessionList) return "capabilities.session_list must be true".invalid()
-        if (!sessionDetail) return "capabilities.session_detail must be true".invalid()
-        if (!artifactDownload) return "capabilities.artifact_download must be true".invalid()
-        if (!captureStatus) return "capabilities.capture_status must be true".invalid()
-        if (sessionDeletion) return "capabilities.session_deletion must be false".invalid()
+        val booleanCapabilities = listOf(
+            "capture",
+            "preview",
+            "range_download",
+            "network_mutation",
+            "session_list",
+            "session_detail",
+            "artifact_download",
+            "capture_status",
+            "session_deletion",
+        )
+        booleanCapabilities.forEach { name ->
+            if (name in capabilities && capabilities[name] !is Boolean) {
+                return "capabilities.$name must be boolean".invalid()
+            }
+        }
+        val capture = capabilities.booleanAt("capture") ?: false
+        val preview = capabilities.booleanAt("preview") ?: false
+        val rangeDownload = capabilities.booleanAt("range_download") ?: false
+        val networkMutation = capabilities.booleanAt("network_mutation") ?: false
+        val sessionList = capabilities.booleanAt("session_list") ?: false
+        val sessionDetail = capabilities.booleanAt("session_detail") ?: false
+        val artifactDownload = capabilities.booleanAt("artifact_download") ?: false
+        val captureStatus = capabilities.booleanAt("capture_status") ?: false
+        val sessionDeletion = capabilities.booleanAt("session_deletion") ?: false
+        val calibrationCapture = if ("calibration_capture" in capabilities) {
+            validateCalibrationCaptureCapability(
+                capabilities.objectAt("calibration_capture")
+                    ?: return "capabilities.calibration_capture must be an object".invalid(),
+            ).valueOrReturn { return "capabilities.calibration_capture.$it".invalid() }
+        } else {
+            CalibrationCaptureCapability(
+                supported = false,
+                enabled = false,
+                disabledReason = "capture_source_unsupported",
+                requiredVideoLayout = "split-eyes",
+            )
+        }
         val storage = value.objectAt("storage") ?: return "storage must be an object".invalid()
         storage.exactKeys("volume_id", "total_bytes", "available_bytes", "writable")
             ?.let { return it.invalid() }
@@ -1949,6 +1961,11 @@ object DeviceApiValidators {
         val unknown = actual - expected
         if (unknown.isNotEmpty()) return "unknown key ${unknown.first()}"
         return null
+    }
+
+    private fun Map<String, Any?>.onlyKnownKeys(vararg known: String): String? {
+        val unknown = keys - known.toSet()
+        return unknown.firstOrNull()?.let { "unknown key $it" }
     }
 
     private fun Map<String, Any?>.constString(key: String, expected: String): String? {

@@ -102,11 +102,15 @@
     <string name="capture_disabled_command_running">A capture command is already running.</string>
     <string name="capture_disabled_no_connection">Verify and connect a body first.</string>
     <string name="capture_disabled_not_capable">The body declares that capture is not supported.</string>
+    <string name="capture_disabled_status_unavailable">The body does not declare authoritative capture status.</string>
     <string name="capture_disabled_camera">The camera is not connected, so capture cannot start.</string>
     <string name="capture_disabled_storage">Storage is not writable.</string>
     <string name="capture_disabled_not_idle">The body must be idle.</string>
     <string name="capture_disabled_not_recording">Stop is available only while recording.</string>
     <string name="capture_status_title">Capture status</string>
+    <string name="capture_status_capability_unavailable">The body does not declare capture status; recording commands remain disabled.</string>
+    <string name="capture_stream_connecting">Connecting</string>
+    <string name="capture_stream_reconnecting">Reconnecting</string>
     <string name="capture_polling">Reading the authoritative capture status.</string>
     <string name="capture_auth_required">Capture status requires an access token.</string>
     <string name="capture_forbidden">Capture status access was rejected.</string>
@@ -136,6 +140,9 @@
     <string name="tool_unwired">No Device API v4 status endpoint yet; shown as status only.</string>
     <string name="sessions_empty">Real sessions will load after connecting a body.</string>
     <string name="sessions_loading">Reading the real session ledger.</string>
+    <string name="sessions_refresh">Refresh sessions</string>
+    <string name="sessions_refreshing">Refreshing sessions</string>
+    <string name="sessions_capability_unavailable">The body does not declare this session capability.</string>
     <string name="sessions_empty_connected">The body has no sealed sessions right now.</string>
     <string name="sessions_no_fake">Static sessions, fake artifacts, and dead Copy URL controls are gone.</string>
     <string name="sessions_filter_title">Session filter</string>

@@ -117,8 +117,8 @@ class WorkflowGateTest {
         val appBuild = File("build.gradle.kts").readText()
         val postPublishVerifier = File("../scripts/verify_android_release_postpublish.py").readText()
 
-        assertContains(appBuild, "versionCode = 11")
-        assertContains(appBuild, "versionName = \"0.1.8\"")
+        assertContains(appBuild, "versionCode = 12")
+        assertContains(appBuild, "versionName = \"0.1.9\"")
         assertContains(release, "expected_tag=\"v\${version_name}\"")
         assertContains(release, "apksigner verify --verbose --print-certs")
         assertContains(release, "apkanalyzer manifest application-id")

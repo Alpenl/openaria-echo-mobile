@@ -189,6 +189,7 @@ fun EchoApp(
     var showPreviewImuOverlay by rememberSaveable { mutableStateOf(false) }
     var sessionPage by remember { mutableStateOf<SessionListPage?>(null) }
     var sessionMessage by remember { mutableStateOf<SessionMessage?>(null) }
+    var sessionRefreshing by remember { mutableStateOf(false) }
     var sessionLoadingMore by remember { mutableStateOf(false) }
     var sessionManifest by remember { mutableStateOf<DeviceSessionManifest?>(null) }
     var sessionManifestMessage by remember { mutableStateOf<SessionManifestMessage?>(null) }
@@ -237,6 +238,7 @@ fun EchoApp(
             },
             onStateChanged = { next ->
                 sessionPage = next.page
+                sessionRefreshing = next.isRefreshing
                 sessionLoadingMore = next.isLoadingMore
                 sessionMessage = next.failure?.let { failure -> sessionMessageFor(failure) }
             },
@@ -245,6 +247,28 @@ fun EchoApp(
     val previewFrameGate = remember { PreviewFrameGate() }
     val previewFrameWorkerDispatcher = remember { Dispatchers.Default.limitedParallelism(1) }
     val selectedTab = EchoTab.valueOf(selectedTabName)
+    val previewTransportCancellation = remember(
+        bodyConnection,
+        connectionGeneration,
+        appInForeground,
+        selectedTab,
+        showFocusPeaking,
+    ) {
+        DeviceAdmissionCancellation()
+    }
+    DisposableEffect(previewTransportCancellation) {
+        onDispose { previewTransportCancellation.cancel() }
+    }
+    val captureStreamCancellation = remember(
+        bodyConnection,
+        connectionGeneration,
+        appInForeground,
+    ) {
+        DeviceAdmissionCancellation()
+    }
+    DisposableEffect(captureStreamCancellation) {
+        onDispose { captureStreamCancellation.cancel() }
+    }
     // Platform insets are reported in physical pixels. Use the resource density
     // for conversion so synthetic density overrides (for responsive UI tests)
     // cannot turn a 15dp system bar into a 48dp content reservation.
@@ -259,6 +283,7 @@ fun EchoApp(
     val captureReconciliationCoordinator = remember(connectionGeneration) {
         CaptureReconciliationCoordinator(connectionGeneration, captureReconciliationGate)
     }
+    val captureCommandGate = remember(connectionGeneration) { CaptureCommandGate() }
 
     fun resetSessionLedgerForConnectionChange() {
         sessionLedgerController.reset()
@@ -287,14 +312,18 @@ fun EchoApp(
         resetSessionLedgerForConnectionChange()
         connectionGeneration += 1L
         admittedCaptureStatus = admission.initialCaptureStatus
-        val initialProjection = CaptureProjection.applyHttpSnapshot(
-            CaptureProjectionState(),
-            admission.initialCaptureStatus,
-        ).state
+        val initialProjection = admission.initialCaptureStatus?.let { initialCaptureStatus ->
+            CaptureProjection.applyHttpSnapshot(
+                CaptureProjectionState(),
+                initialCaptureStatus,
+            ).state
+        } ?: CaptureProjectionState()
         captureProjection = initialProjection
         captureStatus = initialProjection.snapshot
         captureMessage = null
-        skipInitialReconciliationGeneration = connectionGeneration
+        skipInitialReconciliationGeneration = connectionGeneration.takeIf {
+            admission.initialCaptureStatus != null
+        }
         bodyConnection = admission.connection
     }
 
@@ -313,7 +342,12 @@ fun EchoApp(
         filterIntent: SessionFilterIntent = SessionFilterIntent.InheritCurrentFilter,
         limit: Int = 50,
     ) {
-        if (!appInForeground || !isCurrentConnection(activeConnection, generation)) return
+        if (!activeConnection.descriptor.sessionListCapable ||
+            !appInForeground ||
+            !isCurrentConnection(activeConnection, generation)
+        ) {
+            return
+        }
         sessionLedgerController.refresh(
             target = activeConnection,
             filterIntent = filterIntent,
@@ -326,6 +360,7 @@ fun EchoApp(
         generation: Long,
         force: Boolean,
     ): Boolean {
+        if (!activeConnection.descriptor.captureStatusCapable) return false
         var requestForce = force
         while (isCurrentConnection(activeConnection, generation)) {
             val request = captureReconciliationCoordinator.begin(
@@ -473,7 +508,7 @@ fun EchoApp(
 
     fun startCaptureWithMode(calibration: Boolean) {
         val activeConnection = bodyConnection
-        if (activeConnection != null && !captureCommandRunning) {
+        if (activeConnection != null && captureCommandGate.tryAcquire()) {
             val generation = connectionGeneration
             captureCommandRunning = true
             captureCommandMessage = if (calibration) {
@@ -490,15 +525,19 @@ fun EchoApp(
                 ),
             )
             scope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    if (calibration) {
-                        deviceClient.startCalibrationCapture(activeConnection, idempotencyKey)
-                    } else {
-                        deviceClient.startCapture(activeConnection, idempotencyKey)
+                val result = try {
+                    withContext(Dispatchers.IO) {
+                        if (calibration) {
+                            deviceClient.startCalibrationCapture(activeConnection, idempotencyKey)
+                        } else {
+                            deviceClient.startCapture(activeConnection, idempotencyKey)
+                        }
                     }
+                } finally {
+                    captureCommandGate.release()
+                    if (isCurrentConnection(activeConnection, generation)) captureCommandRunning = false
                 }
                 if (!isCurrentConnection(activeConnection, generation)) return@launch
-                captureCommandRunning = false
                 captureCommandMessage = captureCommandMessageFor(result)
                 if (result is CaptureCommandResult.Accepted) {
                     val projected = CaptureProjection.applyHttpSnapshot(captureProjection, result.value)
@@ -521,7 +560,7 @@ fun EchoApp(
 
     val stopCapture: () -> Unit = {
         val activeConnection = bodyConnection
-        if (activeConnection != null && !captureCommandRunning) {
+        if (activeConnection != null && captureCommandGate.tryAcquire()) {
             val generation = connectionGeneration
             captureCommandRunning = true
             captureCommandMessage = CaptureCommandMessage.RunningStop
@@ -534,11 +573,15 @@ fun EchoApp(
                 ),
             )
             scope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    deviceClient.stopCapture(activeConnection, idempotencyKey)
+                val result = try {
+                    withContext(Dispatchers.IO) {
+                        deviceClient.stopCapture(activeConnection, idempotencyKey)
+                    }
+                } finally {
+                    captureCommandGate.release()
+                    if (isCurrentConnection(activeConnection, generation)) captureCommandRunning = false
                 }
                 if (!isCurrentConnection(activeConnection, generation)) return@launch
-                captureCommandRunning = false
                 captureCommandMessage = captureCommandMessageFor(result)
                 if (result is CaptureCommandResult.Accepted) {
                     val projected = CaptureProjection.applyHttpSnapshot(captureProjection, result.value)
@@ -553,7 +596,10 @@ fun EchoApp(
 
     val loadSessionManifest: (SessionSummary) -> Unit = { summary ->
         val activeConnection = bodyConnection
-        if (activeConnection != null && !sessionManifestLoading) {
+        if (activeConnection != null &&
+            activeConnection.descriptor.sessionDetailCapable &&
+            !sessionManifestLoading
+        ) {
             val generation = connectionGeneration
             sessionDetailGeneration += 1L
             val detailGeneration = sessionDetailGeneration
@@ -590,7 +636,10 @@ fun EchoApp(
 
     val loadUnsuccessfulOutcome: (SessionSummary) -> Unit = { summary ->
         val activeConnection = bodyConnection
-        if (activeConnection != null && unsuccessfulOutcomeLoadingId == null) {
+        if (activeConnection != null &&
+            activeConnection.descriptor.sessionDetailCapable &&
+            unsuccessfulOutcomeLoadingId == null
+        ) {
             val generation = connectionGeneration
             sessionOutcomeGeneration += 1L
             val outcomeGeneration = sessionOutcomeGeneration
@@ -640,13 +689,27 @@ fun EchoApp(
     }
 
     val loadMoreSessions: () -> Unit = {
-        bodyConnection?.let(sessionLedgerController::loadMore)
+        bodyConnection
+            ?.takeIf { it.descriptor.sessionListCapable }
+            ?.let(sessionLedgerController::loadMore)
+    }
+
+    val refreshSessions: () -> Unit = {
+        val activeConnection = bodyConnection
+        if (activeConnection?.descriptor?.sessionListCapable == true) {
+            val generation = connectionGeneration
+            scope.launch { refreshSessionLedger(activeConnection, generation) }
+        }
     }
 
     val downloadArtifact: (ArtifactDescriptor) -> Unit = { artifact ->
         val activeConnection = bodyConnection
         val activeManifest = sessionManifest
-        if (activeConnection != null && activeManifest != null && artifactDownloadingId == null) {
+        if (activeConnection != null &&
+            activeConnection.descriptor.artifactDownloadCapable &&
+            activeManifest != null &&
+            artifactDownloadingId == null
+        ) {
             val generation = connectionGeneration
             val cancelFlag = AtomicBoolean(false)
             artifactDownloadingId = artifact.artifactId
@@ -816,7 +879,11 @@ fun EchoApp(
             try {
                 while (isActive) {
                     val previewResult = withContext(Dispatchers.IO) {
-                        deviceClient.getPreviewJpeg(activeConnection, fps = 2)
+                        deviceClient.getPreviewJpeg(
+                            connection = activeConnection,
+                            fps = 2,
+                            cancellation = previewTransportCancellation,
+                        )
                     }
                     if (!isCurrentConnection(activeConnection, generation) ||
                         !appInForeground ||
@@ -891,6 +958,10 @@ fun EchoApp(
             captureStreamHealth = EventStreamHealth.Starting
             return@LaunchedEffect
         }
+        if (!activeConnection.descriptor.captureStatusCapable) {
+            captureStreamHealth = EventStreamHealth.Healthy
+            return@LaunchedEffect
+        }
         val generation = connectionGeneration
         val streamState = EventStreamReconnectState()
         fun markCaptureStreamUnavailable(): Long {
@@ -906,6 +977,7 @@ fun EchoApp(
                     lastAuthorityEpoch = captureProjection.lastAuthorityEpoch,
                     lastSourceRevision = captureProjection.lastSourceRevision,
                     maxEvents = 8,
+                    cancellation = captureStreamCancellation,
                 )
             }
             if (!isCurrentConnection(activeConnection, generation) || !appInForeground) return@LaunchedEffect
@@ -1035,6 +1107,7 @@ fun EchoApp(
                     EchoTab.VIEWFINDER -> ViewfinderScreen(
                         bodyConnection = bodyConnection,
                         captureStatus = captureStatus,
+                        captureStreamHealth = captureStreamHealth,
                         captureMessage = captureMessage,
                         captureCommandMessage = captureCommandMessage,
                         captureCommandRunning = captureCommandRunning,
@@ -1062,6 +1135,7 @@ fun EchoApp(
                         bodyConnection = bodyConnection,
                         sessionPage = sessionPage,
                         sessionMessage = sessionMessage,
+                        sessionRefreshing = sessionRefreshing,
                         sessionLoadingMore = sessionLoadingMore,
                         sessionManifest = sessionManifest,
                         sessionManifestMessage = sessionManifestMessage,
@@ -1074,6 +1148,7 @@ fun EchoApp(
                         artifactDownloadingId = artifactDownloadingId,
                         onCancelDownload = { cancelArtifactDownload?.invoke() },
                         onLoadUnsuccessfulOutcome = loadUnsuccessfulOutcome,
+                        onRefreshSessions = refreshSessions,
                         onLoadMoreSessions = loadMoreSessions,
                         onLoadManifest = loadSessionManifest,
                         onDownloadArtifact = downloadArtifact,
@@ -1178,9 +1253,10 @@ private fun TopStatus(bodyConnection: DeviceConnection?) {
 }
 
 @Composable
-private fun ViewfinderScreen(
+internal fun ViewfinderScreen(
     bodyConnection: DeviceConnection?,
     captureStatus: CaptureStatusSnapshot?,
+    captureStreamHealth: EventStreamHealth,
     captureMessage: CaptureStatusMessage?,
     captureCommandMessage: CaptureCommandMessage?,
     captureCommandRunning: Boolean,
@@ -1224,6 +1300,7 @@ private fun ViewfinderScreen(
         CaptureStatusPanel(
             bodyConnection = bodyConnection,
             captureStatus = captureStatus,
+            captureStreamHealth = captureStreamHealth,
             captureMessage = captureMessage,
             captureCommandMessage = captureCommandMessage,
         )
@@ -1282,15 +1359,8 @@ private fun PreviewFrame(
     onShowFocusPeakingChange: (Boolean) -> Unit,
     onShowImuOverlayChange: (Boolean) -> Unit,
 ) {
-    val canStart = bodyConnection != null &&
-        !captureCommandRunning &&
-        bodyConnection.descriptor.captureCapable &&
-        isCameraConnected(bodyConnection, captureStatus) &&
-        bodyConnection.descriptor.writable &&
-        captureStatus?.deviceState == "idle"
-    val canStop = bodyConnection != null &&
-        !captureCommandRunning &&
-        captureStatus?.deviceState == "recording"
+    val canStart = canStartCapture(bodyConnection, captureStatus, captureCommandRunning)
+    val canStop = canStopCapture(bodyConnection, captureStatus, captureCommandRunning)
     val showPreviewStatusOverlay = previewFrame == null || previewMessage != PreviewMessage.Live
     val liveImuQuality = captureStatus?.runtime?.liveImuQuality ?: bodyConnection?.descriptor?.runtime?.liveImuQuality
     val canShowImuOverlay = liveImuQuality != null
@@ -1521,6 +1591,7 @@ private fun ImuOverlay(
 private fun CaptureStatusPanel(
     bodyConnection: DeviceConnection?,
     captureStatus: CaptureStatusSnapshot?,
+    captureStreamHealth: EventStreamHealth,
     captureMessage: CaptureStatusMessage?,
     captureCommandMessage: CaptureCommandMessage?,
 ) {
@@ -1530,11 +1601,28 @@ private fun CaptureStatusPanel(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             SectionLabel(stringResource(R.string.capture_status_title))
+            if (bodyConnection?.descriptor?.captureStatusCapable == true) {
+                captureStreamStatusLabel(captureStreamHealth)?.let { label ->
+                    StatusChip(
+                        stringResource(label),
+                        if (captureStreamHealth == EventStreamHealth.Starting) {
+                            EchoColors.Live
+                        } else {
+                            EchoColors.Caution
+                        },
+                    )
+                }
+            }
             when {
                 captureCommandMessage != null -> CaptureCommandMessageBlock(captureCommandMessage)
                 bodyConnection == null -> InfoBlock(
                     title = stringResource(R.string.status_no_body),
                     body = stringResource(R.string.body_not_ready),
+                    accent = EchoColors.InkMuted,
+                )
+                !bodyConnection.descriptor.captureStatusCapable -> InfoBlock(
+                    title = stringResource(R.string.capture_status_title),
+                    body = stringResource(R.string.capture_status_capability_unavailable),
                     accent = EchoColors.InkMuted,
                 )
                 captureStatus != null -> {
@@ -2068,6 +2156,7 @@ private fun SessionsScreen(
     bodyConnection: DeviceConnection?,
     sessionPage: SessionListPage?,
     sessionMessage: SessionMessage?,
+    sessionRefreshing: Boolean,
     sessionLoadingMore: Boolean,
     sessionManifest: DeviceSessionManifest?,
     sessionManifestMessage: SessionManifestMessage?,
@@ -2080,6 +2169,7 @@ private fun SessionsScreen(
     artifactDownloadingId: String?,
     onCancelDownload: () -> Unit,
     onLoadUnsuccessfulOutcome: (SessionSummary) -> Unit,
+    onRefreshSessions: () -> Unit,
     onLoadMoreSessions: () -> Unit,
     onLoadManifest: (SessionSummary) -> Unit,
     onDownloadArtifact: (ArtifactDescriptor) -> Unit,
@@ -2098,17 +2188,45 @@ private fun SessionsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Panel(modifier = Modifier.fillMaxWidth()) {
-            InfoBlock(
-                title = stringResource(R.string.nav_sessions),
-                body = when {
-                    bodyConnection == null -> stringResource(R.string.sessions_empty)
-                    sessionPage == null && sessionMessage == null -> stringResource(R.string.sessions_loading)
-                    sessionPage?.items?.isEmpty() == true -> stringResource(R.string.sessions_empty_connected)
-                    else -> stringResource(R.string.sessions_no_fake)
-                },
-                accent = if (bodyConnection == null) EchoColors.InkMuted else EchoColors.Permit,
+            Column(
                 modifier = Modifier.padding(12.dp),
-            )
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                InfoBlock(
+                    title = stringResource(R.string.nav_sessions),
+                    body = when {
+                        bodyConnection == null -> stringResource(R.string.sessions_empty)
+                        !bodyConnection.descriptor.sessionListCapable -> {
+                            stringResource(R.string.sessions_capability_unavailable)
+                        }
+                        sessionPage == null && sessionMessage == null -> stringResource(R.string.sessions_loading)
+                        sessionPage?.items?.isEmpty() == true -> stringResource(R.string.sessions_empty_connected)
+                        else -> stringResource(R.string.sessions_no_fake)
+                    },
+                    accent = if (bodyConnection?.descriptor?.sessionListCapable == true) {
+                        EchoColors.Permit
+                    } else {
+                        EchoColors.InkMuted
+                    },
+                )
+                ActionButton(
+                    label = if (sessionRefreshing) {
+                        stringResource(R.string.sessions_refreshing)
+                    } else {
+                        stringResource(R.string.sessions_refresh)
+                    },
+                    enabled = bodyConnection?.descriptor?.sessionListCapable == true && !sessionRefreshing,
+                    disabledReason = when {
+                        bodyConnection == null -> stringResource(R.string.sessions_empty)
+                        !bodyConnection.descriptor.sessionListCapable -> {
+                            stringResource(R.string.sessions_capability_unavailable)
+                        }
+                        else -> stringResource(R.string.sessions_refreshing)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onRefreshSessions,
+                )
+            }
         }
         sessionMessage?.let { SessionMessageBlock(it) }
         sessionPage?.let { page ->
@@ -2144,6 +2262,8 @@ private fun SessionsScreen(
             visibleSessionItems.forEach { summary ->
                 SessionSummaryCard(
                     summary = summary,
+                    sessionDetailCapable = bodyConnection?.descriptor?.sessionDetailCapable == true,
+                    artifactDownloadCapable = bodyConnection?.descriptor?.artifactDownloadCapable == true,
                     isManifestVisible = sessionManifest?.sessionId == summary.sessionId,
                     isLoadingManifest = sessionManifestLoading,
                     unsuccessfulOutcome = unsuccessfulOutcome?.takeIf { unsuccessfulOutcomeSessionId == summary.sessionId },
@@ -4123,6 +4243,8 @@ private fun BodyScreen(
 @Composable
 private fun SessionSummaryCard(
     summary: SessionSummary,
+    sessionDetailCapable: Boolean,
+    artifactDownloadCapable: Boolean,
     isManifestVisible: Boolean,
     isLoadingManifest: Boolean,
     unsuccessfulOutcome: RetainedUnsuccessfulOutcome?,
@@ -4199,8 +4321,12 @@ private fun SessionSummaryCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ActionButton(
                     label = stringResource(R.string.load_artifacts),
-                    enabled = !isLoadingManifest,
-                    disabledReason = stringResource(R.string.session_manifest_loading),
+                    enabled = sessionDetailCapable && !isLoadingManifest,
+                    disabledReason = if (sessionDetailCapable) {
+                        stringResource(R.string.session_manifest_loading)
+                    } else {
+                        stringResource(R.string.sessions_capability_unavailable)
+                    },
                     onClick = onLoadManifest,
                     modifier = Modifier.weight(1f),
                 )
@@ -4210,8 +4336,12 @@ private fun SessionSummaryCard(
                     } else {
                         stringResource(R.string.unsuccessful_outcome_load)
                     },
-                    enabled = !isLoadingUnsuccessfulOutcome,
-                    disabledReason = stringResource(R.string.unsuccessful_outcome_loading),
+                    enabled = sessionDetailCapable && !isLoadingUnsuccessfulOutcome,
+                    disabledReason = if (sessionDetailCapable) {
+                        stringResource(R.string.unsuccessful_outcome_loading)
+                    } else {
+                        stringResource(R.string.sessions_capability_unavailable)
+                    },
                     onClick = onLoadUnsuccessfulOutcome,
                     modifier = Modifier.weight(1f),
                 )
@@ -4235,7 +4365,9 @@ private fun SessionSummaryCard(
                 manifest.artifacts.forEach { artifact ->
                     ArtifactRow(
                         artifact = artifact,
-                        canDownload = summary.verificationVerdict == "usable" && artifactDownloadingId == null,
+                        canDownload = artifactDownloadCapable &&
+                            summary.verificationVerdict == "usable" &&
+                            artifactDownloadingId == null,
                         isDownloading = artifactDownloadingId == artifact.artifactId,
                         onDownload = { onDownloadArtifact(artifact) },
                         onCancel = onCancelDownload,
@@ -5056,6 +5188,31 @@ private fun CaptureCommandMessageBlock(message: CaptureCommandMessage) {
     )
 }
 
+internal fun canStartCapture(
+    bodyConnection: DeviceConnection?,
+    captureStatus: CaptureStatusSnapshot?,
+    captureCommandRunning: Boolean,
+): Boolean {
+    return bodyConnection != null &&
+        !captureCommandRunning &&
+        bodyConnection.descriptor.captureCapable &&
+        bodyConnection.descriptor.captureStatusCapable &&
+        isCameraConnected(bodyConnection, captureStatus) &&
+        bodyConnection.descriptor.writable &&
+        captureStatus?.deviceState == "idle"
+}
+
+internal fun canStopCapture(
+    bodyConnection: DeviceConnection?,
+    captureStatus: CaptureStatusSnapshot?,
+    captureCommandRunning: Boolean,
+): Boolean {
+    return bodyConnection != null &&
+        !captureCommandRunning &&
+        bodyConnection.descriptor.captureStatusCapable &&
+        captureStatus?.deviceState == "recording"
+}
+
 @Composable
 private fun startDisabledReason(
     bodyConnection: DeviceConnection?,
@@ -5066,6 +5223,9 @@ private fun startDisabledReason(
         captureCommandRunning -> stringResource(R.string.capture_disabled_command_running)
         bodyConnection == null -> stringResource(R.string.capture_disabled_no_connection)
         !bodyConnection.descriptor.captureCapable -> stringResource(R.string.capture_disabled_not_capable)
+        !bodyConnection.descriptor.captureStatusCapable -> {
+            stringResource(R.string.capture_disabled_status_unavailable)
+        }
         !isCameraConnected(bodyConnection, captureStatus) -> stringResource(R.string.capture_disabled_camera)
         !bodyConnection.descriptor.writable -> stringResource(R.string.capture_disabled_storage)
         captureStatus?.deviceState != "idle" -> stringResource(R.string.capture_disabled_not_idle)
@@ -5082,6 +5242,9 @@ private fun stopDisabledReason(
     return when {
         captureCommandRunning -> stringResource(R.string.capture_disabled_command_running)
         bodyConnection == null -> stringResource(R.string.capture_disabled_no_connection)
+        !bodyConnection.descriptor.captureStatusCapable -> {
+            stringResource(R.string.capture_disabled_status_unavailable)
+        }
         captureStatus?.deviceState != "recording" -> stringResource(R.string.capture_disabled_not_recording)
         else -> stringResource(R.string.capture_disabled_not_recording)
     }
@@ -5794,7 +5957,16 @@ internal enum class EventStreamHealth {
     Degraded,
 }
 
-private sealed interface CaptureStatusMessage {
+@StringRes
+internal fun captureStreamStatusLabel(health: EventStreamHealth): Int? {
+    return when (health) {
+        EventStreamHealth.Starting -> R.string.capture_stream_connecting
+        EventStreamHealth.Degraded -> R.string.capture_stream_reconnecting
+        EventStreamHealth.Healthy -> null
+    }
+}
+
+internal sealed interface CaptureStatusMessage {
     data object AuthRequired : CaptureStatusMessage
     data object Forbidden : CaptureStatusMessage
     data class InvalidResponse(val detail: String) : CaptureStatusMessage
@@ -5802,7 +5974,7 @@ private sealed interface CaptureStatusMessage {
     data class HttpFailure(val statusCode: Int) : CaptureStatusMessage
 }
 
-private sealed interface CaptureCommandMessage {
+internal sealed interface CaptureCommandMessage {
     data object RunningStart : CaptureCommandMessage
     data object RunningCalibrationStart : CaptureCommandMessage
     data object RunningStop : CaptureCommandMessage
@@ -5819,7 +5991,7 @@ private sealed interface CaptureCommandMessage {
     data class HttpFailure(val statusCode: Int) : CaptureCommandMessage
 }
 
-private sealed interface PreviewMessage {
+internal sealed interface PreviewMessage {
     data object Waiting : PreviewMessage
     data object Live : PreviewMessage
     data object AuthRequired : PreviewMessage
@@ -6049,7 +6221,7 @@ private enum class EchoTab(@param:StringRes val label: Int) {
     NETWORK(R.string.nav_network),
 }
 
-private enum class PreviewMode {
+internal enum class PreviewMode {
     BOTH,
     LEFT,
     RIGHT,

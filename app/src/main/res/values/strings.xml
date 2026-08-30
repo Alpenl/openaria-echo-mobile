@@ -102,11 +102,15 @@
     <string name="capture_disabled_command_running">已有采集命令正在执行。</string>
     <string name="capture_disabled_no_connection">需要先验证并连接机身。</string>
     <string name="capture_disabled_not_capable">机身声明不支持采集。</string>
+    <string name="capture_disabled_status_unavailable">机身未声明权威采集状态功能。</string>
     <string name="capture_disabled_camera">相机未接入，不能开始采集。</string>
     <string name="capture_disabled_storage">存储不可写。</string>
     <string name="capture_disabled_not_idle">机身必须处于空闲状态。</string>
     <string name="capture_disabled_not_recording">只有录制中才能停止。</string>
     <string name="capture_status_title">采集状态</string>
+    <string name="capture_status_capability_unavailable">机身未声明采集状态功能；录制命令保持禁用。</string>
+    <string name="capture_stream_connecting">连接中</string>
+    <string name="capture_stream_reconnecting">重连中</string>
     <string name="capture_polling">正在读取权威采集状态。</string>
     <string name="capture_auth_required">采集状态需要访问令牌。</string>
     <string name="capture_forbidden">采集状态访问被拒绝。</string>
@@ -136,6 +140,9 @@
     <string name="tool_unwired">暂无 Device API v4 状态端点，当前只作状态展示。</string>
     <string name="sessions_empty">连接机身后会读取真实会话台账。</string>
     <string name="sessions_loading">正在读取真实会话台账。</string>
+    <string name="sessions_refresh">刷新会话</string>
+    <string name="sessions_refreshing">正在刷新会话</string>
+    <string name="sessions_capability_unavailable">机身未声明此会话功能。</string>
     <string name="sessions_empty_connected">机身当前没有 sealed 会话。</string>
     <string name="sessions_no_fake">不再显示静态会话、假制品或不可用的 Copy URL。</string>
     <string name="sessions_filter_title">会话筛选</string>

@@ -20,10 +20,10 @@ class ArtifactNotificationSourceTest {
         assertContains(notifier, "NotificationCompat.Builder")
         assertContains(notifier, "artifact_notification_channel_name")
         assertContains(notifier, "artifact_notification_failed")
-        assertContains(store, "notifier.running")
-        assertContains(store, "notifier.saved")
-        assertContains(store, "notifier.cancelled")
-        assertContains(store, "notifier.failed")
-        assertContains(store, "onBytesWritten = { bytes -> notifier.running(artifact, bytes) }")
+        assertContains(store, "notifier?.running")
+        assertContains(store, "notifier?.saved")
+        assertContains(store, "notifier?.cancelled")
+        assertContains(store, "notifier?.failed")
+        assertContains(store, "onBytesWritten = { bytes -> notifier?.running(artifact, bytes) }")
     }
 }

@@ -106,6 +106,36 @@ class DeviceHttpClientTest {
     }
 
     @Test
+    fun `cancels a blocked capture SSE request without waiting for read timeout`() {
+        val requestArrived = CountDownLatch(1)
+        val releaseHandler = CountDownLatch(1)
+        val origin = startServer { exchange ->
+            requestArrived.countDown()
+            releaseHandler.await(5, TimeUnit.SECONDS)
+            runCatching { exchange.respondBytes(200, "text/event-stream", ByteArray(0)) }
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        val cancellation = DeviceAdmissionCancellation()
+
+        try {
+            val future = executor.submit<CaptureEventsResult> {
+                DeviceHttpClient().readCaptureEvents(
+                    connection = connection(origin),
+                    cancellation = cancellation,
+                )
+            }
+            assertTrue(requestArrived.await(2, TimeUnit.SECONDS), "capture SSE request did not reach the server")
+
+            cancellation.cancel()
+
+            assertIs<CaptureEventsResult.NetworkFailure>(future.get(2, TimeUnit.SECONDS))
+        } finally {
+            releaseHandler.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
     fun `marks capture SSE source revision gap for HTTP reconciliation`() {
         val origin = startServer { exchange ->
             exchange.respondBytes(
@@ -432,6 +462,42 @@ class DeviceHttpClientTest {
         assertEquals("image/jpeg", accept)
         assertEquals("no-store", cacheControl)
         assertContentEquals(frame, preview.bytes)
+    }
+
+    @Test
+    fun `cancels a slow preview request when its view lifecycle ends`() {
+        val requestArrived = CountDownLatch(1)
+        val releaseHandler = CountDownLatch(1)
+        val origin = startServer { exchange ->
+            requestArrived.countDown()
+            releaseHandler.await(5, TimeUnit.SECONDS)
+            runCatching {
+                exchange.respondBytes(
+                    200,
+                    "image/jpeg",
+                    byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte()),
+                )
+            }
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        val cancellation = DeviceAdmissionCancellation()
+
+        try {
+            val future = executor.submit<PreviewResult> {
+                DeviceHttpClient().getPreviewJpeg(
+                    connection = connection(origin),
+                    cancellation = cancellation,
+                )
+            }
+            assertTrue(requestArrived.await(2, TimeUnit.SECONDS), "preview request did not reach the server")
+
+            cancellation.cancel()
+
+            assertIs<PreviewResult.NetworkFailure>(future.get(2, TimeUnit.SECONDS))
+        } finally {
+            releaseHandler.countDown()
+            executor.shutdownNow()
+        }
     }
 
     @Test

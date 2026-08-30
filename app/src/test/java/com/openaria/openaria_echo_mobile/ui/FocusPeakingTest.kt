@@ -91,4 +91,20 @@ class FocusPeakingTest {
         gate.invalidatePending(secondGeneration)
         assertFalse(gate.shouldPublish(current))
     }
+
+    @Test
+    fun `slow preview response cannot publish after background or device switch`() {
+        val gate = PreviewFrameGate()
+        val foregroundGeneration = gate.beginGeneration()
+        val slowForegroundFrame = requireNotNull(gate.submit(foregroundGeneration))
+
+        val resumedGeneration = gate.beginGeneration()
+
+        assertFalse(gate.shouldPublish(slowForegroundFrame), "backgrounding must invalidate an in-flight frame")
+        val oldDeviceFrame = requireNotNull(gate.submit(resumedGeneration))
+
+        gate.beginGeneration()
+
+        assertFalse(gate.shouldPublish(oldDeviceFrame), "switching devices must reject the previous response")
+    }
 }

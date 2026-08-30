@@ -240,8 +240,32 @@ class UiShellSourceTest {
         assertContains(uiSource, "selectedTab != EchoTab.VIEWFINDER")
         assertContains(uiSource, "ConnectionRequestPolicy.PREVIEW_INTERVAL_MS")
         assertContains(uiSource, "ConnectionRequestPolicy.canApplyResponse")
+        assertContains(uiSource, "DisposableEffect(previewTransportCancellation)")
+        assertContains(uiSource, "onDispose { previewTransportCancellation.cancel() }")
+        assertContains(uiSource, "onDispose { captureStreamCancellation.cancel() }")
+        assertContains(uiSource, "cancellation = previewTransportCancellation")
+        assertContains(uiSource, "cancellation = captureStreamCancellation")
         assertFalse(uiSource.contains("foregroundResumeTick"))
         assertFalse(uiSource.contains("delay(5_000L)"))
+    }
+
+    @Test
+    fun `capture commands share a single flight gate across start and stop`() {
+        val uiSource = echoAppSource()
+        val gateSource = File("src/main/java/com/openaria/openaria_echo_mobile/ui/CaptureCommandGate.kt").readText()
+        val startCaptureBlock = uiSource
+            .substringAfter("fun startCaptureWithMode")
+            .substringBefore("val startCapture:")
+        val stopCaptureBlock = uiSource
+            .substringAfter("val stopCapture:")
+            .substringBefore("val loadSessionManifest:")
+
+        assertContains(uiSource, "remember(connectionGeneration) { CaptureCommandGate() }")
+        assertContains(startCaptureBlock, "captureCommandGate.tryAcquire()")
+        assertContains(startCaptureBlock, "captureCommandGate.release()")
+        assertContains(stopCaptureBlock, "captureCommandGate.tryAcquire()")
+        assertContains(stopCaptureBlock, "captureCommandGate.release()")
+        assertContains(gateSource, "compareAndSet(false, true)")
     }
 
     @Test
@@ -365,6 +389,9 @@ class UiShellSourceTest {
         assertContains(uiSource, "SessionLedgerController<DeviceConnection, DeviceAdmissionCancellation>")
         assertContains(uiSource, "SessionFilterIntent.InheritCurrentFilter")
         assertContains(uiSource, "sessionLedgerController.refresh")
+        assertContains(uiSource, "val refreshSessions: () -> Unit")
+        assertContains(uiSource, "onRefreshSessions = refreshSessions")
+        assertContains(uiSource, "R.string.sessions_refresh")
         assertContains(uiSource, "sessionLedgerController::loadMore")
         assertContains(uiSource, "sessionLedgerController.cancelInFlight()")
         assertContains(uiSource, "sessionLedgerController.cancelLoadMore()")
@@ -416,10 +443,9 @@ class UiShellSourceTest {
             .substringAfter("val stopCapture:")
             .substringBefore("val loadSessionManifest:")
 
-        assertContains(
-            refreshEntryBlock,
-            "if (!appInForeground || !isCurrentConnection(activeConnection, generation)) return",
-        )
+        assertContains(refreshEntryBlock, "!activeConnection.descriptor.sessionListCapable")
+        assertContains(refreshEntryBlock, "!appInForeground")
+        assertContains(refreshEntryBlock, "!isCurrentConnection(activeConnection, generation)")
         assertContains(startCaptureBlock, "refreshSessionLedger(activeConnection, generation)")
         assertContains(stopCaptureBlock, "refreshSessionLedger(activeConnection, generation)")
         assertFalse(startCaptureBlock.contains("deviceClient.listSessions"))

@@ -229,25 +229,53 @@ class DeviceApiValidatorsTest {
     }
 
     @Test
-    fun `rejects legacy five-key capabilities without fallback`() {
+    fun `accepts legacy five-key capabilities and defaults missing optional keys off`() {
         val result = DeviceApiValidators.validateDeviceDescriptor(
             fixtureMap("device-legacy-five-capabilities.json", "invalid"),
         )
 
-        assertEquals(
-            "missing required key session_list",
-            assertIs<Validation.Invalid>(result).message,
-        )
+        val descriptor = assertIs<Validation.Valid<DeviceDescriptor>>(result).value
+        assertEquals(true, descriptor.captureCapable)
+        assertEquals(true, descriptor.previewCapable)
+        assertEquals(true, descriptor.rangeDownloadCapable)
+        assertEquals(false, descriptor.sessionListCapable)
+        assertEquals(false, descriptor.sessionDetailCapable)
+        assertEquals(false, descriptor.artifactDownloadCapable)
+        assertEquals(false, descriptor.captureStatusCapable)
+        assertEquals(false, descriptor.sessionDeletionCapable)
     }
 
     @Test
-    fun `rejects missing wrong-type and unknown capability fields`() {
+    fun `missing capability fields safely default to disabled`() {
+        val descriptor = validDeviceDescriptor()
+
+        val result = DeviceApiValidators.validateDeviceDescriptor(
+            descriptor + ("capabilities" to emptyMap<String, Any?>()),
+        )
+
+        val capabilities = assertIs<Validation.Valid<DeviceDescriptor>>(result).value
+        assertEquals(false, capabilities.captureCapable)
+        assertEquals(false, capabilities.previewCapable)
+        assertEquals(false, capabilities.rangeDownloadCapable)
+        assertEquals(false, capabilities.networkMutationCapable)
+        assertEquals(false, capabilities.sessionListCapable)
+        assertEquals(false, capabilities.sessionDetailCapable)
+        assertEquals(false, capabilities.artifactDownloadCapable)
+        assertEquals(false, capabilities.captureStatusCapable)
+        assertEquals(false, capabilities.sessionDeletionCapable)
+        assertEquals(false, capabilities.calibrationCapture.supported)
+        assertEquals(false, capabilities.calibrationCapture.enabled)
+    }
+
+    @Test
+    fun `rejects wrong-type and unknown capability fields`() {
         val descriptor = validDeviceDescriptor()
         @Suppress("UNCHECKED_CAST")
         val capabilities = descriptor.getValue("capabilities") as Map<String, Any?>
         val cases = listOf(
-            capabilities - "capture_status" to "missing required key capture_status",
             capabilities + ("session_list" to "true") to "capabilities.session_list must be boolean",
+            capabilities + ("calibration_capture" to false) to
+                "capabilities.calibration_capture must be an object",
             capabilities + ("future_capability" to true) to "unknown key future_capability",
         )
 
@@ -261,11 +289,11 @@ class DeviceApiValidatorsTest {
     }
 
     @Test
-    fun `rejects capability constants that contradict Device API v4`() {
+    fun `accepts explicit disabled optional capabilities`() {
         val descriptor = validDeviceDescriptor()
         @Suppress("UNCHECKED_CAST")
         val capabilities = descriptor.getValue("capabilities") as Map<String, Any?>
-        val contradictions = mapOf(
+        val disabled = mapOf(
             "range_download" to false,
             "session_list" to false,
             "session_detail" to false,
@@ -274,18 +302,17 @@ class DeviceApiValidatorsTest {
             "session_deletion" to true,
         )
 
-        contradictions.forEach { (name, value) ->
-            val result = DeviceApiValidators.validateDeviceDescriptor(
-                descriptor + ("capabilities" to (capabilities + (name to value))),
-            )
-            val expected = if (name == "session_deletion") {
-                "capabilities.session_deletion must be false"
-            } else {
-                "capabilities.$name must be true"
-            }
+        val result = DeviceApiValidators.validateDeviceDescriptor(
+            descriptor + ("capabilities" to (capabilities + disabled)),
+        )
 
-            assertEquals(expected, assertIs<Validation.Invalid>(result).message)
-        }
+        val parsed = assertIs<Validation.Valid<DeviceDescriptor>>(result).value
+        assertEquals(false, parsed.rangeDownloadCapable)
+        assertEquals(false, parsed.sessionListCapable)
+        assertEquals(false, parsed.sessionDetailCapable)
+        assertEquals(false, parsed.artifactDownloadCapable)
+        assertEquals(false, parsed.captureStatusCapable)
+        assertEquals(true, parsed.sessionDeletionCapable)
     }
 
     @Test

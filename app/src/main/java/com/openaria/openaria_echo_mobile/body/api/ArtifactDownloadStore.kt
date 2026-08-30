@@ -7,9 +7,23 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
 
-class ArtifactDownloadStore(context: Context) {
-    private val appContext = context.applicationContext
-    private val notifier = ArtifactDownloadNotifier(appContext)
+class ArtifactDownloadStore private constructor(
+    private val directoryProvider: () -> File,
+    private val notifier: ArtifactDownloadNotifier?,
+) {
+    constructor(context: Context) : this(
+        directoryProvider = {
+            val appContext = context.applicationContext
+            appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                ?: File(appContext.filesDir, "downloads")
+        },
+        notifier = ArtifactDownloadNotifier(context.applicationContext),
+    )
+
+    internal constructor(directory: File) : this(
+        directoryProvider = { directory },
+        notifier = null,
+    )
 
     fun download(
         client: DeviceHttpClient,
@@ -18,8 +32,7 @@ class ArtifactDownloadStore(context: Context) {
         artifact: ArtifactDescriptor,
         shouldCancel: () -> Boolean = { false },
     ): ArtifactFileResult {
-        val directory = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-            ?: File(appContext.filesDir, "downloads")
+        val directory = directoryProvider()
         if (!directory.exists() && !directory.mkdirs()) {
             return ArtifactFileResult.Failed("could not create download directory")
         }
@@ -34,29 +47,29 @@ class ArtifactDownloadStore(context: Context) {
             ),
         )
         if (preparation is ArtifactPreparationPlan.AlreadySaved) {
-            notifier.saved(artifact, target.absolutePath)
+            notifier?.saved(artifact, target.absolutePath)
             return ArtifactFileResult.Saved(target.absolutePath, artifact.bytes, artifact.mediaType)
         }
         val downloadPlan = preparation as ArtifactPreparationPlan.Download
 
         if (downloadPlan.deletePartialBeforeDownload && partial.exists() && !partial.delete()) {
-            notifier.failed(artifact)
+            notifier?.failed(artifact)
             return ArtifactFileResult.Failed("could not remove stale partial download")
         }
         if (downloadPlan.deleteTargetBeforeDownload && target.exists() && !target.delete()) {
-            notifier.failed(artifact)
+            notifier?.failed(artifact)
             return ArtifactFileResult.Failed("could not replace existing artifact")
         }
 
         when (val head = client.headSessionArtifact(connection, sessionId, artifact)) {
             ArtifactHeadResult.Verified -> Unit
             else -> {
-                notifier.failed(artifact)
+                notifier?.failed(artifact)
                 return ArtifactFileResult.DownloadRejected(ArtifactTransfer.headToDownloadResult(head))
             }
         }
 
-        notifier.running(artifact, 0L)
+        notifier?.running(artifact, 0L)
         val result = try {
             FileOutputStream(partial, false).use { output ->
                 client.downloadSessionArtifact(
@@ -66,7 +79,7 @@ class ArtifactDownloadStore(context: Context) {
                     output = output,
                     resumeFromBytes = 0L,
                     shouldCancel = shouldCancel,
-                    onBytesWritten = { bytes -> notifier.running(artifact, bytes) },
+                    onBytesWritten = { bytes -> notifier?.running(artifact, bytes) },
                 )
             }
         } catch (exception: Exception) {
@@ -84,7 +97,7 @@ class ArtifactDownloadStore(context: Context) {
             ArtifactCompletionPlan.Publish -> {
                 if (target.exists() && !target.delete()) {
                     val partialRemoved = partial.discard()
-                    notifier.failed(artifact)
+                    notifier?.failed(artifact)
                     return ArtifactFileResult.Failed(
                         if (partialRemoved) {
                             "could not replace existing artifact"
@@ -95,7 +108,7 @@ class ArtifactDownloadStore(context: Context) {
                 }
                 if (!partial.renameTo(target)) {
                     val partialRemoved = partial.discard()
-                    notifier.failed(artifact)
+                    notifier?.failed(artifact)
                     return ArtifactFileResult.Failed(
                         if (partialRemoved) {
                             "could not finalize artifact"
@@ -104,18 +117,18 @@ class ArtifactDownloadStore(context: Context) {
                         },
                     )
                 }
-                notifier.saved(artifact, target.absolutePath)
+                notifier?.saved(artifact, target.absolutePath)
                 ArtifactFileResult.Saved(target.absolutePath, artifact.bytes, artifact.mediaType)
             }
             is ArtifactCompletionPlan.DeletePartialAndReject -> {
                 if (!partial.discard()) {
-                    notifier.failed(artifact)
+                    notifier?.failed(artifact)
                     ArtifactFileResult.Failed("could not remove partial download")
                 } else {
                     if (completion.reason is ArtifactDownloadResult.Cancelled) {
-                        notifier.cancelled(artifact)
+                        notifier?.cancelled(artifact)
                     } else {
-                        notifier.failed(artifact)
+                        notifier?.failed(artifact)
                     }
                     ArtifactFileResult.DownloadRejected(completion.reason)
                 }

@@ -23,7 +23,7 @@ data class DeviceAdmissionCandidate(
 
 data class VerifiedDeviceAdmission(
     val connection: DeviceConnection,
-    val initialCaptureStatus: CaptureStatusSnapshot,
+    val initialCaptureStatus: CaptureStatusSnapshot?,
 )
 
 class DeviceAdmissionClient internal constructor(
@@ -47,10 +47,7 @@ class DeviceAdmissionClient internal constructor(
         loadCaptureStatus = { connection, _ -> loadCaptureStatus(connection) },
     )
 
-    /**
-     * Admits a candidate only after both authoritative v4 resources succeed.
-     * The caller-owned fence is checked before, between, and after network calls.
-     */
+    /** The caller-owned fence is checked before, between, and after network calls. */
     fun admit(
         candidates: List<DeviceAdmissionCandidate>,
         isAttemptCurrent: () -> Boolean,
@@ -92,6 +89,15 @@ class DeviceAdmissionClient internal constructor(
                     }
                     if (!isAttemptCurrent() || cancellation.isCancelled()) {
                         return DeviceAdmissionResult.Cancelled
+                    }
+
+                    if (!probe.connection.descriptor.captureStatusCapable) {
+                        return DeviceAdmissionResult.Verified(
+                            VerifiedDeviceAdmission(
+                                connection = probe.connection,
+                                initialCaptureStatus = null,
+                            ),
+                        )
                     }
 
                     val status = loadCaptureStatus(probe.connection, cancellation)
@@ -145,7 +151,7 @@ sealed interface DeviceAdmissionResult {
     ) : DeviceAdmissionResult, DeviceHttpFailureResult
 }
 
-/** Owns the one blocking HTTP request that may be active during an admission attempt. */
+/** Owns the one blocking Device API request that may be active for a caller. */
 class DeviceAdmissionCancellation {
     private val cancelled = AtomicBoolean(false)
     private val activeConnection = AtomicReference<HttpURLConnection?>(null)
@@ -156,7 +162,7 @@ class DeviceAdmissionCancellation {
             return false
         }
         check(activeConnection.compareAndSet(null, connection)) {
-            "an admission attempt cannot run concurrent HTTP requests"
+            "a cancellation token cannot own concurrent HTTP requests"
         }
         if (cancelled.get() && activeConnection.compareAndSet(connection, null)) {
             connection.disconnect()

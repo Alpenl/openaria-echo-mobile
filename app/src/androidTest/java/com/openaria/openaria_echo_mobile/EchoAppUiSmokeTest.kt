@@ -18,7 +18,10 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -27,7 +30,17 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.platform.app.InstrumentationRegistry
+import com.openaria.openaria_echo_mobile.body.api.CameraConnectionStatus
+import com.openaria.openaria_echo_mobile.body.api.CaptureStatusSnapshot
+import com.openaria.openaria_echo_mobile.body.api.DeviceConnection
+import com.openaria.openaria_echo_mobile.body.api.DeviceDescriptor
+import com.openaria.openaria_echo_mobile.body.api.DeviceRuntime
+import com.openaria.openaria_echo_mobile.security.EndpointPolicy
 import com.openaria.openaria_echo_mobile.ui.EchoApp
+import com.openaria.openaria_echo_mobile.ui.EventStreamHealth
+import com.openaria.openaria_echo_mobile.ui.PreviewMessage
+import com.openaria.openaria_echo_mobile.ui.PreviewMode
+import com.openaria.openaria_echo_mobile.ui.ViewfinderScreen
 import com.openaria.openaria_echo_mobile.ui.theme.EchoTheme
 import java.util.Locale
 import kotlin.math.abs
@@ -136,6 +149,59 @@ class EchoAppUiSmokeTest {
         )
     }
 
+    @Test
+    fun connectedViewfinderKeepsCaptureActionsReachableOn360dpLandscapeAndLargeFont() {
+        val cases = listOf(
+            ConnectedRenderCase(widthDp = 360, heightDp = 740, fontScale = 1.0f),
+            ConnectedRenderCase(widthDp = 600, heightDp = 360, fontScale = 1.0f),
+            ConnectedRenderCase(widthDp = 393, heightDp = 780, fontScale = 1.5f),
+        )
+        val renderCase = mutableStateOf(cases.first())
+        renderConnectedViewfinder(renderCase)
+
+        cases.forEach { case ->
+            compose.runOnIdle { renderCase.value = case }
+            compose.waitForIdle()
+
+            val root = Rect(0f, 0f, case.widthDp.toFloat(), case.heightDp.toFloat())
+            listOf("开始录制", "停止").forEach { label ->
+                val action = compose
+                    .onNodeWithContentDescription(label, useUnmergedTree = true)
+                    .assertIsDisplayed()
+                    .assertWidthIsAtLeast(48.dp)
+                    .assertHeightIsAtLeast(48.dp)
+                    .fetchSemanticsNode()
+                assertRectInside("$label at $case", action.boundsInRoot, root)
+            }
+            compose
+                .onNodeWithContentDescription("开始录制", useUnmergedTree = true)
+                .assertIsEnabled()
+        }
+    }
+
+    @Test
+    fun connectedCaptureStreamShowsStartingThenReconnectWhileSnapshotCommandsStayEnabled() {
+        val renderCase = mutableStateOf(
+            ConnectedRenderCase(
+                widthDp = 360,
+                heightDp = 740,
+                fontScale = 1.0f,
+                streamHealth = EventStreamHealth.Starting,
+            ),
+        )
+        renderConnectedViewfinder(renderCase)
+
+        compose.onNodeWithText("连接中").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithContentDescription("开始录制", useUnmergedTree = true).assertIsEnabled()
+
+        compose.runOnIdle {
+            renderCase.value = renderCase.value.copy(streamHealth = EventStreamHealth.Degraded)
+        }
+
+        compose.onNodeWithText("重连中").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithContentDescription("开始录制", useUnmergedTree = true).assertIsEnabled()
+    }
+
     private fun renderEchoApp(renderCaseState: MutableState<RenderCase>) {
         compose.setContent {
             val renderCase = renderCaseState.value
@@ -161,6 +227,56 @@ class EchoAppUiSmokeTest {
                 heightDp = heightDp,
                 fontScale = fontScale,
             )
+        }
+    }
+
+    private fun renderConnectedViewfinder(renderCaseState: MutableState<ConnectedRenderCase>) {
+        compose.setContent {
+            val renderCase = renderCaseState.value
+            val localizedContext = InstrumentationRegistry
+                .getInstrumentation()
+                .targetContext
+                .localized("zh-CN")
+            val configuration = Configuration(localizedContext.resources.configuration).apply {
+                screenWidthDp = renderCase.widthDp
+                screenHeightDp = renderCase.heightDp
+                orientation = if (renderCase.widthDp > renderCase.heightDp) {
+                    Configuration.ORIENTATION_LANDSCAPE
+                } else {
+                    Configuration.ORIENTATION_PORTRAIT
+                }
+            }
+            CompositionLocalProvider(
+                LocalContext provides localizedContext,
+                LocalConfiguration provides configuration,
+                LocalDensity provides Density(density = 1.0f, fontScale = renderCase.fontScale),
+            ) {
+                ResponsiveHost(renderCase.widthDp, renderCase.heightDp) {
+                    EchoTheme {
+                        ViewfinderScreen(
+                            bodyConnection = connectedBody(),
+                            captureStatus = idleCaptureStatus(),
+                            captureStreamHealth = renderCase.streamHealth,
+                            captureMessage = null,
+                            captureCommandMessage = null,
+                            captureCommandRunning = false,
+                            previewFrame = null,
+                            previewMessage = PreviewMessage.Waiting,
+                            previewMode = PreviewMode.BOTH,
+                            showGrid = true,
+                            showFocusPeaking = false,
+                            showImuOverlay = false,
+                            onStartCapture = {},
+                            onStopCapture = {},
+                            onPreviewModeChange = {},
+                            onShowGridChange = {},
+                            onShowFocusPeakingChange = {},
+                            onShowImuOverlayChange = {},
+                            onConnected = {},
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -274,12 +390,77 @@ class EchoAppUiSmokeTest {
         )
     }
 
+    private fun assertRectInside(name: String, child: Rect, parent: Rect) {
+        assertTrue(
+            "$name must remain inside the responsive host: child=$child parent=$parent",
+            child.left >= parent.left && child.top >= parent.top &&
+                child.right <= parent.right && child.bottom <= parent.bottom,
+        )
+    }
+
+    private fun connectedBody(): DeviceConnection {
+        val target = (EndpointPolicy.validate("http://127.0.0.1:8080") as EndpointPolicy.Decision.Allowed).target
+        return DeviceConnection(
+            target = target,
+            descriptor = DeviceDescriptor(
+                deviceId = "56005c52-31f1-4dac-91cd-d8eafd737d1c",
+                deviceLabel = "YLX-00ABCDEF",
+                hardwareFingerprint = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                packageVersion = "0.1.8",
+                commit = "77f24f3777777777777777777777777777777777",
+                buildId = "ui-test",
+                securityProfile = "customer",
+                captureCapable = true,
+                previewCapable = true,
+                rangeDownloadCapable = true,
+                networkMutationCapable = false,
+                sessionListCapable = true,
+                sessionDetailCapable = true,
+                artifactDownloadCapable = true,
+                captureStatusCapable = true,
+                sessionDeletionCapable = false,
+                volumeId = "56005c52-31f1-4dac-91cd-d8eafd737d1c",
+                totalBytes = 1_024L,
+                availableBytes = 512L,
+                writable = true,
+                runtime = connectedRuntime(),
+            ),
+            bearerToken = null,
+        )
+    }
+
+    private fun idleCaptureStatus(): CaptureStatusSnapshot {
+        return CaptureStatusSnapshot(
+            authorityEpoch = "e989c6e5-14cc-4faa-9715-5abdb6b0355d",
+            sourceRevision = 7L,
+            deviceState = "idle",
+            hasActiveRecording = false,
+            runtime = connectedRuntime(),
+        )
+    }
+
+    private fun connectedRuntime(): DeviceRuntime {
+        return DeviceRuntime(
+            observedAt = "2026-08-31T10:00:00Z",
+            connectionMethod = "wifi_client",
+            temperatureCelsius = 45.0,
+            camera = CameraConnectionStatus("connected"),
+        )
+    }
+
     private data class RenderCase(
         val localeTag: String,
         val widthDp: Int,
         val heightDp: Int,
         val fontScale: Float,
         val connectionTitle: String,
+    )
+
+    private data class ConnectedRenderCase(
+        val widthDp: Int,
+        val heightDp: Int,
+        val fontScale: Float,
+        val streamHealth: EventStreamHealth = EventStreamHealth.Healthy,
     )
 
     private companion object {

@@ -614,6 +614,22 @@ class DeviceHttpClientTest {
     }
 
     @Test
+    fun `session catalog can outlive the ordinary JSON request timeout`() {
+        val origin = startServer { exchange ->
+            Thread.sleep(150)
+            exchange.respondJson(200, sessionListJson())
+        }
+        val client = DeviceHttpClient(
+            jsonReadTimeoutMillis = 50,
+            sessionCatalogReadTimeoutMillis = 500,
+        )
+
+        val result = client.listSessions(connection(origin), limit = 12)
+
+        assertIs<SessionListResult.Page>(result)
+    }
+
+    @Test
     fun `lists sessions with opaque cursor and take filter`() {
         var query: String? = null
         val origin = startServer { exchange ->

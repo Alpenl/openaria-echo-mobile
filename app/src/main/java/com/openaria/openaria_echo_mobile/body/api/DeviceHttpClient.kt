@@ -7,7 +7,10 @@ import java.net.SocketTimeoutException
 import java.net.URLEncoder
 import java.security.MessageDigest
 
-class DeviceHttpClient {
+class DeviceHttpClient internal constructor(
+    private val jsonReadTimeoutMillis: Int = 15_000,
+    private val sessionCatalogReadTimeoutMillis: Int = 30_000,
+) {
     fun getCaptureStatus(connection: DeviceConnection): CaptureStatusResult {
         return getCaptureStatusWithCancellation(connection, cancellation = null)
     }
@@ -237,7 +240,10 @@ class DeviceHttpClient {
             )
             val path = "/api/v4/sessions?$query"
             (connection.target.origin.resolve(path).toURL().openConnection() as HttpURLConnection)
-                .applyJsonRequest(connection)
+                .applyJsonRequest(
+                    connection = connection,
+                    readTimeoutMillis = sessionCatalogReadTimeoutMillis,
+                )
         } catch (exception: IOException) {
             return SessionListResult.NetworkFailure(exception.message ?: exception.javaClass.simpleName)
         }
@@ -1040,10 +1046,13 @@ class DeviceHttpClient {
         }
     }
 
-    private fun HttpURLConnection.applyJsonRequest(connection: DeviceConnection): HttpURLConnection {
+    private fun HttpURLConnection.applyJsonRequest(
+        connection: DeviceConnection,
+        readTimeoutMillis: Int = jsonReadTimeoutMillis,
+    ): HttpURLConnection {
         lockToDeviceOrigin()
         connectTimeout = 5_000
-        readTimeout = 8_000
+        readTimeout = readTimeoutMillis
         requestMethod = "GET"
         setRequestProperty("Accept", "application/json")
         setBearerToken(connection)
@@ -1056,7 +1065,7 @@ class DeviceHttpClient {
     ): HttpURLConnection {
         lockToDeviceOrigin()
         connectTimeout = 5_000
-        readTimeout = 8_000
+        readTimeout = jsonReadTimeoutMillis
         requestMethod = "POST"
         doOutput = true
         setRequestProperty("Accept", "application/json")
@@ -1102,7 +1111,7 @@ class DeviceHttpClient {
     ): HttpURLConnection {
         lockToDeviceOrigin()
         connectTimeout = 5_000
-        readTimeout = 8_000
+        readTimeout = jsonReadTimeoutMillis
         requestMethod = "POST"
         doOutput = true
         setRequestProperty("Accept", "application/json")
@@ -1132,7 +1141,7 @@ class DeviceHttpClient {
     private fun HttpURLConnection.applyArtifactHeadRequest(connection: DeviceConnection): HttpURLConnection {
         lockToDeviceOrigin()
         connectTimeout = 5_000
-        readTimeout = 8_000
+        readTimeout = jsonReadTimeoutMillis
         requestMethod = "HEAD"
         setRequestProperty("Accept", "*/*")
         setBearerToken(connection)

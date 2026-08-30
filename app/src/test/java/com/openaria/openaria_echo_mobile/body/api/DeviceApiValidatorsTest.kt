@@ -129,26 +129,22 @@ class DeviceApiValidatorsTest {
     }
 
     @Test
-    fun `lab profile accepts read-only network capability and rejects mutation`() {
+    fun `lab profile accepts either advertised network mutation capability`() {
         val descriptor = validDeviceDescriptor()
         @Suppress("UNCHECKED_CAST")
         val capabilities = descriptor.getValue("capabilities") as Map<String, Any?>
-        val labDescriptor = descriptor +
-            ("security_profile" to "lab") +
-            ("capabilities" to (capabilities + ("network_mutation" to false)))
 
-        val valid = DeviceApiValidators.validateDeviceDescriptor(labDescriptor)
-        val invalid = DeviceApiValidators.validateDeviceDescriptor(
-            labDescriptor + ("capabilities" to (capabilities + ("network_mutation" to true))),
-        )
+        listOf(false, true).forEach { networkMutation ->
+            val result = DeviceApiValidators.validateDeviceDescriptor(
+                descriptor +
+                    ("security_profile" to "lab") +
+                    ("capabilities" to (capabilities + ("network_mutation" to networkMutation))),
+            )
 
-        val projected = assertIs<Validation.Valid<DeviceDescriptor>>(valid).value
-        assertEquals("lab", projected.securityProfile)
-        assertEquals(false, projected.networkMutationCapable)
-        assertEquals(
-            "capabilities.network_mutation must be false for lab security_profile",
-            assertIs<Validation.Invalid>(invalid).message,
-        )
+            val projected = assertIs<Validation.Valid<DeviceDescriptor>>(result).value
+            assertEquals("lab", projected.securityProfile)
+            assertEquals(networkMutation, projected.networkMutationCapable)
+        }
     }
 
     @Test

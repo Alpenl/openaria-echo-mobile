@@ -54,8 +54,8 @@ android {
         applicationId = "com.openaria.openaria_echo_mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "0.1.8"
+        versionCode = 12
+        versionName = "0.1.9"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

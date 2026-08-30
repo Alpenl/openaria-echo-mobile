@@ -91,10 +91,6 @@ object DeviceApiValidators {
         if (!artifactDownload) return "capabilities.artifact_download must be true".invalid()
         if (!captureStatus) return "capabilities.capture_status must be true".invalid()
         if (sessionDeletion) return "capabilities.session_deletion must be false".invalid()
-        if (securityProfile == "lab" && networkMutation) {
-            return "capabilities.network_mutation must be false for lab security_profile".invalid()
-        }
-
         val storage = value.objectAt("storage") ?: return "storage must be an object".invalid()
         storage.exactKeys("volume_id", "total_bytes", "available_bytes", "writable")
             ?.let { return it.invalid() }

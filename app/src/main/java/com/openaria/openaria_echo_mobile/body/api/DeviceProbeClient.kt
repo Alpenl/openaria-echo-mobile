@@ -62,7 +62,7 @@ class DeviceProbeClient {
         val connection = try {
             (url.openConnection() as HttpURLConnection).lockToDeviceOrigin().apply {
                 connectTimeout = 5_000
-                readTimeout = 8_000
+                readTimeout = 15_000
                 requestMethod = "GET"
                 setRequestProperty("Accept", "application/json")
                 if (!bearerToken.isNullOrBlank()) {

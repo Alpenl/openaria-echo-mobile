@@ -62,7 +62,7 @@ class EchoAppUiSmokeTest {
         compose.onNodeWithContentDescription("Open Aria Echo, 未连接机身").assertIsDisplayed()
         compose.onNodeWithContentDescription("设置").assertIsDisplayed()
         compose.onNodeWithText("连接前不显示预览、状态和会话。").assertIsDisplayed()
-        compose.onNodeWithText("附近机身").assertIsDisplayed()
+        compose.onAllNodesWithText("附近机身").assertCountEquals(2)
         compose.onNodeWithText("连接机身").performScrollTo().assertIsDisplayed()
 
         listOf("Mount", "Retry", "Probe", "Edit", "Join", "Copy URL").forEach { legacyText ->
@@ -77,7 +77,7 @@ class EchoAppUiSmokeTest {
         compose.onNodeWithContentDescription("Open Aria Echo, No body connected").assertIsDisplayed()
         compose.onNodeWithContentDescription("Settings").assertIsDisplayed()
         compose.onNodeWithText("Preview, status, and sessions stay hidden until a body is connected.").assertIsDisplayed()
-        compose.onNodeWithText("Nearby bodies").assertIsDisplayed()
+        compose.onAllNodesWithText("Nearby bodies").assertCountEquals(2)
         compose.onNodeWithText("CONNECT BODY").performScrollTo().assertIsDisplayed()
     }
 

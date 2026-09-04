@@ -86,6 +86,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -1731,7 +1732,7 @@ private fun V3PreviewEmpty(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 28.dp)
+            .padding(horizontal = 18.dp)
             .semantics { liveRegion = LiveRegionMode.Polite },
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1739,16 +1740,26 @@ private fun V3PreviewEmpty(
         EchoText(
             value = title,
             color = EchoColors.InkMuted,
-            style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 17.sp),
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
+            style = TextStyle(
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 17.sp,
+                textAlign = TextAlign.Center,
+            ),
+            maxLines = 3,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.fillMaxWidth(),
         )
         EchoText(
             value = body,
             color = Color(0xFF5C6568),
-            style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
+            style = TextStyle(
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                textAlign = TextAlign.Center,
+            ),
+            maxLines = 4,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.fillMaxWidth(),
         )
     }
 }

@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html>
+  <head>
+
+
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="./support.js"></script>
+  </head>
+  <body>
+    <x-dc>
+      <helmet data-dc-atomics>
+        <meta name="design_doc_mode" content="canvas" />
+        <style>
+          body { margin:0; background:#1b1c1d; font-family: Helvetica, "Helvetica Neue", system-ui, "PingFang SC", "Noto Sans CJK SC", sans-serif; }
+          a { color:#7FE3F5; } a:hover { color:#F0F3F4; }
+          .frame { position:absolute; display:flex; flex-direction:column; gap:10px; }
+          .flabel { display:flex; align-items:baseline; gap:10px; color:#EDEAE4; font-size:13px; font-weight:600; cursor:grab; }
+          .flabel span { color:#8b8f92; font-size:11px; font-weight:400; font-family: ui-monospace, Menlo, monospace; }
+          .phone { width:390px; height:844px; background:#000; border:1px solid rgba(255,255,255,.14); border-radius:22px; overflow:hidden; position:relative; display:flex; flex-direction:column; }
+
+          .topbar { height:58px; flex:none; display:flex; align-items:center; gap:8px; padding:0 14px; }
+          .idpill { display:flex; align-items:center; gap:7px; font-size:12px; font-weight:600; color:#E9EDEE; height:32px; padding:0 12px; border-radius:999px; background:rgba(255,255,255,.09); }
+          .live { width:7px; height:7px; border-radius:50%; background:#46C98A; flex:none; }
+          .tb { width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#9aa2a6; flex:none; }
+          .tb.on { background:#F0F3F4; color:#0a0c0d; }
+          .tb.dim { color:#4f585c; }
+
+          .stage { flex:none; height:520px; position:relative; background:#07090A; overflow:hidden; }
+          .vfimg { position:absolute; inset:0; background-image:repeating-linear-gradient(115deg, rgba(255,255,255,.05) 0 10px, rgba(255,255,255,0) 10px 20px); }
+          .gridlines { position:absolute; inset:0; background:
+            linear-gradient(rgba(255,255,255,.13) 0 0) 33.33% 0/1px 100% no-repeat,
+            linear-gradient(rgba(255,255,255,.13) 0 0) 66.66% 0/1px 100% no-repeat,
+            linear-gradient(rgba(255,255,255,.13) 0 0) 0 33.33%/100% 1px no-repeat,
+            linear-gradient(rgba(255,255,255,.13) 0 0) 0 66.66%/100% 1px no-repeat; }
+          .vftag { position:absolute; left:0; right:0; top:246px; text-align:center; font-family: ui-monospace, Menlo, monospace; font-size:10px; color:#495154; }
+          .empty { position:absolute; left:0; right:0; top:210px; text-align:center; display:flex; flex-direction:column; gap:8px; }
+          .empty .et { font-size:17px; font-weight:600; color:#8b9296; }
+          .empty .eb { font-size:13px; color:#5c6568; }
+          .rec-pill { position:absolute; top:16px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:8px; background:rgba(0,0,0,.55); border-radius:999px; padding:7px 13px; font-family: ui-monospace, Menlo, monospace; font-size:13px; color:#fff; }
+          .rec-dot { width:8px; height:8px; border-radius:50%; background:#FF3B2D; }
+
+          .tray { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; gap:14px; padding:14px 20px 26px; }
+          .zoom { display:flex; gap:2px; background:rgba(255,255,255,.08); border-radius:999px; padding:4px; }
+          .zoom > div { min-width:52px; height:32px; border-radius:999px; display:flex; align-items:center; justify-content:center; font-size:12px; color:#aeb5b8; }
+          .zoom > div.sel { background:rgba(255,255,255,.20); color:#fff; font-weight:600; }
+          .stat { font-family: ui-monospace, Menlo, monospace; font-size:11px; color:#7d868a; }
+          .stat.warn { color:#E0A020; }
+          .modes { display:flex; gap:30px; justify-content:center; font-size:12px; letter-spacing:.20em; color:#6e7679; }
+          .modes .sel { color:#F0F3F4; font-weight:700; }
+          .shrow { width:100%; display:flex; align-items:center; justify-content:space-between; }
+          .sh { width:82px; height:82px; border-radius:50%; border:4px solid #fff; display:flex; align-items:center; justify-content:center; }
+          .sh b { width:64px; height:64px; border-radius:50%; background:#FF3B2D; display:block; }
+          .sh.rec b { width:30px; height:30px; border-radius:8px; }
+          .sh.off { border-color:rgba(255,255,255,.26); }
+          .sh.off b { background:rgba(255,59,45,.24); }
+          .side { width:52px; height:52px; border-radius:50%; background:rgba(255,255,255,.09); display:flex; align-items:center; justify-content:center; color:#E9EDEE; flex:none; }
+          .side.dim { color:#4f585c; }
+          .gth { width:52px; height:52px; border-radius:12px; overflow:hidden; border:1px solid rgba(255,255,255,.24); background:#0d0f10; position:relative; flex:none; }
+          .gth .vfimg { background-image:repeating-linear-gradient(115deg, rgba(255,255,255,.11) 0 6px, rgba(255,255,255,0) 6px 12px); }
+          .gcount { position:absolute; right:3px; bottom:3px; font-family: ui-monospace, Menlo, monospace; font-size:9px; color:#fff; background:rgba(0,0,0,.62); border-radius:4px; padding:1px 4px; }
+
+          .ic { width:20px; height:20px; position:relative; display:flex; align-items:center; justify-content:center; }
+          .ic-grid { background:
+            linear-gradient(currentColor 0 0) 33% 0/1px 100% no-repeat,
+            linear-gradient(currentColor 0 0) 67% 0/1px 100% no-repeat,
+            linear-gradient(currentColor 0 0) 0 33%/100% 1px no-repeat,
+            linear-gradient(currentColor 0 0) 0 67%/100% 1px no-repeat; }
+          .ic-ring { border:1.5px solid currentColor; border-radius:50%; }
+          .ic-ring b { width:5px; height:5px; border-radius:50%; background:currentColor; display:block; }
+          .ic-bars { display:flex; align-items:flex-end; gap:3px; }
+          .ic-bars b { width:3px; background:currentColor; display:block; border-radius:1px; }
+          .ic-sliders { display:flex; flex-direction:column; gap:5px; width:100%; }
+          .ic-sliders b { height:1.5px; background:currentColor; display:block; position:relative; border-radius:1px; }
+          .ic-sliders i { position:absolute; top:-2.5px; width:6px; height:6px; border-radius:50%; background:currentColor; display:block; }
+          .ic-close { position:relative; width:16px; height:16px; }
+          .ic-close b { position:absolute; top:7px; left:0; width:16px; height:1.5px; background:currentColor; display:block; }
+          .ic-dev { width:20px; height:14px; border:1.5px solid currentColor; border-radius:4px; display:flex; align-items:center; justify-content:center; }
+          .ic-dev b { width:5px; height:5px; border-radius:50%; background:currentColor; display:block; }
+
+          .sheet { position:absolute; left:0; right:0; bottom:0; background:#0A0C0D; border-top:1px solid rgba(255,255,255,.12); border-radius:22px 22px 0 0; padding:12px 18px 24px; display:flex; flex-direction:column; gap:6px; }
+          .grab { width:38px; height:4px; border-radius:2px; background:rgba(255,255,255,.22); align-self:center; margin-bottom:8px; }
+          .stitle { font-size:17px; font-weight:600; color:#F0F3F4; margin-bottom:4px; }
+          .lrow { display:flex; align-items:center; gap:12px; min-height:58px; border-bottom:1px solid rgba(255,255,255,.07); }
+          .lrow .lt { flex:1; font-size:15px; color:#F0F3F4; }
+          .lrow .lv { font-size:13px; color:#8b9296; text-align:right; }
+          .chev { width:7px; height:7px; border-right:1.5px solid #6f787c; border-bottom:1.5px solid #6f787c; transform:rotate(-45deg); flex:none; }
+          .devrow { display:flex; align-items:center; gap:12px; min-height:62px; border-bottom:1px solid rgba(255,255,255,.07); }
+          .devrow .dn { font-size:15px; color:#F0F3F4; }
+          .devrow .da { font-family: ui-monospace, Menlo, monospace; font-size:11px; color:#8b9296; margin-top:3px; }
+          .dl { height:34px; padding:0 14px; border-radius:999px; background:#F0F3F4; color:#0a0c0d; font-size:13px; font-weight:600; display:flex; align-items:center; flex:none; }
+          .dl.ghost { background:rgba(255,255,255,.10); color:#E9EDEE; }
+          .cta { height:52px; border-radius:14px; background:#F0F3F4; color:#0a0c0d; font-size:15px; font-weight:600; display:flex; align-items:center; justify-content:center; }
+          .cta.ghost { background:transparent; border:1px solid rgba(255,255,255,.20); color:#E9EDEE; }
+          .hint { font-size:12px; line-height:18px; color:#7d868a; }
+
+          .hdr { height:60px; flex:none; display:flex; align-items:center; gap:12px; padding:0 18px; border-bottom:1px solid rgba(255,255,255,.08); }
+          .hdr .ht { flex:1; font-size:18px; font-weight:600; color:#F0F3F4; }
+          .hdr .hv { font-size:12px; color:#7d868a; font-family: ui-monospace, Menlo, monospace; }
+          .body { flex:1; padding:16px 18px; overflow:hidden; display:flex; flex-direction:column; gap:14px; }
+          .fchips { display:flex; gap:8px; }
+          .fchip { height:32px; padding:0 14px; border-radius:999px; display:flex; align-items:center; font-size:13px; color:#9aa2a6; background:rgba(255,255,255,.07); }
+          .fchip.sel { background:#F0F3F4; color:#0a0c0d; font-weight:600; }
+          .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+          .cell { height:158px; border-radius:12px; overflow:hidden; position:relative; background:#0d0f10; border:1px solid rgba(255,255,255,.08); }
+          .cell .dur { position:absolute; left:8px; bottom:8px; font-family: ui-monospace, Menlo, monospace; font-size:11px; color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.9); }
+          .cell .sdot { position:absolute; right:8px; top:8px; width:8px; height:8px; border-radius:50%; }
+          .cell .veil { position:absolute; inset:0; background:linear-gradient(to top, rgba(0,0,0,.6), rgba(0,0,0,0) 45%); }
+          .arow { display:flex; align-items:center; gap:12px; min-height:56px; border-bottom:1px solid rgba(255,255,255,.07); }
+          .arow .at { flex:1; font-size:14px; color:#F0F3F4; }
+          .arow .am { font-family: ui-monospace, Menlo, monospace; font-size:11px; color:#8b9296; margin-top:2px; }
+
+          .note { width:1740px; color:#c8c5bf; font-size:13px; line-height:21px; }
+          .note h1 { font-size:22px; color:#EDEAE4; margin:0 0 10px; }
+          .note h2 { font-size:14px; color:#EDEAE4; margin:16px 0 6px; }
+          .note code { font-family: ui-monospace, Menlo, monospace; font-size:12px; color:#7FE3F5; }
+          .note ul { margin:0; padding-left:18px; }
+          .cols { display:flex; gap:48px; }
+          .cols > div { flex:1; }
+        </style>
+      </helmet>
+
+      <div class="frame note" style="left:40px; top:40px;" data-drags-parent="1">
+        <h1>Open Aria Echo · App 端 v3：标准手机相机布局</h1>
+        <div class="cols">
+          <div>
+            <h2>三层结构，上下分工</h2>
+            <ul>
+              <li><b>顶栏 58</b>：左边机身状态胶囊，右边四个图标开关（网格、对焦峰值、IMU、设置）。</li>
+              <li><b>取景窗 520</b>：只放画面与网格，除了录制计时外不压任何控件。</li>
+              <li><b>底部黑色操作区 266</b>：变焦胶囊 → 状态行 → 模式条 → 快门行，四行固定顺序。</li>
+            </ul>
+            <h2>快门行</h2>
+            <ul>
+              <li>中间 82pt 大快门：空闲红圆、录制中红方、不可用变暗。</li>
+              <li>左侧 52pt 会话缩略图，右侧 52pt 切换机身，与相机的相册 / 翻转位置一致。</li>
+            </ul>
+          </div>
+          <div>
+            <h2>与 v2 的区别</h2>
+            <ul>
+              <li>去掉悬浮在画面右侧的工具列，全部上提到顶栏。</li>
+              <li>去掉渐变遮罩，底部改为实心黑色操作区，控件不再压在画面上。</li>
+              <li>预览不再充满屏幕，固定为 3:4 取景窗，上下黑边是结构的一部分。</li>
+              <li>快门加大到 82pt，左右两个副按钮缩到 52pt，主次拉开。</li>
+            </ul>
+            <h2>保留不变的约束</h2>
+            <ul>
+              <li>未连接不显示预览、不显示会话，快门不可按。</li>
+              <li>不可用能力降级为禁用态，原因写在快门上方的状态行。</li>
+              <li>机身身份、网络、契约门禁、诊断全部在设置页。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="frame" style="left:40px; top:400px;" data-screen-label="v3 取景·待录">
+        <div class="flabel" data-drags-parent="1">取景 · 待录 <span>主屏</span></div>
+        <div class="phone">
+          <div class="topbar">
+            <div class="idpill"><span class="live"></span>rp-ylx-0713</div>
+            <div style="flex:1;"></div>
+            <div class="tb on"><div class="ic ic-grid"></div></div>
+            <div class="tb"><div class="ic ic-ring"><b></b></div></div>
+            <div class="tb"><div class="ic ic-bars"><b style="height:8px;"></b><b style="height:14px;"></b><b style="height:11px;"></b></div></div>
+            <div class="tb"><div class="ic ic-sliders"><b><i style="left:3px;"></i></b><b><i style="left:11px;"></i></b></div></div>
+          </div>
+          <div class="stage">
+            <div class="vfimg"></div>
+            <div class="gridlines"></div>
+            <div class="vftag">机身实时预览 · 1280×480</div>
+          </div>
+          <div class="tray">
+            <div class="zoom">
+              <div class="sel">双目</div>
+              <div>左眼</div>
+              <div>右眼</div>
+            </div>
+            <div class="stat">空闲 · 可录 6 小时 · 48.5℃</div>
+            <div class="modes">
+              <div class="sel">录制</div>
+              <div>标定</div>
+            </div>
+            <div class="shrow">
+              <div class="gth"><div class="vfimg"></div><div class="gcount">12</div></div>
+              <div class="sh"><b></b></div>
+              <div class="side"><div class="ic ic-dev"><b></b></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="frame" style="left:500px; top:400px;" data-screen-label="v3 取景·录制中">
+        <div class="flabel" data-drags-parent="1">取景 · 录制中 <span>快门变方</span></div>
+        <div class="phone">
+          <div class="topbar">
+            <div class="idpill"><span class="live"></span>rp-ylx-0713</div>
+            <div style="flex:1;"></div>
+            <div class="tb dim"><div class="ic ic-grid"></div></div>
+            <div class="tb dim"><div class="ic ic-ring"><b></b></div></div>
+            <div class="tb dim"><div class="ic ic-bars"><b style="height:8px;"></b><b style="height:14px;"></b><b style="height:11px;"></b></div></div>
+            <div class="tb dim"><div class="ic ic-sliders"><b><i style="left:3px;"></i></b><b><i style="left:11px;"></i></b></div></div>
+          </div>
+          <div class="stage">
+            <div class="vfimg"></div>
+            <div class="rec-pill"><span class="rec-dot"></span>00:03:12</div>
+            <div class="vftag">机身实时预览 · 1280×480</div>
+          </div>
+          <div class="tray">
+            <div class="zoom">
+              <div class="sel">双目</div>
+              <div>左眼</div>
+              <div>右眼</div>
+            </div>
+            <div class="stat">已写入 1.24 GB · IMU 良好 · 修订 42</div>
+            <div class="modes">
+              <div class="sel">录制</div>
+            </div>
+            <div class="shrow">
+              <div class="gth"><div class="vfimg"></div><div class="gcount">12</div></div>
+              <div class="sh rec"><b></b></div>
+              <div class="side dim"><div class="ic ic-dev"><b></b></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="frame" style="left:960px; top:400px;" data-screen-label="v3 相机不可用">
+        <div class="flabel" data-drags-parent="1">相机未接入 <span>快门禁用 + 原因</span></div>
+        <div class="phone">
+          <div class="topbar">
+            <div class="idpill"><span class="live" style="background:#E0A020;"></span>rp-ylx-0713</div>
+            <div style="flex:1;"></div>
+            <div class="tb dim"><div class="ic ic-grid"></div></div>
+            <div class="tb dim"><div class="ic ic-ring"><b></b></div></div>
+            <div class="tb dim"><div class="ic ic-bars"><b style="height:8px;"></b><b style="height:14px;"></b><b style="height:11px;"></b></div></div>
+            <div class="tb"><div class="ic ic-sliders"><b><i style="left:3px;"></i></b><b><i style="left:11px;"></i></b></div></div>
+          </div>
+          <div class="stage">
+            <div class="empty">
+              <div class="et">相机未接入</div>
+              <div class="eb">机身报告相机未接入，旧画面已清除</div>
+            </div>
+          </div>
+          <div class="tray">
+            <div class="zoom">
+              <div class="sel">双目</div>
+              <div>左眼</div>
+              <div>右眼</div>
+            </div>
+            <div class="stat warn">不可录制 · 相机未接入</div>
+            <div class="modes">
+              <div class="sel">录制</div>
+              <div>标定</div>
+            </div>
+            <div class="shrow">
+              <div class="gth"><div class="vfimg"></div><div class="gcount">12</div></div>
+              <div class="sh off"><b></b></div>
+              <div class="side"><div class="ic ic-dev"><b></b></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="frame" style="left:1420px; top:400px;" data-screen-label="v3 未连接">
+        <div class="flabel" data-drags-parent="1">未连接 <span>附近机身面板</span></div>
+        <div class="phone">
+          <div class="topbar">
+            <div class="idpill"><span class="live" style="background:#7D878C;"></span>未连接机身</div>
+            <div style="flex:1;"></div>
+            <div class="tb"><div class="ic ic-sliders"><b><i style="left:3px;"></i></b><b><i style="left:11px;"></i></b></div></div>
+          </div>
+          <div class="stage">
+            <div class="empty" style="top:120px;">
+              <div class="et">未连接机身</div>
+              <div class="eb">连接前不显示预览、状态和会话</div>
+            </div>
+          </div>
+          <div class="tray"></div>
+          <div class="sheet">
+            <div class="grab"></div>
+            <div class="stitle">附近机身</div>
+            <div class="devrow">
+              <div style="flex:1;">
+                <div class="dn">rp-ylx-0713</div>
+                <div class="da">http://10.42.0.1:8080 · mDNS</div>
+              </div>
+              <div class="dl">连接</div>
+            </div>
+            <div class="devrow">
+              <div style="flex:1;">
+                <div class="dn">rp-ylx-0244</div>
+                <div class="da">https://rp-ylx-0244.local · 历史</div>
+              </div>
+              <div class="dl ghost">连接</div>
+            </div>
+            <div class="lrow" style="border-bottom:none;">
+              <div class="lt">手动输入地址</div>
+              <div class="chev"></div>
+            </div>
+            <div class="hint">发现后仍会通过 Device API v4 验证机身身份；需要令牌时才会询问。</div>
+            <div class="cta" style="margin-top:10px;">重新扫描</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="frame" style="left:1880px; top:400px;" data-screen-label="v3 会话相册">
+        <div class="flabel" data-drags-parent="1">会话 · 相册 <span>左下缩略图进入</span></div>
+        <div class="phone">
+          <div class="hdr">
+            <div class="ic ic-close" style="color:#E9EDEE;"><b style="transform:rotate(45deg);"></b><b style="transform:rotate(-45deg);"></b></div>
+            <div class="ht">会话</div>
+            <div class="hv">12</div>
+          </div>
+          <div class="body">
+            <div class="fchips">
+              <div class="fchip sel">全部</div>
+              <div class="fchip">可用</div>
+              <div class="fchip">未成功</div>
+            </div>
+            <div class="grid">
+              <div class="cell"><div class="vfimg"></div><div class="veil"></div><div class="sdot" style="background:#46C98A;"></div><div class="dur">03:02</div></div>
+              <div class="cell"><div class="vfimg"></div><div class="veil"></div><div class="sdot" style="background:#46C98A;"></div><div class="dur">01:47</div></div>
+              <div class="cell"><div class="vfimg"></div><div class="veil"></div><div class="sdot" style="background:#E0A020;"></div><div class="dur">00:58</div></div>
+              <div class="cell"><div class="vfimg"></div><div class="veil"></div><div class="sdot" style="background:#46C98A;"></div><div class="dur">05:11</div></div>
+              <div class="cell"><div class="vfimg"></div><div class="veil"></div><div class="sdot" style="background:#46C98A;"></div><div class="dur">02:26</div></div>
+              <div class="cell"><div class="vfimg"></div><div class="veil"></div><div class="sdot" style="background:#46C98A;"></div><div class="dur">00:34</div></div>
+            </div>
+            <div class="hint">绿点为网关判定可用，黄点为未成功或已隔离；机身没有的会话不会出现在这里。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="frame" style="left:2340px; top:400px;" data-screen-label="v3 会话详情">
+        <div class="flabel" data-drags-parent="1">会话详情 <span>制品与下载</span></div>
+        <div class="phone">
+          <div class="hdr">
+            <div class="ic ic-close" style="color:#E9EDEE;"><b style="transform:rotate(45deg);"></b><b style="transform:rotate(-45deg);"></b></div>
+            <div class="ht">RP-YLX-0042</div>
+            <div class="hv">可用</div>
+          </div>
+          <div class="stage" style="height:280px;">
+            <div class="vfimg"></div>
+            <div class="vftag" style="top:130px;">首帧缩略图</div>
+          </div>
+          <div class="body" style="gap:0;">
+            <div class="stat" style="padding:12px 0;">2026-09-04 09:55 · 03:02 · 4.83 GB · 网关判定可用</div>
+            <div class="arow">
+              <div class="at">left.mp4<div class="am">video/mp4 · 2.42 GB</div></div>
+              <div class="dl">下载</div>
+            </div>
+            <div class="arow">
+              <div class="at">right.mp4<div class="am">video/mp4 · 2.39 GB</div></div>
+              <div class="dl ghost">下载</div>
+            </div>
+            <div class="arow">
+              <div class="at">imu.jsonl<div class="am">application/jsonl · 18.4 MB</div></div>
+              <div class="dl ghost">下载</div>
+            </div>
+            <div class="lrow" style="border-bottom:none;">
+              <div class="lt">校验与诊断</div>
+              <div class="lv">SHA-256 已校对</div>
+              <div class="chev"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="frame" style="left:2800px; top:400px;" data-screen-label="v3 设置">
+        <div class="flabel" data-drags-parent="1">设置 <span>机身 / 网络 / 诊断 全部收纳</span></div>
+        <div class="phone">
+          <div class="hdr">
+            <div class="ic ic-close" style="color:#E9EDEE;"><b style="transform:rotate(45deg);"></b><b style="transform:rotate(-45deg);"></b></div>
+            <div class="ht">设置</div>
+          </div>
+          <div class="body">
+            <div class="lrow">
+              <div class="lt">机身</div>
+              <div class="lv">rp-ylx-0713 · 已验证</div>
+              <div class="chev"></div>
+            </div>
+            <div class="lrow">
+              <div class="lt">网络</div>
+              <div class="lv">Wi-Fi · lab-5g</div>
+              <div class="chev"></div>
+            </div>
+            <div class="lrow">
+              <div class="lt">存储</div>
+              <div class="lv">364 / 477 GB</div>
+              <div class="chev"></div>
+            </div>
+            <div class="lrow">
+              <div class="lt">相机对焦</div>
+              <div class="lv">自动</div>
+              <div class="chev"></div>
+            </div>
+            <div class="lrow">
+              <div class="lt">标定采集</div>
+              <div class="lv">暂不可用</div>
+              <div class="chev"></div>
+            </div>
+            <div class="lrow">
+              <div class="lt">语言</div>
+              <div class="lv">中文</div>
+              <div class="chev"></div>
+            </div>
+            <div class="lrow">
+              <div class="lt">检查更新</div>
+              <div class="lv">0.1.9</div>
+              <div class="chev"></div>
+            </div>
+            <div class="lrow">
+              <div class="lt">诊断与契约</div>
+              <div class="lv">Device API v4</div>
+              <div class="chev"></div>
+            </div>
+            <div class="cta ghost" style="margin-top:16px;">断开机身</div>
+            <div class="hint">断开只清除本机控制链路与预览，不会停止机身上正在进行的录制。</div>
+          </div>
+        </div>
+      </div>
+    </x-dc>
+    <script type="text/x-dc" data-dc-script data-props='{}'>
+      class Component extends DCLogic {
+        renderVals() { return {}; }
+      }
+    </script>
+  </body>
+</html>

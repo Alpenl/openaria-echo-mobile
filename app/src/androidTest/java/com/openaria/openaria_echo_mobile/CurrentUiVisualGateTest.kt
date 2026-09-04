@@ -36,7 +36,6 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -140,103 +139,59 @@ class CurrentUiVisualGateTest {
         val topStatus = compose
             .onNodeWithContentDescription("Open Aria Echo, 未连接机身", useUnmergedTree = true)
             .fetchSemanticsNode()
-        val tabMatcher = SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Tab)
-        val tabs = compose.onAllNodes(tabMatcher, useUnmergedTree = true).fetchSemanticsNodes()
-
-        assertEquals("The current UI must expose exactly four semantic primary-navigation tabs.", 4, tabs.size)
-        assertEquals(
-            "Exactly one primary-navigation tab must be selected.",
-            1,
-            tabs.count { it.config[SemanticsProperties.Selected] },
-        )
+        compose
+            .onAllNodes(
+                SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Tab),
+                useUnmergedTree = true,
+            )
+            .assertCountEquals(0)
         assertRectInside("top status", topStatus.boundsInRoot, safeBounds)
 
         val density = activity.resources.displayMetrics.density
         val minimumTouchTargetPx = 48f * density
-        tabs.forEachIndexed { index, tab ->
-            val bounds = tab.boundsInRoot
-            assertRectInside("navigation tab $index", bounds, safeBounds)
-            assertTrue(
-                "Navigation tab $index is narrower than 48dp: $bounds",
-                bounds.width + GEOMETRY_TOLERANCE_PX >= minimumTouchTargetPx,
-            )
-            assertTrue(
-                "Navigation tab $index is shorter than 48dp: $bounds",
-                bounds.height + GEOMETRY_TOLERANCE_PX >= minimumTouchTargetPx,
-            )
-            assertNoPositiveOverlap("top status", topStatus.boundsInRoot, "navigation tab $index", bounds)
-        }
-        tabs.indices.forEach { leftIndex ->
-            ((leftIndex + 1) until tabs.size).forEach { rightIndex ->
-                assertNoPositiveOverlap(
-                    "navigation tab $leftIndex",
-                    tabs[leftIndex].boundsInRoot,
-                    "navigation tab $rightIndex",
-                    tabs[rightIndex].boundsInRoot,
-                )
-            }
-        }
-
-        val tabWidths = tabs.map { it.boundsInRoot.width }
-        val tabTops = tabs.map { it.boundsInRoot.top }
-        val tabBottoms = tabs.map { it.boundsInRoot.bottom }
-        assertTrue(
-            "Navigation tabs must keep a stable width without clipping: $tabWidths",
-            tabWidths.max() - tabWidths.min() <= GEOMETRY_TOLERANCE_PX,
-        )
-        assertTrue(
-            "Navigation tabs must share a stable top edge: $tabTops",
-            tabTops.max() - tabTops.min() <= GEOMETRY_TOLERANCE_PX,
-        )
-        assertTrue(
-            "Navigation tabs must share a stable bottom edge: $tabBottoms",
-            tabBottoms.max() - tabBottoms.min() <= GEOMETRY_TOLERANCE_PX,
-        )
-        assertTrue(
-            "Top content and bottom navigation must leave a non-overlapping content region.",
-            topStatus.boundsInRoot.bottom <= tabTops.min() + GEOMETRY_TOLERANCE_PX,
-        )
-
-        val previewStatusBody = compose
-            .onNodeWithText(activity.localizedString(R.string.preview_no_fake), useUnmergedTree = true)
-            .assertIsDisplayed()
-            .fetchSemanticsNode()
-        assertTextHasNoVisualOverflow("preview status body", previewStatusBody)
-        assertRectInside("preview status body", previewStatusBody.boundsInRoot, safeBounds)
-        assertNoPositiveOverlap("top status", topStatus.boundsInRoot, "preview status body", previewStatusBody.boundsInRoot)
-        assertTrue(
-            "Preview status body must remain above fixed primary navigation.",
-            previewStatusBody.boundsInRoot.bottom <= tabTops.min() + GEOMETRY_TOLERANCE_PX,
-        )
-
-        val previewControls = PREVIEW_CONTROL_RESOURCES.associate { resourceId ->
-            val label = activity.localizedString(resourceId)
+        val v3Controls = V3_CONTROL_RESOURCES.map { resourceId -> activity.localizedString(resourceId) }.associateWith { label ->
             val bounds = compose
                 .onNodeWithContentDescription(label, useUnmergedTree = true)
                 .assertIsDisplayed()
                 .fetchSemanticsNode()
                 .boundsInRoot
-            assertRectInside("preview control $label", bounds, safeBounds)
+            assertRectInside("V3 control $label", bounds, safeBounds)
             assertTrue(
-                "Preview control $label must remain above fixed primary navigation.",
-                bounds.bottom <= tabTops.min() + GEOMETRY_TOLERANCE_PX,
+                "V3 control $label is narrower than 48dp: $bounds",
+                bounds.width + GEOMETRY_TOLERANCE_PX >= minimumTouchTargetPx,
             )
-            label to bounds
+            assertTrue(
+                "V3 control $label is shorter than 48dp: $bounds",
+                bounds.height + GEOMETRY_TOLERANCE_PX >= minimumTouchTargetPx,
+            )
+            bounds
         }
-        previewControls.forEach { (label, bounds) ->
+        v3Controls.forEach { (label, bounds) ->
             assertNoPositiveOverlap("top status", topStatus.boundsInRoot, label, bounds)
-            assertNoPositiveOverlap("preview status body", previewStatusBody.boundsInRoot, label, bounds)
-            tabs.forEachIndexed { index, tab ->
-                assertNoPositiveOverlap("navigation tab $index", tab.boundsInRoot, label, bounds)
-            }
         }
-        val previewControlEntries = previewControls.entries.toList()
-        previewControlEntries.indices.forEach { leftIndex ->
-            ((leftIndex + 1) until previewControlEntries.size).forEach { rightIndex ->
-                val left = previewControlEntries[leftIndex]
-                val right = previewControlEntries[rightIndex]
+        val controlEntries = v3Controls.entries.toList()
+        controlEntries.indices.forEach { leftIndex ->
+            ((leftIndex + 1) until controlEntries.size).forEach { rightIndex ->
+                val left = controlEntries[leftIndex]
+                val right = controlEntries[rightIndex]
                 assertNoPositiveOverlap(left.key, left.value, right.key, right.value)
             }
+        }
+        assertTrue(
+            "Top status and settings control must share the V3 top bar region.",
+            v3Controls.getValue(activity.localizedString(R.string.v3_settings)).bottom <=
+                topStatus.boundsInRoot.bottom + minimumTouchTargetPx,
+        )
+
+        val previewStatusBody = compose
+            .onNodeWithText(activity.localizedString(R.string.v3_preview_disconnected_body), useUnmergedTree = true)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+        assertTextHasNoVisualOverflow("preview status body", previewStatusBody)
+        assertRectInside("preview status body", previewStatusBody.boundsInRoot, safeBounds)
+        assertNoPositiveOverlap("top status", topStatus.boundsInRoot, "preview status body", previewStatusBody.boundsInRoot)
+        v3Controls.forEach { (label, bounds) ->
+            assertNoPositiveOverlap("preview status body", previewStatusBody.boundsInRoot, label, bounds)
         }
         compose
             .onAllNodesWithText(activity.localizedString(R.string.preview_contract_note), useUnmergedTree = true)
@@ -306,15 +261,9 @@ class CurrentUiVisualGateTest {
             .put("topStatusBoundsPx", rectJson(topStatus.boundsInRoot))
             .put("previewStatusBodyBoundsPx", rectJson(previewStatusBody.boundsInRoot))
             .put(
-                "previewControlBoundsPx",
+                "v3ControlBoundsPx",
                 JSONObject().apply {
-                    previewControls.forEach { (label, bounds) -> put(label, rectJson(bounds)) }
-                },
-            )
-            .put(
-                "navigationTabBoundsPx",
-                JSONArray().apply {
-                    tabs.forEach { put(rectJson(it.boundsInRoot)) }
+                    v3Controls.forEach { (label, bounds) -> put(label, rectJson(bounds)) }
                 },
             )
             .put("sampledScreenshotColors", sampledColorCount(screenshot))
@@ -781,15 +730,9 @@ class CurrentUiVisualGateTest {
         const val PNG_QUALITY = 100
         val EVIDENCE_NONCE_REGEX = Regex("^[0-9a-f]{32}$")
         val SHA256_REGEX = Regex("^[0-9a-f]{64}$")
-        val PREVIEW_CONTROL_RESOURCES = listOf(
-            R.string.view_both,
-            R.string.view_left,
-            R.string.view_right,
-            R.string.grid,
-            R.string.focus_peaking,
-            R.string.imu_overlay,
-            R.string.start_recording,
-            R.string.stop_recording,
+        val V3_CONTROL_RESOURCES = listOf(
+            R.string.v3_settings,
+            R.string.discovery_start,
         )
     }
 }

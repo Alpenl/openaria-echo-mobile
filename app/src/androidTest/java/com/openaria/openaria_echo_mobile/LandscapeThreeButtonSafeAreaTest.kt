@@ -6,12 +6,10 @@ import android.content.res.Configuration
 import android.os.Build
 import androidx.annotation.StringRes
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.platform.app.InstrumentationRegistry
@@ -77,27 +75,21 @@ class LandscapeThreeButtonSafeAreaTest {
             .fetchSemanticsNode()
         assertRectInside("top status", topStatus.boundsInRoot, safeBounds)
         val safeNodes = mutableListOf("top status" to topStatus.boundsInRoot)
-
-        val tabs = compose
-            .onAllNodes(
-                SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Tab),
-                useUnmergedTree = true,
-            )
-            .fetchSemanticsNodes()
-        assertEquals(4, tabs.size)
-        tabs.forEachIndexed { index, tab ->
-            assertRectInside("navigation tab $index", tab.boundsInRoot, safeBounds)
-            safeNodes += "navigation tab $index" to tab.boundsInRoot
-        }
-
-        PREVIEW_CONTROL_RESOURCES.forEach { resourceId ->
+        V3_CONTROL_RESOURCES.forEach { resourceId ->
             val label = activity.localizedString(resourceId)
             val controlInteraction = compose.onNodeWithContentDescription(label, useUnmergedTree = true)
             val control = controlInteraction.fetchSemanticsNode()
-            assertRectInside("preview control $label", control.boundsInRoot, safeBounds)
+            assertRectInside("V3 control $label", control.boundsInRoot, safeBounds)
             controlInteraction.assertIsDisplayed()
-            safeNodes += "preview control $label" to control.boundsInRoot
+            safeNodes += "V3 control $label" to control.boundsInRoot
         }
+        val previewBody = compose
+            .onNodeWithText(activity.localizedString(R.string.v3_preview_disconnected_body), useUnmergedTree = true)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+        assertRectInside("preview disconnected body", previewBody.boundsInRoot, safeBounds)
+        safeNodes += "preview disconnected body" to previewBody.boundsInRoot
+
         safeNodes.indices.forEach { leftIndex ->
             ((leftIndex + 1) until safeNodes.size).forEach { rightIndex ->
                 val left = safeNodes[leftIndex]
@@ -134,15 +126,9 @@ class LandscapeThreeButtonSafeAreaTest {
     private companion object {
         const val WINDOW_FOCUS_TIMEOUT_MILLIS = 10_000L
         const val TOLERANCE_PX = 2f
-        val PREVIEW_CONTROL_RESOURCES = listOf(
-            R.string.view_both,
-            R.string.view_left,
-            R.string.view_right,
-            R.string.grid,
-            R.string.focus_peaking,
-            R.string.imu_overlay,
-            R.string.start_recording,
-            R.string.stop_recording,
+        val V3_CONTROL_RESOURCES = listOf(
+            R.string.v3_settings,
+            R.string.discovery_start,
         )
     }
 }

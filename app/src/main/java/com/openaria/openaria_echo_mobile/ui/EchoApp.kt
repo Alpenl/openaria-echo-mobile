@@ -16,9 +16,11 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -35,6 +37,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -54,7 +57,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -173,7 +178,8 @@ fun EchoApp(
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
 ) {
-    var selectedTabName by rememberSaveable { mutableStateOf(EchoTab.VIEWFINDER.name) }
+    var selectedSurfaceName by rememberSaveable { mutableStateOf(V3Surface.CAMERA.name) }
+    var selectedSettingsPageName by rememberSaveable { mutableStateOf(V3SettingsPage.SUMMARY.name) }
     var bodyConnection by remember { mutableStateOf<DeviceConnection?>(null) }
     var admittedCaptureStatus by remember { mutableStateOf<CaptureStatusSnapshot?>(null) }
     var captureProjection by remember { mutableStateOf(CaptureProjectionState()) }
@@ -191,6 +197,7 @@ fun EchoApp(
     var sessionMessage by remember { mutableStateOf<SessionMessage?>(null) }
     var sessionRefreshing by remember { mutableStateOf(false) }
     var sessionLoadingMore by remember { mutableStateOf(false) }
+    var selectedSessionDetailSummary by remember { mutableStateOf<SessionSummary?>(null) }
     var sessionManifest by remember { mutableStateOf<DeviceSessionManifest?>(null) }
     var sessionManifestMessage by remember { mutableStateOf<SessionManifestMessage?>(null) }
     var sessionManifestLoading by remember { mutableStateOf(false) }
@@ -246,7 +253,14 @@ fun EchoApp(
     }
     val previewFrameGate = remember { PreviewFrameGate() }
     val previewFrameWorkerDispatcher = remember { Dispatchers.Default.limitedParallelism(1) }
-    val selectedTab = EchoTab.valueOf(selectedTabName)
+    val selectedSurface = V3Surface.valueOf(selectedSurfaceName)
+    val selectedSettingsPage = V3SettingsPage.valueOf(selectedSettingsPageName)
+    val selectedTab = when {
+        selectedSurface == V3Surface.CAMERA -> EchoTab.VIEWFINDER
+        selectedSurface == V3Surface.SESSIONS -> EchoTab.SESSIONS
+        selectedSettingsPage == V3SettingsPage.NETWORK -> EchoTab.NETWORK
+        else -> EchoTab.BODY
+    }
     val previewTransportCancellation = remember(
         bodyConnection,
         connectionGeneration,
@@ -276,7 +290,6 @@ fun EchoApp(
         Density(context.resources.displayMetrics.density, 1f),
     )
     val layoutDirection = LocalLayoutDirection.current
-    val bottomNavigationReserve = safeDrawing.calculateBottomPadding() + 86.dp
     val captureReconciliationGate = remember(connectionGeneration) {
         ReconciliationGate(ConnectionRequestPolicy.HEALTHY_RECONCILIATION_INTERVAL_MS)
     }
@@ -442,6 +455,7 @@ fun EchoApp(
 
     fun dismissSessionDetail() {
         sessionDetailGeneration += 1L
+        selectedSessionDetailSummary = null
         sessionManifest = null
         sessionManifestMessage = null
         sessionManifestLoading = false
@@ -478,10 +492,12 @@ fun EchoApp(
 
     val backNavigationState = BackNavigationState(
         confirmationVisible = showRecordingBackgroundConfirmation,
-        sessionDetailVisible = sessionManifest != null || sessionManifestMessage != null || sessionManifestLoading,
-        sessionOutcomeVisible = unsuccessfulOutcomeSessionId != null || unsuccessfulOutcomeLoadingId != null,
+        sessionDetailVisible = selectedSurface == V3Surface.SESSIONS &&
+            (sessionManifest != null || sessionManifestMessage != null || sessionManifestLoading),
+        sessionOutcomeVisible = selectedSurface == V3Surface.SESSIONS &&
+            (unsuccessfulOutcomeSessionId != null || unsuccessfulOutcomeLoadingId != null),
         temporaryPanelVisible = artifactDownloadMessage != null && artifactDownloadingId == null,
-        selectedTabIsViewfinder = selectedTab == EchoTab.VIEWFINDER,
+        selectedTabIsViewfinder = selectedSurface == V3Surface.CAMERA,
         recording = captureStatus?.deviceState == "recording",
         connected = bodyConnection != null,
     )
@@ -491,7 +507,14 @@ fun EchoApp(
             BackNavigationAction.CLOSE_SESSION_DETAIL -> dismissSessionDetail()
             BackNavigationAction.CLOSE_SESSION_OUTCOME -> dismissSessionOutcome()
             BackNavigationAction.CLOSE_TEMPORARY_PANEL -> artifactDownloadMessage = null
-            BackNavigationAction.RETURN_TO_VIEWFINDER -> selectedTabName = EchoTab.VIEWFINDER.name
+            BackNavigationAction.RETURN_TO_VIEWFINDER -> {
+                if (selectedSurface == V3Surface.SETTINGS && selectedSettingsPage != V3SettingsPage.SUMMARY) {
+                    selectedSettingsPageName = V3SettingsPage.SUMMARY.name
+                } else {
+                    selectedSurfaceName = V3Surface.CAMERA.name
+                    selectedSettingsPageName = V3SettingsPage.SUMMARY.name
+                }
+            }
             BackNavigationAction.REQUEST_RECORDING_BACKGROUND_CONFIRMATION -> {
                 showRecordingBackgroundConfirmation = true
             }
@@ -603,6 +626,7 @@ fun EchoApp(
             val generation = connectionGeneration
             sessionDetailGeneration += 1L
             val detailGeneration = sessionDetailGeneration
+            selectedSessionDetailSummary = summary
             sessionManifestLoading = true
             sessionManifest = null
             sessionManifestMessage = SessionManifestMessage.Loading
@@ -1080,134 +1104,2255 @@ fun EchoApp(
         }
     }
 
+    V3AppShell(
+        selectedSurface = selectedSurface,
+        selectedSettingsPage = selectedSettingsPage,
+        bodyConnection = bodyConnection,
+        captureStatus = captureStatus,
+        captureStreamHealth = captureStreamHealth,
+        captureMessage = captureMessage,
+        captureCommandMessage = captureCommandMessage,
+        captureCommandRunning = captureCommandRunning,
+        previewFrame = previewFrame,
+        previewMessage = previewMessage,
+        previewMode = PreviewMode.valueOf(previewModeName),
+        showGrid = showPreviewGrid,
+        showFocusPeaking = showFocusPeaking,
+        showImuOverlay = showPreviewImuOverlay,
+        sessionPage = sessionPage,
+        selectedSessionDetailSummary = selectedSessionDetailSummary,
+        sessionMessage = sessionMessage,
+        sessionRefreshing = sessionRefreshing,
+        sessionLoadingMore = sessionLoadingMore,
+        sessionManifest = sessionManifest,
+        sessionManifestMessage = sessionManifestMessage,
+        sessionManifestLoading = sessionManifestLoading,
+        unsuccessfulOutcome = unsuccessfulOutcome,
+        unsuccessfulOutcomeSessionId = unsuccessfulOutcomeSessionId,
+        unsuccessfulOutcomeMessage = unsuccessfulOutcomeMessage,
+        unsuccessfulOutcomeLoadingId = unsuccessfulOutcomeLoadingId,
+        artifactDownloadMessage = artifactDownloadMessage,
+        artifactDownloadingId = artifactDownloadingId,
+        cameraFocus = cameraFocus,
+        cameraFocusMessage = cameraFocusMessage,
+        cameraFocusCommandRunning = cameraFocusCommandRunning,
+        connectionGeneration = connectionGeneration,
+        isForeground = appInForeground,
+        localeTag = localeTag,
+        updateState = updateState,
+        safeDrawing = safeDrawing,
+        layoutDirection = layoutDirection,
+        onOpenSessions = {
+            selectedSurfaceName = V3Surface.SESSIONS.name
+            selectedSettingsPageName = V3SettingsPage.SUMMARY.name
+            previewFrameGate.beginGeneration()
+            previewFrame = null
+        },
+        onOpenSettings = {
+            selectedSurfaceName = V3Surface.SETTINGS.name
+            selectedSettingsPageName = V3SettingsPage.SUMMARY.name
+            previewFrameGate.beginGeneration()
+            previewFrame = null
+        },
+        onOpenSettingsPage = { page ->
+            selectedSurfaceName = V3Surface.SETTINGS.name
+            selectedSettingsPageName = page.name
+            previewFrameGate.beginGeneration()
+            previewFrame = null
+        },
+        onCloseOverlay = {
+            selectedSurfaceName = V3Surface.CAMERA.name
+            selectedSettingsPageName = V3SettingsPage.SUMMARY.name
+            dismissSessionDetail()
+            dismissSessionOutcome()
+            artifactDownloadMessage = null
+        },
+        onCloseSessionDetail = {
+            dismissSessionDetail()
+            dismissSessionOutcome()
+            artifactDownloadMessage = null
+        },
+        onBackToSettingsSummary = {
+            selectedSettingsPageName = V3SettingsPage.SUMMARY.name
+        },
+        onStartCapture = startCapture,
+        onStopCapture = stopCapture,
+        onStartCalibrationCapture = startCalibrationCapture,
+        onPreviewModeChange = { previewModeName = it.name },
+        onShowGridChange = { showPreviewGrid = it },
+        onShowFocusPeakingChange = { enabled ->
+            previewFrameGate.beginGeneration()
+            showFocusPeaking = enabled
+            if (!enabled) {
+                previewFrame = previewFrame?.copy(focusMask = null)
+            }
+        },
+        onShowImuOverlayChange = { showPreviewImuOverlay = it },
+        onConnected = ::admitBody,
+        onDisconnect = { replaceBodyConnection(null) },
+        onCancelDownload = { cancelArtifactDownload?.invoke() },
+        onLoadUnsuccessfulOutcome = loadUnsuccessfulOutcome,
+        onRefreshSessions = refreshSessions,
+        onLoadMoreSessions = loadMoreSessions,
+        onLoadManifest = loadSessionManifest,
+        onDownloadArtifact = downloadArtifact,
+        onSetCameraFocus = setCameraFocus,
+        onLocaleChange = onLocaleChange,
+        onCheckUpdate = onCheckUpdate,
+        onInstallUpdate = onInstallUpdate,
+    )
+    if (showRecordingBackgroundConfirmation) {
+        RecordingBackgroundConfirmation(
+            onDismiss = { showRecordingBackgroundConfirmation = false },
+            onMoveToBackground = {
+                showRecordingBackgroundConfirmation = false
+                context.findActivity()?.moveTaskToBack(true)
+            },
+        )
+    }
+}
+
+@Composable
+private fun V3AppShell(
+    selectedSurface: V3Surface,
+    selectedSettingsPage: V3SettingsPage,
+    bodyConnection: DeviceConnection?,
+    captureStatus: CaptureStatusSnapshot?,
+    captureStreamHealth: EventStreamHealth,
+    captureMessage: CaptureStatusMessage?,
+    captureCommandMessage: CaptureCommandMessage?,
+    captureCommandRunning: Boolean,
+    previewFrame: PreviewVisualFrame?,
+    previewMessage: PreviewMessage?,
+    previewMode: PreviewMode,
+    showGrid: Boolean,
+    showFocusPeaking: Boolean,
+    showImuOverlay: Boolean,
+    sessionPage: SessionListPage?,
+    selectedSessionDetailSummary: SessionSummary?,
+    sessionMessage: SessionMessage?,
+    sessionRefreshing: Boolean,
+    sessionLoadingMore: Boolean,
+    sessionManifest: DeviceSessionManifest?,
+    sessionManifestMessage: SessionManifestMessage?,
+    sessionManifestLoading: Boolean,
+    unsuccessfulOutcome: RetainedUnsuccessfulOutcome?,
+    unsuccessfulOutcomeSessionId: String?,
+    unsuccessfulOutcomeMessage: UnsuccessfulOutcomeMessage?,
+    unsuccessfulOutcomeLoadingId: String?,
+    artifactDownloadMessage: ArtifactDownloadMessage?,
+    artifactDownloadingId: String?,
+    cameraFocus: CameraFocusStatus?,
+    cameraFocusMessage: CameraFocusMessage?,
+    cameraFocusCommandRunning: Boolean,
+    connectionGeneration: Long,
+    isForeground: Boolean,
+    localeTag: String,
+    updateState: AppUpdateManager.State,
+    safeDrawing: androidx.compose.foundation.layout.PaddingValues,
+    layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+    onOpenSessions: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenSettingsPage: (V3SettingsPage) -> Unit,
+    onCloseOverlay: () -> Unit,
+    onCloseSessionDetail: () -> Unit,
+    onBackToSettingsSummary: () -> Unit,
+    onStartCapture: () -> Unit,
+    onStopCapture: () -> Unit,
+    onStartCalibrationCapture: () -> Unit,
+    onPreviewModeChange: (PreviewMode) -> Unit,
+    onShowGridChange: (Boolean) -> Unit,
+    onShowFocusPeakingChange: (Boolean) -> Unit,
+    onShowImuOverlayChange: (Boolean) -> Unit,
+    onConnected: (VerifiedDeviceAdmission) -> Unit,
+    onDisconnect: () -> Unit,
+    onCancelDownload: () -> Unit,
+    onLoadUnsuccessfulOutcome: (SessionSummary) -> Unit,
+    onRefreshSessions: () -> Unit,
+    onLoadMoreSessions: () -> Unit,
+    onLoadManifest: (SessionSummary) -> Unit,
+    onDownloadArtifact: (ArtifactDescriptor) -> Unit,
+    onSetCameraFocus: (Long?, Boolean?) -> Unit,
+    onLocaleChange: (String) -> Unit,
+    onCheckUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit,
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(EchoColors.Void),
+            .background(EchoColors.Void)
+            .padding(
+                start = safeDrawing.calculateLeftPadding(layoutDirection),
+                top = safeDrawing.calculateTopPadding(),
+                end = safeDrawing.calculateRightPadding(layoutDirection),
+                bottom = safeDrawing.calculateBottomPadding(),
+            ),
     ) {
-        ApertureBackdrop(selectedTab)
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(
-                    start = safeDrawing.calculateLeftPadding(layoutDirection) + 12.dp,
-                    top = safeDrawing.calculateTopPadding() + 8.dp,
-                    end = safeDrawing.calculateRightPadding(layoutDirection) + 12.dp,
-                    bottom = bottomNavigationReserve,
-                ),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            TopStatus(bodyConnection)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-            ) {
-                when (selectedTab) {
-                    EchoTab.VIEWFINDER -> ViewfinderScreen(
+        V3CameraScreen(
+            bodyConnection = bodyConnection,
+            captureStatus = captureStatus,
+            captureMessage = captureMessage,
+            captureCommandMessage = captureCommandMessage,
+            captureCommandRunning = captureCommandRunning,
+            previewFrame = previewFrame,
+            previewMessage = previewMessage,
+            previewMode = previewMode,
+            showGrid = showGrid,
+            showFocusPeaking = showFocusPeaking,
+            showImuOverlay = showImuOverlay,
+            sessionCount = sessionPage?.items?.size ?: 0,
+            onStartCapture = onStartCapture,
+            onStopCapture = onStopCapture,
+            onStartCalibrationCapture = onStartCalibrationCapture,
+            onPreviewModeChange = onPreviewModeChange,
+            onShowGridChange = onShowGridChange,
+            onShowFocusPeakingChange = onShowFocusPeakingChange,
+            onShowImuOverlayChange = onShowImuOverlayChange,
+            onOpenSessions = onOpenSessions,
+            onOpenSettings = onOpenSettings,
+            onOpenBodySettings = { onOpenSettingsPage(V3SettingsPage.BODY) },
+            onConnected = onConnected,
+            modifier = Modifier.fillMaxSize(),
+        )
+        when (selectedSurface) {
+            V3Surface.CAMERA -> Unit
+            V3Surface.SESSIONS -> {
+                V3SessionsOverlay(
+                    bodyConnection = bodyConnection,
+                    sessionPage = sessionPage,
+                    selectedSessionDetailSummary = selectedSessionDetailSummary,
+                    sessionMessage = sessionMessage,
+                    sessionRefreshing = sessionRefreshing,
+                    sessionLoadingMore = sessionLoadingMore,
+                    sessionManifest = sessionManifest,
+                    sessionManifestMessage = sessionManifestMessage,
+                    sessionManifestLoading = sessionManifestLoading,
+                    unsuccessfulOutcome = unsuccessfulOutcome,
+                    unsuccessfulOutcomeSessionId = unsuccessfulOutcomeSessionId,
+                    unsuccessfulOutcomeMessage = unsuccessfulOutcomeMessage,
+                    unsuccessfulOutcomeLoadingId = unsuccessfulOutcomeLoadingId,
+                    artifactDownloadMessage = artifactDownloadMessage,
+                    artifactDownloadingId = artifactDownloadingId,
+                    onClose = onCloseOverlay,
+                    onCloseSessionDetail = onCloseSessionDetail,
+                    onCancelDownload = onCancelDownload,
+                    onLoadUnsuccessfulOutcome = onLoadUnsuccessfulOutcome,
+                    onRefreshSessions = onRefreshSessions,
+                    onLoadMoreSessions = onLoadMoreSessions,
+                    onLoadManifest = onLoadManifest,
+                    onDownloadArtifact = onDownloadArtifact,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            V3Surface.SETTINGS -> {
+                V3SettingsOverlay(
+                    selectedSettingsPage = selectedSettingsPage,
+                    bodyConnection = bodyConnection,
+                    captureStatus = captureStatus,
+                    captureStreamHealth = captureStreamHealth,
+                    captureMessage = captureMessage,
+                    captureCommandMessage = captureCommandMessage,
+                    captureCommandRunning = captureCommandRunning,
+                    cameraFocus = cameraFocus,
+                    cameraFocusMessage = cameraFocusMessage,
+                    cameraFocusCommandRunning = cameraFocusCommandRunning,
+                    connectionGeneration = connectionGeneration,
+                    isForeground = isForeground,
+                    localeTag = localeTag,
+                    updateState = updateState,
+                    onClose = onCloseOverlay,
+                    onBackToSummary = onBackToSettingsSummary,
+                    onOpenPage = onOpenSettingsPage,
+                    onDisconnect = onDisconnect,
+                    onStartCalibrationCapture = onStartCalibrationCapture,
+                    onSetCameraFocus = onSetCameraFocus,
+                    onLocaleChange = onLocaleChange,
+                    onCheckUpdate = onCheckUpdate,
+                    onInstallUpdate = onInstallUpdate,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun V3CameraScreen(
+    bodyConnection: DeviceConnection?,
+    captureStatus: CaptureStatusSnapshot?,
+    captureMessage: CaptureStatusMessage?,
+    captureCommandMessage: CaptureCommandMessage?,
+    captureCommandRunning: Boolean,
+    previewFrame: PreviewVisualFrame?,
+    previewMessage: PreviewMessage?,
+    previewMode: PreviewMode,
+    showGrid: Boolean,
+    showFocusPeaking: Boolean,
+    showImuOverlay: Boolean,
+    sessionCount: Int,
+    onStartCapture: () -> Unit,
+    onStopCapture: () -> Unit,
+    onStartCalibrationCapture: () -> Unit,
+    onPreviewModeChange: (PreviewMode) -> Unit,
+    onShowGridChange: (Boolean) -> Unit,
+    onShowFocusPeakingChange: (Boolean) -> Unit,
+    onShowImuOverlayChange: (Boolean) -> Unit,
+    onOpenSessions: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenBodySettings: () -> Unit,
+    onConnected: (VerifiedDeviceAdmission) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var selectedCaptureMode by rememberSaveable { mutableStateOf(V3CaptureMode.RECORD.name) }
+    val captureMode = V3CaptureMode.valueOf(selectedCaptureMode)
+    val liveImuQuality = captureStatus?.runtime?.liveImuQuality ?: bodyConnection?.descriptor?.runtime?.liveImuQuality
+    val canShowImuOverlay = liveImuQuality != null
+
+    LaunchedEffect(liveImuQuality, showImuOverlay) {
+        if (liveImuQuality == null && showImuOverlay) {
+            onShowImuOverlayChange(false)
+        }
+    }
+
+    BoxWithConstraints(modifier.background(EchoColors.Void)) {
+        val landscape = maxWidth > maxHeight
+        if (landscape) {
+            Row(Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                ) {
+                    V3TopBar(
+                        bodyConnection = bodyConnection,
+                        showGrid = showGrid,
+                        showFocusPeaking = showFocusPeaking,
+                        showImuOverlay = showImuOverlay,
+                        canShowImuOverlay = canShowImuOverlay,
+                        onShowGridChange = onShowGridChange,
+                        onShowFocusPeakingChange = onShowFocusPeakingChange,
+                        onShowImuOverlayChange = onShowImuOverlayChange,
+                        onOpenSettings = onOpenSettings,
+                    )
+                    V3ViewfinderStage(
                         bodyConnection = bodyConnection,
                         captureStatus = captureStatus,
-                        captureStreamHealth = captureStreamHealth,
-                        captureMessage = captureMessage,
-                        captureCommandMessage = captureCommandMessage,
-                        captureCommandRunning = captureCommandRunning,
                         previewFrame = previewFrame,
                         previewMessage = previewMessage,
-                        previewMode = PreviewMode.valueOf(previewModeName),
-                        showGrid = showPreviewGrid,
+                        previewMode = previewMode,
+                        showGrid = showGrid,
                         showFocusPeaking = showFocusPeaking,
-                        showImuOverlay = showPreviewImuOverlay,
-                        onStartCapture = startCapture,
-                        onStopCapture = stopCapture,
-                        onPreviewModeChange = { previewModeName = it.name },
-                        onShowGridChange = { showPreviewGrid = it },
-                        onShowFocusPeakingChange = { enabled ->
-                            previewFrameGate.beginGeneration()
-                            showFocusPeaking = enabled
-                            if (!enabled) {
-                                previewFrame = previewFrame?.copy(focusMask = null)
-                            }
-                        },
-                        onShowImuOverlayChange = { showPreviewImuOverlay = it },
-                        onConnected = ::admitBody,
+                        showImuOverlay = showImuOverlay,
+                        liveImuQuality = liveImuQuality,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
                     )
-                    EchoTab.SESSIONS -> SessionsScreen(
-                        bodyConnection = bodyConnection,
-                        sessionPage = sessionPage,
-                        sessionMessage = sessionMessage,
-                        sessionRefreshing = sessionRefreshing,
-                        sessionLoadingMore = sessionLoadingMore,
-                        sessionManifest = sessionManifest,
-                        sessionManifestMessage = sessionManifestMessage,
-                        sessionManifestLoading = sessionManifestLoading,
-                        unsuccessfulOutcome = unsuccessfulOutcome,
-                        unsuccessfulOutcomeSessionId = unsuccessfulOutcomeSessionId,
-                        unsuccessfulOutcomeMessage = unsuccessfulOutcomeMessage,
-                        unsuccessfulOutcomeLoadingId = unsuccessfulOutcomeLoadingId,
-                        artifactDownloadMessage = artifactDownloadMessage,
-                        artifactDownloadingId = artifactDownloadingId,
-                        onCancelDownload = { cancelArtifactDownload?.invoke() },
-                        onLoadUnsuccessfulOutcome = loadUnsuccessfulOutcome,
-                        onRefreshSessions = refreshSessions,
-                        onLoadMoreSessions = loadMoreSessions,
-                        onLoadManifest = loadSessionManifest,
-                        onDownloadArtifact = downloadArtifact,
+                }
+                if (bodyConnection == null) {
+                    V3ConnectionSheet(
+                        onConnected = onConnected,
+                        modifier = Modifier
+                            .widthIn(min = 260.dp, max = 340.dp)
+                            .fillMaxHeight(),
+                        compact = true,
                     )
-                    EchoTab.BODY -> BodyScreen(
+                } else {
+                    V3CameraTray(
                         bodyConnection = bodyConnection,
                         captureStatus = captureStatus,
                         captureMessage = captureMessage,
                         captureCommandMessage = captureCommandMessage,
-                        cameraFocus = cameraFocus,
-                        cameraFocusMessage = cameraFocusMessage,
                         captureCommandRunning = captureCommandRunning,
-                        cameraFocusCommandRunning = cameraFocusCommandRunning,
-                        onStartCalibrationCapture = startCalibrationCapture,
-                        onSetCameraFocus = setCameraFocus,
-                        localeTag = localeTag,
-                        updateState = updateState,
-                        onDisconnect = { replaceBodyConnection(null) },
-                        onLocaleChange = onLocaleChange,
-                        onCheckUpdate = onCheckUpdate,
-                        onInstallUpdate = onInstallUpdate,
-                    )
-                    EchoTab.NETWORK -> NetworkScreen(
-                        bodyConnection = bodyConnection,
-                        captureStatus = captureStatus,
-                        connectionGeneration = connectionGeneration,
-                        isForeground = appInForeground,
+                        previewMode = previewMode,
+                        captureMode = captureMode,
+                        sessionCount = sessionCount,
+                        liveImuQuality = liveImuQuality,
+                        onCaptureModeChange = { selectedCaptureMode = it.name },
+                        onPreviewModeChange = onPreviewModeChange,
+                        onStartCapture = onStartCapture,
+                        onStopCapture = onStopCapture,
+                        onStartCalibrationCapture = onStartCalibrationCapture,
+                        onOpenSessions = onOpenSessions,
+                        onOpenBodySettings = onOpenBodySettings,
+                        modifier = Modifier
+                            .widthIn(min = 220.dp, max = 270.dp)
+                            .fillMaxHeight(),
                     )
                 }
             }
+        } else {
+            val targetStageHeight = maxWidth * 4f / 3f
+            val minimumTray = if (bodyConnection == null) 166.dp else 220.dp
+            val maximumStageHeight = (maxHeight - 58.dp - minimumTray).coerceAtLeast(260.dp)
+            val stageHeight = if (targetStageHeight > maximumStageHeight) {
+                maximumStageHeight
+            } else {
+                targetStageHeight
+            }
+            Column(Modifier.fillMaxSize()) {
+                V3TopBar(
+                    bodyConnection = bodyConnection,
+                    showGrid = showGrid,
+                    showFocusPeaking = showFocusPeaking,
+                    showImuOverlay = showImuOverlay,
+                    canShowImuOverlay = canShowImuOverlay,
+                    onShowGridChange = onShowGridChange,
+                    onShowFocusPeakingChange = onShowFocusPeakingChange,
+                    onShowImuOverlayChange = onShowImuOverlayChange,
+                    onOpenSettings = onOpenSettings,
+                )
+                V3ViewfinderStage(
+                    bodyConnection = bodyConnection,
+                    captureStatus = captureStatus,
+                    previewFrame = previewFrame,
+                    previewMessage = previewMessage,
+                    previewMode = previewMode,
+                    showGrid = showGrid,
+                    showFocusPeaking = showFocusPeaking,
+                    showImuOverlay = showImuOverlay,
+                    liveImuQuality = liveImuQuality,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(stageHeight),
+                )
+                if (bodyConnection == null) {
+                    Spacer(Modifier.weight(1f))
+                } else {
+                    V3CameraTray(
+                        bodyConnection = bodyConnection,
+                        captureStatus = captureStatus,
+                        captureMessage = captureMessage,
+                        captureCommandMessage = captureCommandMessage,
+                        captureCommandRunning = captureCommandRunning,
+                        previewMode = previewMode,
+                        captureMode = captureMode,
+                        sessionCount = sessionCount,
+                        liveImuQuality = liveImuQuality,
+                        onCaptureModeChange = { selectedCaptureMode = it.name },
+                        onPreviewModeChange = onPreviewModeChange,
+                        onStartCapture = onStartCapture,
+                        onStopCapture = onStopCapture,
+                        onStartCalibrationCapture = onStartCalibrationCapture,
+                        onOpenSessions = onOpenSessions,
+                        onOpenBodySettings = onOpenBodySettings,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                    )
+                }
+            }
+            if (bodyConnection == null) {
+                V3ConnectionSheet(
+                    onConnected = onConnected,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .heightIn(max = maxHeight * 0.58f),
+                    compact = false,
+                )
+            }
         }
-        BottomNavigation(
-            selectedTab = selectedTab,
-            onSelect = { nextTab ->
-                if (nextTab != EchoTab.VIEWFINDER) {
-                    previewFrameGate.beginGeneration()
-                    previewFrame = null
-                }
-                if (nextTab != EchoTab.SESSIONS) {
-                    dismissSessionDetail()
-                    dismissSessionOutcome()
-                }
-                selectedTabName = nextTab.name
-            },
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
+    }
+}
+
+@Composable
+private fun V3TopBar(
+    bodyConnection: DeviceConnection?,
+    showGrid: Boolean,
+    showFocusPeaking: Boolean,
+    showImuOverlay: Boolean,
+    canShowImuOverlay: Boolean,
+    onShowGridChange: (Boolean) -> Unit,
+    onShowFocusPeakingChange: (Boolean) -> Unit,
+    onShowImuOverlayChange: (Boolean) -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(58.dp)
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        V3IdentityPill(bodyConnection, Modifier.weight(1f, fill = false))
+        Spacer(Modifier.weight(1f))
+        if (bodyConnection != null) {
+            V3IconToggle(
+                label = stringResource(R.string.grid),
+                selected = showGrid,
+                enabled = true,
+                icon = V3IconKind.GRID,
+                onToggle = { onShowGridChange(!showGrid) },
+            )
+            V3IconToggle(
+                label = stringResource(R.string.focus_peaking),
+                selected = showFocusPeaking,
+                enabled = true,
+                icon = V3IconKind.FOCUS,
+                onToggle = { onShowFocusPeakingChange(!showFocusPeaking) },
+            )
+            V3IconToggle(
+                label = stringResource(R.string.imu_overlay),
+                selected = showImuOverlay,
+                enabled = canShowImuOverlay,
+                icon = V3IconKind.IMU,
+                disabledReason = stringResource(R.string.imu_overlay_no_sample),
+                onToggle = { onShowImuOverlayChange(!showImuOverlay) },
+            )
+        }
+        V3IconButton(
+            label = stringResource(R.string.v3_settings),
+            icon = V3IconKind.SETTINGS,
+            onClick = onOpenSettings,
         )
-        if (showRecordingBackgroundConfirmation) {
-            RecordingBackgroundConfirmation(
-                onDismiss = { showRecordingBackgroundConfirmation = false },
-                onMoveToBackground = {
-                    showRecordingBackgroundConfirmation = false
-                    context.findActivity()?.moveTaskToBack(true)
+    }
+}
+
+@Composable
+private fun V3IdentityPill(bodyConnection: DeviceConnection?, modifier: Modifier = Modifier) {
+    val label = bodyConnection?.descriptor?.deviceLabel ?: stringResource(R.string.status_no_body)
+    val status = if (bodyConnection == null) {
+        stringResource(R.string.status_no_body)
+    } else {
+        stringResource(R.string.verified_connection)
+    }
+    val screenTitle = stringResource(R.string.screen_title)
+    val dotColor = if (bodyConnection == null) EchoColors.InkMuted else EchoColors.Permit
+    Row(
+        modifier = modifier
+            .height(32.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color.White.copy(alpha = 0.09f))
+            .semantics { contentDescription = "$screenTitle, $status" }
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(dotColor),
+        )
+        EchoText(
+            value = label,
+            color = EchoColors.Ink,
+            style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 12.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun V3ViewfinderStage(
+    bodyConnection: DeviceConnection?,
+    captureStatus: CaptureStatusSnapshot?,
+    previewFrame: PreviewVisualFrame?,
+    previewMessage: PreviewMessage?,
+    previewMode: PreviewMode,
+    showGrid: Boolean,
+    showFocusPeaking: Boolean,
+    showImuOverlay: Boolean,
+    liveImuQuality: String?,
+    modifier: Modifier = Modifier,
+) {
+    val previewDescription = stringResource(R.string.preview_frame_content)
+    Box(
+        modifier = modifier
+            .background(EchoColors.Deck)
+            .semantics {
+                contentDescription = previewDescription
+            },
+    ) {
+        if (previewFrame != null) {
+            PreviewImage(previewFrame.image, previewMode)
+            if (showFocusPeaking && previewFrame.focusMask != null) {
+                FocusPeakOverlay(previewFrame.focusMask, previewMode)
+            }
+        }
+        if (showGrid && previewFrame != null) {
+            PreviewGrid()
+        }
+        if (showImuOverlay && liveImuQuality != null) {
+            ImuOverlay(
+                quality = liveImuQuality,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(12.dp),
+            )
+        }
+        if (previewFrame == null) {
+            V3PreviewEmpty(
+                bodyConnection = bodyConnection,
+                previewMessage = previewMessage,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+        if (bodyConnection != null && captureStatus?.deviceState == "recording") {
+            V3RecordingPill(
+                label = "${deviceStateLabel("recording")} · ${stringResource(R.string.source_revision, captureStatus.sourceRevision)}",
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 16.dp),
+            )
+        }
+        EchoText(
+            value = stringResource(R.string.v3_preview_tag),
+            color = Color(0xFF495154),
+            style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(top = 76.dp),
+        )
+    }
+}
+
+@Composable
+private fun V3PreviewEmpty(
+    bodyConnection: DeviceConnection?,
+    previewMessage: PreviewMessage?,
+    modifier: Modifier = Modifier,
+) {
+    val title = when {
+        bodyConnection == null -> stringResource(R.string.status_no_body)
+        previewMessage == PreviewMessage.CameraNotConnected -> stringResource(R.string.preview_camera_not_connected)
+        else -> previewStatusLabel(bodyConnection, previewMessage)
+    }
+    val body = when {
+        bodyConnection == null -> stringResource(R.string.v3_preview_disconnected_body)
+        previewMessage == PreviewMessage.CameraNotConnected -> stringResource(R.string.preview_camera_not_connected_body)
+        else -> previewStatusBody(bodyConnection, previewMessage)
+    }
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 28.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        EchoText(
+            value = title,
+            color = EchoColors.InkMuted,
+            style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 17.sp),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        EchoText(
+            value = body,
+            color = Color(0xFF5C6568),
+            style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun V3RecordingPill(label: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color.Black.copy(alpha = 0.55f))
+            .padding(horizontal = 13.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(EchoColors.Record),
+        )
+        EchoText(
+            value = label,
+            color = Color.White,
+            style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun V3CameraTray(
+    bodyConnection: DeviceConnection,
+    captureStatus: CaptureStatusSnapshot?,
+    captureMessage: CaptureStatusMessage?,
+    captureCommandMessage: CaptureCommandMessage?,
+    captureCommandRunning: Boolean,
+    previewMode: PreviewMode,
+    captureMode: V3CaptureMode,
+    sessionCount: Int,
+    liveImuQuality: String?,
+    onCaptureModeChange: (V3CaptureMode) -> Unit,
+    onPreviewModeChange: (PreviewMode) -> Unit,
+    onStartCapture: () -> Unit,
+    onStopCapture: () -> Unit,
+    onStartCalibrationCapture: () -> Unit,
+    onOpenSessions: () -> Unit,
+    onOpenBodySettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val recording = captureStatus?.deviceState == "recording"
+    val canStartRecord = bodyConnection.descriptor.captureCapable &&
+        !captureCommandRunning &&
+        isCameraConnected(bodyConnection, captureStatus) &&
+        bodyConnection.descriptor.writable &&
+        captureStatus?.deviceState == "idle"
+    val canStartCalibration = !captureCommandRunning &&
+        bodyConnection.descriptor.calibrationCapture.enabled &&
+        isCameraConnected(bodyConnection, captureStatus) &&
+        bodyConnection.descriptor.writable &&
+        captureStatus?.deviceState == "idle"
+    val canStop = !captureCommandRunning && recording
+    val startEnabled = if (captureMode == V3CaptureMode.CALIBRATION) canStartCalibration else canStartRecord
+    val shutterEnabled = if (recording) canStop else startEnabled
+    val shutterLabel = when {
+        recording -> stringResource(R.string.stop_recording)
+        captureMode == V3CaptureMode.CALIBRATION -> stringResource(R.string.calibration_start)
+        else -> stringResource(R.string.start_recording)
+    }
+    val disabledReason = when {
+        recording -> stopDisabledReason(bodyConnection, captureStatus, captureCommandRunning)
+        captureMode == V3CaptureMode.CALIBRATION -> {
+            calibrationStartDisabledReason(bodyConnection, captureStatus, captureCommandRunning)
+        }
+        else -> startDisabledReason(bodyConnection, captureStatus, captureCommandRunning)
+    }
+    val shutterAction = when {
+        recording -> onStopCapture
+        captureMode == V3CaptureMode.CALIBRATION -> onStartCalibrationCapture
+        else -> onStartCapture
+    }
+
+    Column(
+        modifier = modifier
+            .background(EchoColors.Void)
+            .padding(start = 20.dp, top = 12.dp, end = 20.dp, bottom = 22.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Bottom,
+    ) {
+        V3PreviewModeControl(
+            selected = previewMode,
+            onSelected = onPreviewModeChange,
+        )
+        Spacer(Modifier.height(12.dp))
+        V3CameraStatusLine(
+            bodyConnection = bodyConnection,
+            captureStatus = captureStatus,
+            captureMessage = captureMessage,
+            captureCommandMessage = captureCommandMessage,
+            captureMode = captureMode,
+            liveImuQuality = liveImuQuality,
+        )
+        Spacer(Modifier.height(12.dp))
+        V3CaptureModeStrip(
+            selected = captureMode,
+            recording = recording,
+            onSelected = onCaptureModeChange,
+        )
+        Spacer(Modifier.height(12.dp))
+        V3ShutterRow(
+            sessionCount = sessionCount,
+            sessionsEnabled = bodyConnection.descriptor.sessionListCapable,
+            shutterLabel = shutterLabel,
+            shutterEnabled = shutterEnabled,
+            shutterRecording = recording,
+            shutterDisabledReason = disabledReason,
+            onOpenSessions = onOpenSessions,
+            onShutter = shutterAction,
+            onOpenBodySettings = onOpenBodySettings,
+        )
+    }
+}
+
+@Composable
+private fun V3PreviewModeControl(
+    selected: PreviewMode,
+    onSelected: (PreviewMode) -> Unit,
+) {
+    val options = listOf(
+        PreviewMode.BOTH to stringResource(R.string.view_both),
+        PreviewMode.LEFT to stringResource(R.string.view_left),
+        PreviewMode.RIGHT to stringResource(R.string.view_right),
+    )
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color.White.copy(alpha = 0.08f))
+            .padding(4.dp)
+            .selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        options.forEach { (mode, label) ->
+            val isSelected = mode == selected
+            val state = stringResource(if (isSelected) R.string.nav_selected else R.string.nav_not_selected)
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 52.dp, minHeight = 48.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(if (isSelected) Color.White.copy(alpha = 0.20f) else Color.Transparent)
+                    .selectable(
+                        selected = isSelected,
+                        role = Role.RadioButton,
+                        onClick = { onSelected(mode) },
+                    )
+                    .semantics {
+                        contentDescription = label
+                        stateDescription = state
+                    }
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                EchoText(
+                    value = label,
+                    color = if (isSelected) Color.White else Color(0xFFAEB5B8),
+                    style = TextStyle(fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal, fontSize = 12.sp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun V3CameraStatusLine(
+    bodyConnection: DeviceConnection,
+    captureStatus: CaptureStatusSnapshot?,
+    captureMessage: CaptureStatusMessage?,
+    captureCommandMessage: CaptureCommandMessage?,
+    captureMode: V3CaptureMode,
+    liveImuQuality: String?,
+) {
+    val (label, color) = when {
+        captureCommandMessage != null -> captureCommandStatusText(captureCommandMessage) to EchoColors.Live
+        captureMessage != null && captureStatus == null -> captureStatusMessageText(captureMessage) to EchoColors.Caution
+        captureStatus?.deviceState == "recording" -> {
+            val imu = liveImuQuality?.let { imuQualityLabel(it) } ?: stringResource(R.string.value_none)
+            stringResource(R.string.v3_status_recording, imu, captureStatus.sourceRevision) to EchoColors.InkMuted
+        }
+        captureStatus?.deviceState == "idle" && isCameraConnected(bodyConnection, captureStatus) -> {
+            stringResource(
+                R.string.v3_status_ready,
+                formatByteSize(bodyConnection.descriptor.availableBytes),
+                captureStatus.runtime.temperatureCelsius,
+            ) to EchoColors.InkMuted
+        }
+        !isCameraConnected(bodyConnection, captureStatus) -> {
+            stringResource(R.string.v3_status_unavailable, stringResource(R.string.capture_disabled_camera)) to EchoColors.Caution
+        }
+        captureStatus != null -> {
+            "${deviceStateLabel(captureStatus.deviceState)} · ${stringResource(R.string.source_revision, captureStatus.sourceRevision)}" to
+                deviceStateColor(captureStatus.deviceState)
+        }
+        captureMode == V3CaptureMode.CALIBRATION -> calibrationStartDisabledReason(bodyConnection, captureStatus, false) to EchoColors.Caution
+        else -> stringResource(R.string.capture_polling) to EchoColors.Live
+    }
+    EchoText(
+        value = label,
+        color = color,
+        style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+    )
+}
+
+@Composable
+private fun V3CaptureModeStrip(
+    selected: V3CaptureMode,
+    recording: Boolean,
+    onSelected: (V3CaptureMode) -> Unit,
+) {
+    val options = if (recording) {
+        listOf(V3CaptureMode.RECORD)
+    } else {
+        V3CaptureMode.entries
+    }
+    Row(
+        modifier = Modifier
+            .height(32.dp)
+            .selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(30.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        options.forEach { mode ->
+            val label = stringResource(mode.label)
+            val isSelected = selected == mode || recording
+            val state = stringResource(if (isSelected) R.string.nav_selected else R.string.nav_not_selected)
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 32.dp)
+                    .selectable(
+                        selected = isSelected,
+                        role = Role.RadioButton,
+                        onClick = { onSelected(mode) },
+                    )
+                    .semantics {
+                        contentDescription = label
+                        stateDescription = state
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                EchoText(
+                    value = label,
+                    color = if (isSelected) EchoColors.Ink else Color(0xFF6E7679),
+                    style = TextStyle(fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal, fontSize = 12.sp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun V3ShutterRow(
+    sessionCount: Int,
+    sessionsEnabled: Boolean,
+    shutterLabel: String,
+    shutterEnabled: Boolean,
+    shutterRecording: Boolean,
+    shutterDisabledReason: String,
+    onOpenSessions: () -> Unit,
+    onShutter: () -> Unit,
+    onOpenBodySettings: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        V3GalleryButton(
+            count = sessionCount,
+            enabled = sessionsEnabled,
+            onClick = onOpenSessions,
+        )
+        V3ShutterButton(
+            label = shutterLabel,
+            enabled = shutterEnabled,
+            recording = shutterRecording,
+            disabledReason = shutterDisabledReason,
+            onClick = onShutter,
+        )
+        V3SideIconButton(
+            label = stringResource(R.string.v3_switch_body),
+            icon = V3IconKind.DEVICE,
+            enabled = true,
+            onClick = onOpenBodySettings,
+        )
+    }
+}
+
+@Composable
+private fun V3GalleryButton(
+    count: Int,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val label = stringResource(R.string.nav_sessions)
+    val countDescription = stringResource(R.string.v3_sessions_count, count)
+    val semanticsModifier = if (enabled) {
+        Modifier.clickable(role = Role.Button, onClick = onClick)
+    } else {
+        Modifier.semantics {
+            role = Role.Button
+            disabled()
+        }
+    }
+    Box(
+        modifier = Modifier
+            .size(52.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF0D0F10))
+            .border(1.dp, Color.White.copy(alpha = 0.24f), RoundedCornerShape(12.dp))
+            .semantics {
+                contentDescription = label
+                stateDescription = countDescription
+            }
+            .then(semanticsModifier),
+    ) {
+        V3PreviewTexture(alpha = if (enabled) 0.32f else 0.10f)
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(3.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color.Black.copy(alpha = 0.62f))
+                .padding(horizontal = 4.dp, vertical = 1.dp),
+        ) {
+            EchoText(
+                value = count.toString(),
+                color = Color.White,
+                style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 9.sp),
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+@Composable
+private fun V3ShutterButton(
+    label: String,
+    enabled: Boolean,
+    recording: Boolean,
+    disabledReason: String,
+    onClick: () -> Unit,
+) {
+    val semanticModifier = if (enabled) {
+        Modifier.clickable(role = Role.Button, onClick = onClick)
+    } else {
+        Modifier.semantics {
+            role = Role.Button
+            disabled()
+            stateDescription = disabledReason
+        }
+    }
+    Box(
+        modifier = Modifier
+            .size(96.dp)
+            .semantics { contentDescription = label }
+            .then(semanticModifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(82.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .border(
+                    width = 4.dp,
+                    color = if (enabled) Color.White else Color.White.copy(alpha = 0.26f),
+                    shape = RoundedCornerShape(999.dp),
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(if (recording) 30.dp else 64.dp)
+                    .clip(RoundedCornerShape(if (recording) 8.dp else 999.dp))
+                    .background(if (enabled) EchoColors.Record else EchoColors.Record.copy(alpha = 0.24f)),
+            )
+        }
+    }
+}
+
+@Composable
+private fun V3SideIconButton(
+    label: String,
+    icon: V3IconKind,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val semanticModifier = if (enabled) {
+        Modifier.clickable(role = Role.Button, onClick = onClick)
+    } else {
+        Modifier.semantics {
+            role = Role.Button
+            disabled()
+        }
+    }
+    Box(
+        modifier = Modifier
+            .size(52.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color.White.copy(alpha = 0.09f))
+            .semantics { contentDescription = label }
+            .then(semanticModifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        V3Icon(icon, if (enabled) EchoColors.Ink else Color(0xFF4F585C))
+    }
+}
+
+@Composable
+private fun V3ConnectionSheet(
+    onConnected: (VerifiedDeviceAdmission) -> Unit,
+    modifier: Modifier = Modifier,
+    compact: Boolean,
+) {
+    Column(
+        modifier = modifier
+            .clip(if (compact) RoundedCornerShape(0.dp) else RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+            .background(Color(0xFF0A0C0D))
+            .border(
+                1.dp,
+                Color.White.copy(alpha = 0.12f),
+                if (compact) RoundedCornerShape(0.dp) else RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+            )
+            .padding(start = 14.dp, top = 12.dp, end = 14.dp, bottom = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (!compact) {
+            Box(
+                modifier = Modifier
+                    .size(width = 38.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color.White.copy(alpha = 0.22f))
+                    .align(Alignment.CenterHorizontally),
+            )
+        }
+        EchoText(
+            value = stringResource(R.string.nearby_bodies),
+            color = EchoColors.Ink,
+            style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 17.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Column(
+            modifier = Modifier.verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            ConnectionPanel(onConnected)
+        }
+    }
+}
+
+@Composable
+private fun V3SessionsOverlay(
+    bodyConnection: DeviceConnection?,
+    sessionPage: SessionListPage?,
+    selectedSessionDetailSummary: SessionSummary?,
+    sessionMessage: SessionMessage?,
+    sessionRefreshing: Boolean,
+    sessionLoadingMore: Boolean,
+    sessionManifest: DeviceSessionManifest?,
+    sessionManifestMessage: SessionManifestMessage?,
+    sessionManifestLoading: Boolean,
+    unsuccessfulOutcome: RetainedUnsuccessfulOutcome?,
+    unsuccessfulOutcomeSessionId: String?,
+    unsuccessfulOutcomeMessage: UnsuccessfulOutcomeMessage?,
+    unsuccessfulOutcomeLoadingId: String?,
+    artifactDownloadMessage: ArtifactDownloadMessage?,
+    artifactDownloadingId: String?,
+    onClose: () -> Unit,
+    onCloseSessionDetail: () -> Unit,
+    onCancelDownload: () -> Unit,
+    onLoadUnsuccessfulOutcome: (SessionSummary) -> Unit,
+    onRefreshSessions: () -> Unit,
+    onLoadMoreSessions: () -> Unit,
+    onLoadManifest: (SessionSummary) -> Unit,
+    onDownloadArtifact: (ArtifactDescriptor) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val detailVisible = selectedSessionDetailSummary != null || sessionManifest != null ||
+        sessionManifestMessage != null || sessionManifestLoading
+    Column(
+        modifier = modifier.background(EchoColors.Void),
+    ) {
+        V3Header(
+            title = if (detailVisible) {
+                sessionManifest?.displayName ?: selectedSessionDetailSummary?.displayName ?: stringResource(R.string.nav_sessions)
+            } else {
+                stringResource(R.string.nav_sessions)
+            },
+            trailing = if (detailVisible) {
+                selectedSessionDetailSummary?.verificationVerdict?.let { gatewayVerdictLabel(it) }
+            } else {
+                (sessionPage?.items?.size ?: 0).toString()
+            },
+            onClose = if (detailVisible) onCloseSessionDetail else onClose,
+        )
+        if (detailVisible) {
+            V3SessionDetailScreen(
+                summary = selectedSessionDetailSummary,
+                manifest = sessionManifest,
+                manifestMessage = sessionManifestMessage,
+                manifestLoading = sessionManifestLoading,
+                unsuccessfulOutcome = unsuccessfulOutcome?.takeIf {
+                    selectedSessionDetailSummary?.sessionId == unsuccessfulOutcomeSessionId
+                },
+                unsuccessfulOutcomeMessage = unsuccessfulOutcomeMessage.takeIf {
+                    selectedSessionDetailSummary?.sessionId == unsuccessfulOutcomeSessionId
+                },
+                unsuccessfulOutcomeLoading = selectedSessionDetailSummary?.sessionId == unsuccessfulOutcomeLoadingId,
+                artifactDownloadMessage = artifactDownloadMessage,
+                artifactDownloadingId = artifactDownloadingId,
+                onCancelDownload = onCancelDownload,
+                onLoadUnsuccessfulOutcome = onLoadUnsuccessfulOutcome,
+                onDownloadArtifact = onDownloadArtifact,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            V3SessionGallery(
+                bodyConnection = bodyConnection,
+                sessionPage = sessionPage,
+                sessionMessage = sessionMessage,
+                sessionRefreshing = sessionRefreshing,
+                sessionLoadingMore = sessionLoadingMore,
+                onRefreshSessions = onRefreshSessions,
+                onLoadMoreSessions = onLoadMoreSessions,
+                onLoadManifest = onLoadManifest,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun V3SessionGallery(
+    bodyConnection: DeviceConnection?,
+    sessionPage: SessionListPage?,
+    sessionMessage: SessionMessage?,
+    sessionRefreshing: Boolean,
+    sessionLoadingMore: Boolean,
+    onRefreshSessions: () -> Unit,
+    onLoadMoreSessions: () -> Unit,
+    onLoadManifest: (SessionSummary) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var sessionFilter by rememberSaveable(bodyConnection?.origin) { mutableStateOf(SESSION_FILTER_ALL) }
+    val visibleSessionItems = sessionPage?.items.orEmpty().filter { sessionMatchesFilter(it, sessionFilter) }
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        V3FilterChips(
+            selected = sessionFilter,
+            onSelected = { sessionFilter = it },
+        )
+        ActionButton(
+            label = if (sessionRefreshing) {
+                stringResource(R.string.sessions_refreshing)
+            } else {
+                stringResource(R.string.sessions_refresh)
+            },
+            enabled = bodyConnection != null && !sessionRefreshing,
+            disabledReason = if (bodyConnection == null) {
+                stringResource(R.string.body_not_ready)
+            } else {
+                stringResource(R.string.sessions_refreshing)
+            },
+            onClick = onRefreshSessions,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        when {
+            bodyConnection == null -> InfoBlock(
+                title = stringResource(R.string.status_no_body),
+                body = stringResource(R.string.sessions_empty),
+                accent = EchoColors.InkMuted,
+            )
+            sessionPage == null && sessionMessage == null -> InfoBlock(
+                title = stringResource(R.string.nav_sessions),
+                body = stringResource(R.string.sessions_loading),
+                accent = EchoColors.Live,
+                liveRegionMode = LiveRegionMode.Polite,
+            )
+            sessionPage?.items?.isEmpty() == true -> InfoBlock(
+                title = stringResource(R.string.nav_sessions),
+                body = stringResource(R.string.sessions_empty_connected),
+                accent = EchoColors.InkMuted,
+            )
+            visibleSessionItems.isEmpty() -> InfoBlock(
+                title = stringResource(R.string.sessions_filter_empty_title),
+                body = stringResource(R.string.sessions_filter_empty_body),
+                accent = EchoColors.InkMuted,
+            )
+        }
+        sessionMessage?.let { SessionMessageBlock(it) }
+        visibleSessionItems.chunked(2).forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                row.forEach { summary ->
+                    V3SessionCell(
+                        summary = summary,
+                        onClick = { onLoadManifest(summary) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                if (row.size == 1) {
+                    Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+        sessionPage?.readOnlyDiagnosticPresentations()?.forEach { presentation ->
+            SessionDiagnosticPanel(presentation)
+        }
+        sessionPage?.nextCursor?.let {
+            ActionButton(
+                label = if (sessionLoadingMore) {
+                    stringResource(R.string.sessions_loading_more)
+                } else {
+                    stringResource(R.string.sessions_load_more)
+                },
+                enabled = !sessionLoadingMore,
+                disabledReason = stringResource(R.string.sessions_loading_more),
+                onClick = onLoadMoreSessions,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        EchoText(
+            value = stringResource(R.string.v3_session_gallery_hint),
+            color = EchoColors.InkMuted,
+            style = TextStyle(fontSize = 12.sp, lineHeight = 18.sp),
+        )
+    }
+}
+
+@Composable
+private fun V3FilterChips(
+    selected: String,
+    onSelected: (String) -> Unit,
+) {
+    Row(
+        modifier = Modifier.selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        listOf(
+            SESSION_FILTER_ALL to stringResource(R.string.sessions_filter_all),
+            SESSION_FILTER_AVAILABLE to stringResource(R.string.sessions_filter_available),
+            SESSION_FILTER_UNSUCCESSFUL to stringResource(R.string.sessions_filter_unsuccessful),
+        ).forEach { (value, label) ->
+            val isSelected = selected == value
+            val state = stringResource(if (isSelected) R.string.nav_selected else R.string.nav_not_selected)
+            Box(
+                modifier = Modifier
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(if (isSelected) EchoColors.Ink else Color.White.copy(alpha = 0.07f))
+                    .selectable(
+                        selected = isSelected,
+                        role = Role.RadioButton,
+                        onClick = { onSelected(value) },
+                    )
+                    .semantics {
+                        contentDescription = label
+                        stateDescription = state
+                    }
+                    .padding(horizontal = 14.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                EchoText(
+                    value = label,
+                    color = if (isSelected) EchoColors.Void else Color(0xFF9AA2A6),
+                    style = TextStyle(fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal, fontSize = 13.sp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun V3SessionCell(
+    summary: SessionSummary,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val usable = summary.verificationVerdict == "usable"
+    val state = if (usable) {
+        stringResource(R.string.session_gateway_verdict_usable)
+    } else {
+        stringResource(R.string.session_gateway_verdict_unusable)
+    }
+    Box(
+        modifier = modifier
+            .height(158.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF0D0F10))
+            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics {
+                contentDescription = summary.displayName
+                stateDescription = state
+            },
+    ) {
+        V3PreviewTexture(alpha = 0.22f)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.62f)),
+                        startY = 70f,
+                    ),
+                ),
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+                .size(8.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(if (usable) EchoColors.Permit else EchoColors.Caution),
+        )
+        EchoText(
+            value = formatDuration(summary.durationSeconds),
+            color = Color.White,
+            style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(8.dp),
+        )
+        EchoText(
+            value = summary.displayName,
+            color = Color.White.copy(alpha = 0.88f),
+            style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 12.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(8.dp),
+        )
+    }
+}
+
+@Composable
+private fun V3SessionDetailScreen(
+    summary: SessionSummary?,
+    manifest: DeviceSessionManifest?,
+    manifestMessage: SessionManifestMessage?,
+    manifestLoading: Boolean,
+    unsuccessfulOutcome: RetainedUnsuccessfulOutcome?,
+    unsuccessfulOutcomeMessage: UnsuccessfulOutcomeMessage?,
+    unsuccessfulOutcomeLoading: Boolean,
+    artifactDownloadMessage: ArtifactDownloadMessage?,
+    artifactDownloadingId: String?,
+    onCancelDownload: () -> Unit,
+    onLoadUnsuccessfulOutcome: (SessionSummary) -> Unit,
+    onDownloadArtifact: (ArtifactDescriptor) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = 18.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(280.dp)
+                .background(EchoColors.Deck),
+            contentAlignment = Alignment.Center,
+        ) {
+            V3PreviewTexture(alpha = 0.22f)
+            EchoText(
+                value = stringResource(R.string.v3_session_thumbnail),
+                color = Color(0xFF495154),
+                style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Column(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            summary?.let { item ->
+                EchoText(
+                    value = stringResource(
+                        R.string.v3_session_meta,
+                        item.startedAt,
+                        formatDuration(item.durationSeconds),
+                        formatByteSize(item.totalBytes),
+                        item.verificationVerdict?.let { gatewayVerdictLabel(it) } ?: stringResource(R.string.session_no_verification),
+                    ),
+                    color = EchoColors.InkMuted,
+                    style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 16.sp),
+                )
+            }
+            if (manifestLoading) {
+                InfoBlock(
+                    title = stringResource(R.string.artifacts),
+                    body = stringResource(R.string.session_manifest_loading),
+                    accent = EchoColors.Live,
+                    liveRegionMode = LiveRegionMode.Polite,
+                )
+            }
+            manifestMessage?.let { SessionManifestMessageBlock(it) }
+            manifest?.let { loadedManifest ->
+                if (loadedManifest.artifacts.isEmpty()) {
+                    InfoBlock(
+                        title = stringResource(R.string.artifacts),
+                        body = stringResource(R.string.artifacts_empty),
+                        accent = EchoColors.InkMuted,
+                    )
+                }
+                loadedManifest.artifacts.forEach { artifact ->
+                    V3ArtifactListRow(
+                        artifact = artifact,
+                        canDownload = summary?.verificationVerdict == "usable" && artifactDownloadingId == null,
+                        isDownloading = artifactDownloadingId == artifact.artifactId,
+                        onDownload = { onDownloadArtifact(artifact) },
+                        onCancel = onCancelDownload,
+                    )
+                }
+            }
+            summary?.let { item ->
+                V3SettingsRow(
+                    title = stringResource(R.string.diagnostics),
+                    value = if (unsuccessfulOutcomeLoading) {
+                        stringResource(R.string.unsuccessful_outcome_loading)
+                    } else {
+                        item.verificationVerdict?.let { gatewayVerdictLabel(it) } ?: stringResource(R.string.value_none)
+                    },
+                    onClick = { onLoadUnsuccessfulOutcome(item) },
+                )
+            }
+            if (unsuccessfulOutcome != null || unsuccessfulOutcomeMessage != null) {
+                UnsuccessfulOutcomeBlock(
+                    outcome = unsuccessfulOutcome,
+                    message = unsuccessfulOutcomeMessage,
+                )
+            }
+            artifactDownloadMessage?.let { ArtifactDownloadMessageBlock(it) }
+        }
+    }
+}
+
+@Composable
+private fun V3ArtifactListRow(
+    artifact: ArtifactDescriptor,
+    canDownload: Boolean,
+    isDownloading: Boolean,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = 56.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            EchoText(
+                value = artifact.role,
+                color = EchoColors.Ink,
+                style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 14.sp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            EchoText(
+                value = stringResource(R.string.artifact_meta, artifact.mediaType, artifact.bytes),
+                color = EchoColors.InkMuted,
+                style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        ActionButton(
+            label = if (isDownloading) stringResource(R.string.cancel_artifact_download) else stringResource(R.string.download_artifact),
+            enabled = isDownloading || canDownload,
+            disabledReason = stringResource(R.string.artifact_download_disabled_verification),
+            onClick = if (isDownloading) onCancel else onDownload,
+            modifier = Modifier.size(width = 86.dp, height = 48.dp),
+        )
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(Color.White.copy(alpha = 0.07f)),
+    )
+}
+
+@Composable
+private fun V3SettingsOverlay(
+    selectedSettingsPage: V3SettingsPage,
+    bodyConnection: DeviceConnection?,
+    captureStatus: CaptureStatusSnapshot?,
+    captureStreamHealth: EventStreamHealth,
+    captureMessage: CaptureStatusMessage?,
+    captureCommandMessage: CaptureCommandMessage?,
+    captureCommandRunning: Boolean,
+    cameraFocus: CameraFocusStatus?,
+    cameraFocusMessage: CameraFocusMessage?,
+    cameraFocusCommandRunning: Boolean,
+    connectionGeneration: Long,
+    isForeground: Boolean,
+    localeTag: String,
+    updateState: AppUpdateManager.State,
+    onClose: () -> Unit,
+    onBackToSummary: () -> Unit,
+    onOpenPage: (V3SettingsPage) -> Unit,
+    onDisconnect: () -> Unit,
+    onStartCalibrationCapture: () -> Unit,
+    onSetCameraFocus: (Long?, Boolean?) -> Unit,
+    onLocaleChange: (String) -> Unit,
+    onCheckUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.background(EchoColors.Void),
+    ) {
+        V3Header(
+            title = stringResource(selectedSettingsPage.title),
+            trailing = if (selectedSettingsPage == V3SettingsPage.SUMMARY) null else stringResource(R.string.v3_settings),
+            onClose = if (selectedSettingsPage == V3SettingsPage.SUMMARY) onClose else onBackToSummary,
+        )
+        when (selectedSettingsPage) {
+            V3SettingsPage.SUMMARY -> V3SettingsSummary(
+                bodyConnection = bodyConnection,
+                captureStatus = captureStatus,
+                cameraFocus = cameraFocus,
+                localeTag = localeTag,
+                updateState = updateState,
+                onOpenPage = onOpenPage,
+                onDisconnect = onDisconnect,
+                modifier = Modifier.weight(1f),
+            )
+            V3SettingsPage.BODY -> Box(Modifier.weight(1f)) {
+                BodyScreen(
+                    bodyConnection = bodyConnection,
+                    captureStatus = captureStatus,
+                    captureMessage = captureMessage,
+                    captureCommandMessage = captureCommandMessage,
+                    cameraFocus = cameraFocus,
+                    cameraFocusMessage = cameraFocusMessage,
+                    captureCommandRunning = captureCommandRunning,
+                    cameraFocusCommandRunning = cameraFocusCommandRunning,
+                    onStartCalibrationCapture = onStartCalibrationCapture,
+                    onSetCameraFocus = onSetCameraFocus,
+                    localeTag = localeTag,
+                    updateState = updateState,
+                    onDisconnect = onDisconnect,
+                    onLocaleChange = onLocaleChange,
+                    onCheckUpdate = onCheckUpdate,
+                    onInstallUpdate = onInstallUpdate,
+                )
+            }
+            V3SettingsPage.NETWORK -> Box(Modifier.weight(1f)) {
+                NetworkScreen(
+                    bodyConnection = bodyConnection,
+                    captureStatus = captureStatus,
+                    connectionGeneration = connectionGeneration,
+                    isForeground = isForeground,
+                )
+            }
+            V3SettingsPage.STORAGE -> V3StorageSettings(
+                bodyConnection = bodyConnection,
+                modifier = Modifier.weight(1f),
+            )
+            V3SettingsPage.FOCUS -> V3FocusSettings(
+                bodyConnection = bodyConnection,
+                cameraFocus = cameraFocus,
+                cameraFocusMessage = cameraFocusMessage,
+                cameraFocusCommandRunning = cameraFocusCommandRunning,
+                onSetCameraFocus = onSetCameraFocus,
+                modifier = Modifier.weight(1f),
+            )
+            V3SettingsPage.CALIBRATION -> V3CalibrationSettings(
+                bodyConnection = bodyConnection,
+                captureStatus = captureStatus,
+                captureCommandRunning = captureCommandRunning,
+                onStartCalibrationCapture = onStartCalibrationCapture,
+                modifier = Modifier.weight(1f),
+            )
+            V3SettingsPage.LANGUAGE -> V3SimpleSettingsContent(Modifier.weight(1f)) {
+                LanguageCard(localeTag, onLocaleChange)
+            }
+            V3SettingsPage.UPDATE -> V3SimpleSettingsContent(Modifier.weight(1f)) {
+                UpdateCard(updateState, onCheckUpdate, onInstallUpdate)
+            }
+            V3SettingsPage.DIAGNOSTICS -> V3DiagnosticsSettings(
+                bodyConnection = bodyConnection,
+                captureStatus = captureStatus,
+                captureStreamHealth = captureStreamHealth,
+                captureMessage = captureMessage,
+                captureCommandMessage = captureCommandMessage,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun V3SettingsSummary(
+    bodyConnection: DeviceConnection?,
+    captureStatus: CaptureStatusSnapshot?,
+    cameraFocus: CameraFocusStatus?,
+    localeTag: String,
+    updateState: AppUpdateManager.State,
+    onOpenPage: (V3SettingsPage) -> Unit,
+    onDisconnect: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var confirmDisconnect by rememberSaveable { mutableStateOf(false) }
+    val verifiedConnection = stringResource(R.string.verified_connection)
+    val noBody = stringResource(R.string.status_no_body)
+    val networkConnectFirst = stringResource(R.string.network_connect_first)
+    val noValue = stringResource(R.string.value_none)
+    val focusAutoOn = stringResource(R.string.camera_focus_auto_on)
+    val focusDisabled = stringResource(R.string.camera_focus_disabled)
+    val capabilityEnabled = stringResource(R.string.capability_enabled)
+    val capabilityDisabled = stringResource(R.string.capability_disabled)
+    val bodyValue = if (bodyConnection == null) {
+        noBody
+    } else {
+        "${bodyConnection.descriptor.deviceLabel} · $verifiedConnection"
+    }
+    val networkValue = if (bodyConnection == null) {
+        networkConnectFirst
+    } else {
+        v3NetworkSummary(bodyConnection.descriptor.runtime.network)
+    }
+    val storageValue = if (bodyConnection == null) {
+        noValue
+    } else {
+        "${formatByteSize(bodyConnection.descriptor.availableBytes)} / ${formatByteSize(bodyConnection.descriptor.totalBytes)}"
+    }
+    val focusValue = if (cameraFocus == null) {
+        focusDisabled
+    } else if (cameraFocus.autoEnabled == true) {
+        focusAutoOn
+    } else {
+        cameraFocus.value.toString()
+    }
+    val calibrationValue = bodyConnection?.descriptor?.calibrationCapture?.let { capability ->
+        if (capability.enabled) capabilityEnabled else capabilityDisabled
+    } ?: noValue
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        V3SettingsRow(
+            title = stringResource(R.string.nav_body),
+            value = bodyValue,
+            onClick = { onOpenPage(V3SettingsPage.BODY) },
+        )
+        V3SettingsRow(
+            title = stringResource(R.string.nav_network),
+            value = networkValue,
+            onClick = { onOpenPage(V3SettingsPage.NETWORK) },
+        )
+        V3SettingsRow(
+            title = stringResource(R.string.storage_status),
+            value = storageValue,
+            onClick = { onOpenPage(V3SettingsPage.STORAGE) },
+        )
+        V3SettingsRow(
+            title = stringResource(R.string.camera_focus_title),
+            value = focusValue,
+            onClick = { onOpenPage(V3SettingsPage.FOCUS) },
+        )
+        V3SettingsRow(
+            title = stringResource(R.string.calibration_capture),
+            value = calibrationValue,
+            onClick = { onOpenPage(V3SettingsPage.CALIBRATION) },
+        )
+        V3SettingsRow(
+            title = stringResource(R.string.language),
+            value = if (localeTag.startsWith("zh")) stringResource(R.string.language_zh) else stringResource(R.string.language_en),
+            onClick = { onOpenPage(V3SettingsPage.LANGUAGE) },
+        )
+        V3SettingsRow(
+            title = stringResource(R.string.update_check),
+            value = updateVersionLabel(updateState),
+            onClick = { onOpenPage(V3SettingsPage.UPDATE) },
+        )
+        V3SettingsRow(
+            title = stringResource(R.string.v3_settings_diagnostics),
+            value = stringResource(R.string.status_contract_missing),
+            onClick = { onOpenPage(V3SettingsPage.DIAGNOSTICS) },
+        )
+        Spacer(Modifier.height(16.dp))
+        if (bodyConnection != null) {
+            ActionButton(
+                label = stringResource(R.string.disconnect_body),
+                enabled = true,
+                onClick = { confirmDisconnect = true },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(10.dp))
+            EchoText(
+                value = stringResource(R.string.v3_disconnect_hint),
+                color = EchoColors.InkMuted,
+                style = TextStyle(fontSize = 12.sp, lineHeight = 18.sp),
+            )
+        } else {
+            InfoBlock(
+                title = stringResource(R.string.status_no_body),
+                body = stringResource(R.string.body_not_ready),
+                accent = EchoColors.InkMuted,
+            )
+        }
+        captureStatus?.let {
+            Spacer(Modifier.height(12.dp))
+            InfoBlock(
+                title = stringResource(R.string.capture_status_title),
+                body = "${deviceStateLabel(it.deviceState)} · ${stringResource(R.string.source_revision, it.sourceRevision)}",
+                accent = deviceStateColor(it.deviceState),
+                liveRegionMode = LiveRegionMode.Polite,
+            )
+        }
+        if (confirmDisconnect) {
+            ConfirmationBlock(
+                title = stringResource(R.string.disconnect_confirm_title),
+                body = stringResource(R.string.disconnect_confirm_body),
+                confirmLabel = stringResource(R.string.disconnect_confirm_action),
+                onCancel = { confirmDisconnect = false },
+                onConfirm = {
+                    confirmDisconnect = false
+                    onDisconnect()
                 },
             )
         }
     }
+}
+
+@Composable
+private fun V3SettingsRow(
+    title: String,
+    value: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = 58.dp)
+                .padding(vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            EchoText(
+                value = title,
+                color = EchoColors.Ink,
+                style = TextStyle(fontSize = 15.sp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(0.42f),
+            )
+            EchoText(
+                value = value,
+                color = EchoColors.InkMuted,
+                style = TextStyle(fontSize = 13.sp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(0.58f),
+            )
+            V3Chevron()
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(Color.White.copy(alpha = 0.07f)),
+        )
+    }
+}
+
+@Composable
+private fun V3StorageSettings(
+    bodyConnection: DeviceConnection?,
+    modifier: Modifier = Modifier,
+) {
+    V3SimpleSettingsContent(modifier) {
+        InfoBlock(
+            title = stringResource(R.string.storage_status),
+            body = bodyConnection?.descriptor?.let { descriptor ->
+                stringResource(
+                    R.string.storage_bytes,
+                    descriptor.availableBytes,
+                    descriptor.totalBytes,
+                ) + "\n${formatByteSize(descriptor.availableBytes)} / ${formatByteSize(descriptor.totalBytes)}"
+            } ?: stringResource(R.string.body_not_ready),
+            accent = if (bodyConnection?.descriptor?.writable == true) EchoColors.Permit else EchoColors.Caution,
+        )
+    }
+}
+
+@Composable
+private fun V3FocusSettings(
+    bodyConnection: DeviceConnection?,
+    cameraFocus: CameraFocusStatus?,
+    cameraFocusMessage: CameraFocusMessage?,
+    cameraFocusCommandRunning: Boolean,
+    onSetCameraFocus: (Long?, Boolean?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    V3SimpleSettingsContent(modifier) {
+        if (bodyConnection == null) {
+            InfoBlock(
+                title = stringResource(R.string.camera_focus_title),
+                body = stringResource(R.string.body_not_ready),
+                accent = EchoColors.InkMuted,
+            )
+        } else {
+            CameraFocusCard(
+                focus = cameraFocus,
+                message = cameraFocusMessage,
+                commandRunning = cameraFocusCommandRunning,
+                onSetFocus = onSetCameraFocus,
+            )
+        }
+    }
+}
+
+@Composable
+private fun V3CalibrationSettings(
+    bodyConnection: DeviceConnection?,
+    captureStatus: CaptureStatusSnapshot?,
+    captureCommandRunning: Boolean,
+    onStartCalibrationCapture: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    V3SimpleSettingsContent(modifier) {
+        val capability = bodyConnection?.descriptor?.calibrationCapture
+        InfoBlock(
+            title = stringResource(R.string.calibration_capture),
+            body = if (capability == null) {
+                stringResource(R.string.body_not_ready)
+            } else {
+                calibrationCaptureText(capability)
+            },
+            accent = if (capability?.enabled == true) EchoColors.Permit else EchoColors.Caution,
+        )
+        ActionButton(
+            label = stringResource(R.string.calibration_start),
+            enabled = bodyConnection != null &&
+                !captureCommandRunning &&
+                bodyConnection.descriptor.calibrationCapture.enabled &&
+                isCameraConnected(bodyConnection, captureStatus) &&
+                bodyConnection.descriptor.writable &&
+                captureStatus?.deviceState == "idle",
+            disabledReason = calibrationStartDisabledReason(
+                bodyConnection = bodyConnection,
+                captureStatus = captureStatus,
+                captureCommandRunning = captureCommandRunning,
+            ),
+            onClick = onStartCalibrationCapture,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun V3DiagnosticsSettings(
+    bodyConnection: DeviceConnection?,
+    captureStatus: CaptureStatusSnapshot?,
+    captureStreamHealth: EventStreamHealth,
+    captureMessage: CaptureStatusMessage?,
+    captureCommandMessage: CaptureCommandMessage?,
+    modifier: Modifier = Modifier,
+) {
+    V3SimpleSettingsContent(modifier) {
+        CaptureStatusPanel(
+            bodyConnection = bodyConnection,
+            captureStatus = captureStatus,
+            captureStreamHealth = captureStreamHealth,
+            captureMessage = captureMessage,
+            captureCommandMessage = captureCommandMessage,
+        )
+        bodyConnection?.let { connection ->
+            Panel(modifier = Modifier.fillMaxWidth()) {
+                NetworkRuntimeBlock(
+                    runtime = connection.descriptor.runtime,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
+        }
+        ContractGate()
+    }
+}
+
+@Composable
+private fun V3SimpleSettingsContent(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        content = content,
+    )
+}
+
+@Composable
+private fun V3Header(
+    title: String,
+    trailing: String? = null,
+    onClose: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(60.dp)
+            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(0.dp))
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        V3IconButton(
+            label = stringResource(R.string.v3_close),
+            icon = V3IconKind.CLOSE,
+            onClick = onClose,
+        )
+        EchoText(
+            value = title,
+            color = EchoColors.Ink,
+            style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 18.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        trailing?.let {
+            EchoText(
+                value = it,
+                color = EchoColors.InkMuted,
+                style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun V3IconButton(
+    label: String,
+    icon: V3IconKind,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = label },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(RoundedCornerShape(999.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            V3Icon(icon, Color(0xFF9AA2A6))
+        }
+    }
+}
+
+@Composable
+private fun V3IconToggle(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    icon: V3IconKind,
+    disabledReason: String? = null,
+    onToggle: () -> Unit,
+) {
+    val state = when {
+        !enabled -> disabledReason ?: stringResource(R.string.tool_unwired)
+        selected -> stringResource(R.string.tool_on)
+        else -> stringResource(R.string.tool_off)
+    }
+    val semanticModifier = if (enabled) {
+        Modifier.toggleable(
+            value = selected,
+            role = Role.Switch,
+            onValueChange = { onToggle() },
+        )
+    } else {
+        Modifier.semantics {
+            role = Role.Switch
+            disabled()
+        }
+    }
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .semantics {
+                contentDescription = label
+                stateDescription = state
+            }
+            .then(semanticModifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(if (selected && enabled) EchoColors.Ink else Color.Transparent)
+                .alpha(if (enabled) 1f else 0.45f),
+            contentAlignment = Alignment.Center,
+        ) {
+            V3Icon(icon, if (selected && enabled) EchoColors.Void else Color(0xFF9AA2A6))
+        }
+    }
+}
+
+@Composable
+private fun V3Icon(kind: V3IconKind, color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(20.dp)) {
+        val stroke = 1.5.dp.toPx()
+        when (kind) {
+            V3IconKind.GRID -> {
+                drawLine(color, Offset(size.width / 3f, 0f), Offset(size.width / 3f, size.height), stroke)
+                drawLine(color, Offset(size.width * 2f / 3f, 0f), Offset(size.width * 2f / 3f, size.height), stroke)
+                drawLine(color, Offset(0f, size.height / 3f), Offset(size.width, size.height / 3f), stroke)
+                drawLine(color, Offset(0f, size.height * 2f / 3f), Offset(size.width, size.height * 2f / 3f), stroke)
+            }
+            V3IconKind.FOCUS -> {
+                drawCircle(color, radius = size.minDimension / 2.25f, style = Stroke(width = stroke))
+                drawCircle(color, radius = 2.7.dp.toPx())
+            }
+            V3IconKind.IMU -> {
+                val barWidth = 3.dp.toPx()
+                val gap = 3.dp.toPx()
+                val left = (size.width - barWidth * 3f - gap * 2f) / 2f
+                listOf(8.dp.toPx(), 14.dp.toPx(), 11.dp.toPx()).forEachIndexed { index, height ->
+                    drawRoundRect(
+                        color = color,
+                        topLeft = Offset(left + index * (barWidth + gap), size.height - height),
+                        size = Size(barWidth, height),
+                        cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
+                    )
+                }
+            }
+            V3IconKind.SETTINGS -> {
+                val y1 = size.height * 0.35f
+                val y2 = size.height * 0.65f
+                drawLine(color, Offset(0f, y1), Offset(size.width, y1), stroke)
+                drawLine(color, Offset(0f, y2), Offset(size.width, y2), stroke)
+                drawCircle(color, radius = 3.dp.toPx(), center = Offset(size.width * 0.32f, y1))
+                drawCircle(color, radius = 3.dp.toPx(), center = Offset(size.width * 0.68f, y2))
+            }
+            V3IconKind.DEVICE -> {
+                drawRoundRect(
+                    color = color,
+                    topLeft = Offset(1.5.dp.toPx(), 3.dp.toPx()),
+                    size = Size(size.width - 3.dp.toPx(), size.height - 6.dp.toPx()),
+                    cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+                    style = Stroke(width = stroke),
+                )
+                drawCircle(color, radius = 2.5.dp.toPx())
+            }
+            V3IconKind.CLOSE -> {
+                drawLine(color, Offset(3.dp.toPx(), 3.dp.toPx()), Offset(size.width - 3.dp.toPx(), size.height - 3.dp.toPx()), stroke)
+                drawLine(color, Offset(size.width - 3.dp.toPx(), 3.dp.toPx()), Offset(3.dp.toPx(), size.height - 3.dp.toPx()), stroke)
+            }
+        }
+    }
+}
+
+@Composable
+private fun V3Chevron() {
+    Canvas(Modifier.size(12.dp)) {
+        val stroke = 1.5.dp.toPx()
+        drawLine(
+            color = Color(0xFF6F787C),
+            start = Offset(size.width * 0.35f, size.height * 0.20f),
+            end = Offset(size.width * 0.70f, size.height * 0.50f),
+            strokeWidth = stroke,
+        )
+        drawLine(
+            color = Color(0xFF6F787C),
+            start = Offset(size.width * 0.70f, size.height * 0.50f),
+            end = Offset(size.width * 0.35f, size.height * 0.80f),
+            strokeWidth = stroke,
+        )
+    }
+}
+
+@Composable
+private fun V3PreviewTexture(alpha: Float) {
+    Canvas(
+        Modifier
+            .fillMaxSize()
+            .alpha(alpha),
+    ) {
+        drawRect(Color.White.copy(alpha = 0.10f))
+        val spacing = 16.dp.toPx()
+        val stroke = 1.dp.toPx()
+        var x = -size.height
+        while (x < size.width + size.height) {
+            drawLine(
+                color = Color.White.copy(alpha = 0.30f),
+                start = Offset(x, size.height),
+                end = Offset(x + size.height, 0f),
+                strokeWidth = stroke,
+            )
+            x += spacing
+        }
+    }
+}
+
+@Composable
+private fun captureCommandStatusText(message: CaptureCommandMessage): String {
+    return when (message) {
+        CaptureCommandMessage.RunningStart -> stringResource(R.string.capture_command_running_start)
+        CaptureCommandMessage.RunningCalibrationStart -> stringResource(R.string.capture_command_running_calibration_start)
+        CaptureCommandMessage.RunningStop -> stringResource(R.string.capture_command_running_stop)
+        CaptureCommandMessage.Accepted -> stringResource(R.string.capture_command_accepted)
+        CaptureCommandMessage.RecordingContinuesOnBack -> stringResource(R.string.capture_command_recording_continues_on_back)
+        CaptureCommandMessage.NoActiveSession -> stringResource(R.string.capture_command_no_active_session)
+        CaptureCommandMessage.AuthRequired -> stringResource(R.string.capture_command_auth_required)
+        CaptureCommandMessage.Forbidden -> stringResource(R.string.capture_command_forbidden)
+        CaptureCommandMessage.Conflict -> stringResource(R.string.capture_command_conflict)
+        CaptureCommandMessage.Unprocessable -> stringResource(R.string.capture_command_unprocessable)
+        is CaptureCommandMessage.InvalidRequest -> stringResource(R.string.capture_command_invalid_request, message.detail)
+        is CaptureCommandMessage.InvalidResponse -> stringResource(R.string.capture_command_invalid_response, message.detail)
+        is CaptureCommandMessage.NetworkFailure -> stringResource(R.string.capture_command_network_failure, message.detail)
+        is CaptureCommandMessage.HttpFailure -> stringResource(R.string.capture_command_http_failure, message.statusCode)
+    }
+}
+
+@Composable
+private fun captureStatusMessageText(message: CaptureStatusMessage): String {
+    return when (message) {
+        CaptureStatusMessage.AuthRequired -> stringResource(R.string.capture_auth_required)
+        CaptureStatusMessage.Forbidden -> stringResource(R.string.capture_forbidden)
+        is CaptureStatusMessage.HttpFailure -> stringResource(R.string.capture_http_failure, message.statusCode)
+        is CaptureStatusMessage.InvalidResponse -> stringResource(R.string.capture_invalid_response, message.detail)
+        is CaptureStatusMessage.NetworkFailure -> stringResource(R.string.capture_network_failure, message.detail)
+    }
+}
+
+@Composable
+private fun v3NetworkSummary(runtime: com.openaria.openaria_echo_mobile.body.api.NetworkRuntimeStatus): String {
+    val route = networkRouteLabel(runtime.defaultRoute)
+    val peer = when (runtime.defaultRoute) {
+        "wifi_client" -> runtime.wifiClient.peerOrSsid
+        "wired" -> runtime.wired.interfaceName
+        else -> runtime.ap.peerOrSsid
+    }
+    return listOfNotNull(route, peer).joinToString(" · ")
+}
+
+private fun formatByteSize(bytes: Long): String {
+    val absolute = bytes.coerceAtLeast(0L).toDouble()
+    val gib = 1024.0 * 1024.0 * 1024.0
+    val mib = 1024.0 * 1024.0
+    return if (absolute >= gib) {
+        String.format(java.util.Locale.US, "%.1f GB", absolute / gib)
+    } else {
+        String.format(java.util.Locale.US, "%.1f MB", absolute / mib)
+    }
+}
+
+private fun formatDuration(seconds: Double): String {
+    val wholeSeconds = seconds.toLong().coerceAtLeast(0L)
+    val minutes = wholeSeconds / 60L
+    val remainder = wholeSeconds % 60L
+    return "%02d:%02d".format(java.util.Locale.US, minutes, remainder)
 }
 
 @Composable
@@ -4823,69 +6968,6 @@ private fun UpdateCard(
 }
 
 @Composable
-private fun BottomNavigation(
-    selectedTab: EchoTab,
-    onSelect: (EchoTab) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Panel(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(66.dp),
-        background = EchoColors.GlassStrong,
-        radius = 8.dp,
-    ) {
-        Row(
-            Modifier
-                .fillMaxSize()
-                .selectableGroup(),
-        ) {
-            EchoTab.entries.forEach { tab ->
-                val selected = tab == selectedTab
-                val tabStateDescription = stringResource(
-                    if (selected) R.string.nav_selected else R.string.nav_not_selected,
-                )
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .selectable(
-                            selected = selected,
-                            role = Role.Tab,
-                            onClick = { onSelect(tab) },
-                        )
-                        .semantics {
-                            stateDescription = tabStateDescription
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        EchoText(
-                            value = stringResource(tab.label),
-                            color = if (selected) EchoColors.Ink else EchoColors.InkMuted,
-                            style = TextStyle(
-                                fontFamily = FontFamily.SansSerif,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.sp,
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Spacer(Modifier.height(5.dp))
-                        Box(
-                            modifier = Modifier
-                                .size(5.dp)
-                                .clip(RoundedCornerShape(3.dp))
-                                .background(if (selected) EchoColors.Record else Color.Transparent),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun Panel(
     modifier: Modifier = Modifier,
     background: Color = EchoColors.Glass,
@@ -6219,6 +8301,38 @@ private enum class EchoTab(@param:StringRes val label: Int) {
     SESSIONS(R.string.nav_sessions),
     BODY(R.string.nav_body),
     NETWORK(R.string.nav_network),
+}
+
+private enum class V3Surface {
+    CAMERA,
+    SESSIONS,
+    SETTINGS,
+}
+
+private enum class V3SettingsPage(@param:StringRes val title: Int) {
+    SUMMARY(R.string.v3_settings),
+    BODY(R.string.nav_body),
+    NETWORK(R.string.nav_network),
+    STORAGE(R.string.storage_status),
+    FOCUS(R.string.camera_focus_title),
+    CALIBRATION(R.string.calibration_capture),
+    LANGUAGE(R.string.language),
+    UPDATE(R.string.update_title),
+    DIAGNOSTICS(R.string.v3_settings_diagnostics),
+}
+
+private enum class V3CaptureMode(@param:StringRes val label: Int) {
+    RECORD(R.string.v3_capture_mode_record),
+    CALIBRATION(R.string.v3_capture_mode_calibration),
+}
+
+private enum class V3IconKind {
+    GRID,
+    FOCUS,
+    IMU,
+    SETTINGS,
+    DEVICE,
+    CLOSE,
 }
 
 internal enum class PreviewMode {

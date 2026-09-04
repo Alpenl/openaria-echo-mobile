@@ -8,29 +8,33 @@ import kotlin.test.assertTrue
 
 class UiShellSourceTest {
     @Test
-    fun `app shell uses cutout aware safe drawing and fixed bottom navigation`() {
+    fun `app shell uses cutout aware safe drawing and v3 camera overlays`() {
         val source = echoAppSource()
 
         assertContains(source, "WindowInsets.safeDrawing.asPaddingValues(")
         assertContains(source, "Density(context.resources.displayMetrics.density, 1f)")
         assertContains(source, "val layoutDirection = LocalLayoutDirection.current")
-        assertContains(source, "safeDrawing.calculateLeftPadding(layoutDirection) + 12.dp")
-        assertContains(source, "safeDrawing.calculateRightPadding(layoutDirection) + 12.dp")
-        assertContains(source, "bottomNavigationReserve = safeDrawing.calculateBottomPadding() + 86.dp")
+        assertContains(source, "V3AppShell(")
+        assertContains(source, "safeDrawing.calculateLeftPadding(layoutDirection)")
+        assertContains(source, "safeDrawing.calculateRightPadding(layoutDirection)")
+        assertContains(source, "safeDrawing.calculateBottomPadding()")
+        assertContains(source, "V3Surface.SESSIONS")
+        assertContains(source, "V3Surface.SETTINGS")
+        assertContains(source, "V3ConnectionSheet(")
         assertFalse(
             source.contains("WindowInsets.systemBars.asPaddingValues()"),
             "Top layout must use safeDrawing so display cutouts and waterfall insets are included.",
         )
-        assertFalse(
-            source.contains("bottom = 96.dp"),
-            "Content bottom padding must account for navigation bar insets instead of using a fixed reserve.",
-        )
+        assertFalse(source.contains("bottomNavigationReserve"))
         assertFalse(
             source.contains(".height(46.dp)"),
             "The top status bar must be allowed to grow for larger fonts instead of clipping at a fixed height.",
         )
         assertContains(source, ".align(Alignment.BottomCenter)")
-        assertContains(source, ".navigationBarsPadding()")
+        assertFalse(
+            source.contains("BottomNavigation("),
+            "V3 removes the persistent four-tab bottom navigation in favor of camera overlays.",
+        )
     }
 
     @Test

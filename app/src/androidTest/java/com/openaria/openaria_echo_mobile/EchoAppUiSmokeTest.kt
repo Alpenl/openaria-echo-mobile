@@ -26,6 +26,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -43,7 +44,6 @@ import com.openaria.openaria_echo_mobile.ui.PreviewMode
 import com.openaria.openaria_echo_mobile.ui.ViewfinderScreen
 import com.openaria.openaria_echo_mobile.ui.theme.EchoTheme
 import java.util.Locale
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import org.junit.Assert.assertFalse
@@ -56,13 +56,13 @@ class EchoAppUiSmokeTest {
     val compose = createComposeRule()
 
     @Test
-    fun chineseShellShowsPrimaryNavigationAndNoLegacyEnglishControls() {
+    fun chineseShellShowsV3CameraLayoutAndNoLegacyEnglishControls() {
         renderEchoApp("zh-CN")
 
-        compose.onNodeWithText("取景").assertIsDisplayed()
-        compose.onNodeWithText("会话").assertIsDisplayed()
-        compose.onNodeWithText("机身").assertIsDisplayed()
-        compose.onNodeWithText("网络").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Open Aria Echo, 未连接机身").assertIsDisplayed()
+        compose.onNodeWithContentDescription("设置").assertIsDisplayed()
+        compose.onNodeWithText("连接前不显示预览、状态和会话。").assertIsDisplayed()
+        compose.onNodeWithText("附近机身").assertIsDisplayed()
         compose.onNodeWithText("连接机身").performScrollTo().assertIsDisplayed()
 
         listOf("Mount", "Retry", "Probe", "Edit", "Join", "Copy URL").forEach { legacyText ->
@@ -71,18 +71,18 @@ class EchoAppUiSmokeTest {
     }
 
     @Test
-    fun englishShellUsesEnglishNavigationResources() {
+    fun englishShellUsesEnglishV3Resources() {
         renderEchoApp("en")
 
-        compose.onNodeWithText("Viewfinder").assertIsDisplayed()
-        compose.onNodeWithText("Sessions").assertIsDisplayed()
-        compose.onNodeWithText("Body").assertIsDisplayed()
-        compose.onNodeWithText("Network").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Open Aria Echo, No body connected").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Settings").assertIsDisplayed()
+        compose.onNodeWithText("Preview, status, and sessions stay hidden until a body is connected.").assertIsDisplayed()
+        compose.onNodeWithText("Nearby bodies").assertIsDisplayed()
         compose.onNodeWithText("CONNECT BODY").performScrollTo().assertIsDisplayed()
     }
 
     @Test
-    fun responsiveShellKeepsPrimaryControlsVisibleAcrossSmallWideAndLargeFontCases() {
+    fun responsiveShellKeepsV3PrimaryControlsVisibleAcrossSmallWideAndLargeFontCases() {
         val renderCases = listOf(
             RenderCase(localeTag = "zh-CN", widthDp = 360, heightDp = 740, fontScale = 1.0f, connectionTitle = "连接机身"),
             RenderCase(localeTag = "zh-CN", widthDp = 393, heightDp = 780, fontScale = 1.5f, connectionTitle = "连接机身"),
@@ -100,13 +100,13 @@ class EchoAppUiSmokeTest {
 
             compose.onNodeWithText(renderCase.connectionTitle).performScrollTo().assertIsDisplayed()
             if (renderCase.localeTag.startsWith("zh")) {
-                listOf("取景", "会话", "机身", "网络").forEach { label ->
-                    compose.onNodeWithText(label).assertIsDisplayed()
-                }
+                compose.onNodeWithContentDescription("Open Aria Echo, 未连接机身").assertIsDisplayed()
+                compose.onNodeWithContentDescription("设置").assertIsDisplayed()
+                compose.onNodeWithText("连接前不显示预览、状态和会话。").assertIsDisplayed()
             } else {
-                listOf("Viewfinder", "Sessions", "Body", "Network").forEach { label ->
-                    compose.onNodeWithText(label).assertIsDisplayed()
-                }
+                compose.onNodeWithContentDescription("Open Aria Echo, No body connected").assertIsDisplayed()
+                compose.onNodeWithContentDescription("Settings").assertIsDisplayed()
+                compose.onNodeWithText("Preview, status, and sessions stay hidden until a body is connected.").assertIsDisplayed()
             }
             listOf("Mount", "Retry", "Probe", "Edit", "Join", "Copy URL").forEach { legacyText ->
                 compose.onAllNodesWithText(legacyText).assertCountEquals(0)
@@ -115,38 +115,28 @@ class EchoAppUiSmokeTest {
     }
 
     @Test
-    fun previewStatusBodyAndControlsKeepIndependentUnclippedLayoutOnNarrowPortrait() {
+    fun previewStatusBodyAndSettingsControlKeepIndependentUnclippedLayoutOnNarrowPortrait() {
         renderEchoApp(localeTag = "zh-CN", widthDp = 360, heightDp = 740)
 
-        assertPreviewStatusAndControlsAreIndependent()
+        assertV3PreviewStatusAndControlsAreIndependent()
     }
 
     @Test
-    fun previewStatusBodyAndPrimaryCommandsStayVisibleOnCompactLandscape() {
+    fun previewStatusBodyAndSettingsControlStayVisibleOnCompactLandscape() {
         renderEchoApp(localeTag = "zh-CN", widthDp = 600, heightDp = 360)
 
-        assertPreviewStatusAndControlsAreIndependent()
+        assertV3PreviewStatusAndControlsAreIndependent()
     }
 
     @Test
-    fun widePortraitKeepsThePortraitPreviewToolRail() {
+    fun settingsOverlayOpensFromTheV3TopBar() {
         renderEchoApp(localeTag = "zh-CN", widthDp = 700, heightDp = 900)
 
-        val toolBounds = listOf("网格", "对焦峰值", "IMU 叠加").map { label ->
-            compose
-                .onNodeWithContentDescription(label, useUnmergedTree = true)
-                .assertIsDisplayed()
-                .fetchSemanticsNode()
-                .boundsInRoot
-        }
-        assertTrue(
-            "Wide portrait must keep preview tools in one vertical rail: $toolBounds",
-            toolBounds.all { abs(it.left - toolBounds.first().left) <= GEOMETRY_TOLERANCE_PX },
-        )
-        assertTrue(
-            "Wide portrait preview tools must keep their vertical order: $toolBounds",
-            toolBounds.zipWithNext().all { (top, bottom) -> top.bottom < bottom.top },
-        )
+        compose.onNodeWithContentDescription("设置").performClick()
+        compose.onNodeWithText("设置").assertIsDisplayed()
+        compose.onNodeWithText("机身").assertIsDisplayed()
+        compose.onNodeWithText("网络").assertIsDisplayed()
+        compose.onNodeWithText("诊断与契约").assertIsDisplayed()
     }
 
     @Test
@@ -344,14 +334,14 @@ class EchoAppUiSmokeTest {
         return createConfigurationContext(configuration)
     }
 
-    private fun assertPreviewStatusAndControlsAreIndependent() {
+    private fun assertV3PreviewStatusAndControlsAreIndependent() {
         val body = compose
             .onNodeWithText(PREVIEW_STATUS_BODY, useUnmergedTree = true)
             .assertIsDisplayed()
             .fetchSemanticsNode()
         assertTextHasNoVisualOverflow("preview status body", body)
 
-        val controls = PREVIEW_CONTROL_LABELS.associateWith { label ->
+        val controls = V3_CONTROL_LABELS.associateWith { label ->
             compose
                 .onNodeWithContentDescription(label, useUnmergedTree = true)
                 .assertIsDisplayed()
@@ -464,18 +454,9 @@ class EchoAppUiSmokeTest {
     )
 
     private companion object {
-        const val PREVIEW_STATUS_BODY = "未连接机身时不显示伪造视频、ready 状态或录制指标。"
+        const val PREVIEW_STATUS_BODY = "连接前不显示预览、状态和会话。"
         const val PREVIEW_CONTRACT_NOTE = "预览将使用 Device API v4 JPEG 最新帧；断流、相机未接入和鉴权失败会分开显示。"
         const val GEOMETRY_TOLERANCE_PX = 1f
-        val PREVIEW_CONTROL_LABELS = listOf(
-            "双目",
-            "左眼",
-            "右眼",
-            "网格",
-            "对焦峰值",
-            "IMU 叠加",
-            "开始录制",
-            "停止",
-        )
+        val V3_CONTROL_LABELS = listOf("设置")
     }
 }

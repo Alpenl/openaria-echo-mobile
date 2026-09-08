@@ -139,7 +139,11 @@ class DeviceHttpClient internal constructor(
                     if (contentType != "image/jpeg") {
                         return PreviewResult.InvalidResponse("expected image/jpeg, got ${http.contentType.orEmpty()}")
                     }
-                    val bytes = http.inputStream.readBytes()
+                    if (http.getHeaderFieldLong("Content-Length", -1L) > PREVIEW_JPEG_BYTE_LIMIT) {
+                        return PreviewResult.InvalidResponse("preview frame exceeds the JPEG byte limit")
+                    }
+                    val bytes = http.inputStream.use { it.readPreviewJpeg() }
+                        ?: return PreviewResult.InvalidResponse("preview frame exceeds the JPEG byte limit")
                     if (!looksLikeJpeg(bytes)) {
                         return PreviewResult.InvalidResponse("response is not a JPEG frame")
                     }

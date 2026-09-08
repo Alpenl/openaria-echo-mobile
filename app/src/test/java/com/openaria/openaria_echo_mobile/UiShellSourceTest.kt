@@ -329,7 +329,7 @@ class UiShellSourceTest {
         assertContains(uiSource, "EchoColors.Peak.toArgb()")
         assertContains(uiSource, "previewFrame = previewFrame?.copy(focusMask = null)")
         assertContains(focusSource, "FOCUS_PROCESSING_PIXEL_BUDGET = 512 * 1024")
-        assertContains(focusSource, "PREVIEW_JPEG_BYTE_LIMIT = 8 * 1024 * 1024")
+        assertContains(focusSource, "bytes.size > PREVIEW_JPEG_BYTE_LIMIT")
         assertContains(focusSource, "inJustDecodeBounds = true")
         assertContains(focusSource, "horizontal + vertical >= threshold")
         assertTrue(

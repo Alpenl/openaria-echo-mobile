@@ -465,6 +465,74 @@ class DeviceHttpClientTest {
     }
 
     @Test
+    fun `rejects an oversized preview header before waiting for its body`() {
+        val releaseHandler = CountDownLatch(1)
+        val origin = startServer { exchange ->
+            exchange.responseHeaders.set("Content-Type", "image/jpeg")
+            exchange.sendResponseHeaders(200, PREVIEW_JPEG_BYTE_LIMIT.toLong() + 1)
+            releaseHandler.await(5, TimeUnit.SECONDS)
+            exchange.close()
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit<PreviewResult> {
+                DeviceHttpClient().getPreviewJpeg(connection(origin))
+            }
+            assertIs<PreviewResult.InvalidResponse>(future.get(2, TimeUnit.SECONDS))
+        } finally {
+            releaseHandler.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `rejects an oversized chunked preview without waiting for EOF`() {
+        val releaseHandler = CountDownLatch(1)
+        val origin = startServer { exchange ->
+            exchange.responseHeaders.set("Content-Type", "image/jpeg")
+            exchange.sendResponseHeaders(200, 0)
+            runCatching {
+                exchange.responseBody.use { output ->
+                    val chunk = ByteArray(8192)
+                    repeat(PREVIEW_JPEG_BYTE_LIMIT / chunk.size) { output.write(chunk) }
+                    output.write(0)
+                    output.flush()
+                    releaseHandler.await(5, TimeUnit.SECONDS)
+                }
+            }
+        }
+
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit<PreviewResult> {
+                DeviceHttpClient().getPreviewJpeg(connection(origin))
+            }
+            assertIs<PreviewResult.InvalidResponse>(future.get(2, TimeUnit.SECONDS))
+        } finally {
+            releaseHandler.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `accepts a chunked JPEG preview at the byte limit`() {
+        val frame = ByteArray(PREVIEW_JPEG_BYTE_LIMIT)
+        frame[0] = 0xFF.toByte()
+        frame[1] = 0xD8.toByte()
+        frame[frame.lastIndex - 1] = 0xFF.toByte()
+        frame[frame.lastIndex] = 0xD9.toByte()
+        val origin = startServer { exchange ->
+            exchange.responseHeaders.set("Content-Type", "image/jpeg")
+            exchange.sendResponseHeaders(200, 0)
+            exchange.responseBody.use { it.write(frame) }
+        }
+
+        val result = DeviceHttpClient().getPreviewJpeg(connection(origin))
+
+        assertContentEquals(frame, assertIs<PreviewResult.Frame>(result).bytes)
+    }
+
+    @Test
     fun `cancels a slow preview request when its view lifecycle ends`() {
         val requestArrived = CountDownLatch(1)
         val releaseHandler = CountDownLatch(1)

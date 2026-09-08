@@ -5,6 +5,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.test.assertContentEquals
+import kotlin.math.abs
+import kotlin.random.Random
 
 class FocusPeakingTest {
     private val peak = 0xffe858ff.toInt()
@@ -51,6 +54,33 @@ class FocusPeakingTest {
 
         assertTrue(strict.pixels.all { it == 0 })
         assertEquals(peak, permissive.pixels[width + 1])
+    }
+
+    @Test
+    fun `compact luminance matches central differences for every output pixel`() {
+        val random = Random(809)
+        val dimensions = listOf(1 to 1, 2 to 7, 7 to 2, 3 to 3, 13 to 11, 640 to 480)
+        for ((width, height) in dimensions) {
+            val pixels = IntArray(width * height) { random.nextInt() }
+            fun luminance(index: Int): Int {
+                val pixel = pixels[index]
+                return (77 * (pixel ushr 16 and 255) +
+                    150 * (pixel ushr 8 and 255) + 29 * (pixel and 255)) ushr 8
+            }
+            for (threshold in listOf(0, 1, 72, 510)) {
+                val expected = IntArray(pixels.size)
+                for (y in 1 until height - 1) {
+                    for (x in 1 until width - 1) {
+                        val index = y * width + x
+                        val gradient = abs(luminance(index + 1) - luminance(index - 1)) +
+                            abs(luminance(index + width) - luminance(index - width))
+                        if (gradient >= threshold) expected[index] = peak
+                    }
+                }
+                val actual = FocusPeaking.computeMask(pixels, width, height, threshold, peak)
+                assertContentEquals(expected, actual.pixels, "$width x $height, threshold=$threshold")
+            }
+        }
     }
 
     @Test

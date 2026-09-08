@@ -140,6 +140,7 @@ import com.openaria.openaria_echo_mobile.body.api.NetworkStreamEvent
 import com.openaria.openaria_echo_mobile.body.api.NetworkTransaction
 import com.openaria.openaria_echo_mobile.body.api.NetworkTransactionReceipt
 import com.openaria.openaria_echo_mobile.body.api.PreviewResult
+import com.openaria.openaria_echo_mobile.body.api.PREVIEW_JPEG_BYTE_LIMIT
 import com.openaria.openaria_echo_mobile.body.api.RetainedUnsuccessfulOutcome
 import com.openaria.openaria_echo_mobile.body.api.RetainedUnsuccessfulOutcomeResult
 import com.openaria.openaria_echo_mobile.body.api.SessionListPage

@@ -4,10 +4,10 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import com.openaria.openaria_echo_mobile.body.api.PREVIEW_JPEG_BYTE_LIMIT
 import kotlin.math.abs
 
 internal const val FOCUS_PROCESSING_PIXEL_BUDGET = 512 * 1024
-internal const val PREVIEW_JPEG_BYTE_LIMIT = 8 * 1024 * 1024
 private const val PREVIEW_SOURCE_DIMENSION_LIMIT = 16_384
 internal const val DEFAULT_FOCUS_PEAK_THRESHOLD = 72
 
@@ -60,22 +60,24 @@ internal object FocusPeaking {
         require(argb.size == width * height)
         require(threshold in 0..510)
 
-        val luminance = IntArray(argb.size)
-        argb.indices.forEach { index ->
+        val mask = IntArray(argb.size)
+        if (width < 3 || height < 3) return FocusPeakingMask(width, height, mask)
+
+        // Luminance is 0..255; one byte per pixel keeps the scan contiguous.
+        val luminance = ByteArray(argb.size)
+        for (index in argb.indices) {
             val pixel = argb[index]
             val red = pixel ushr 16 and 0xff
             val green = pixel ushr 8 and 0xff
             val blue = pixel and 0xff
-            luminance[index] = (77 * red + 150 * green + 29 * blue) ushr 8
+            luminance[index] = ((77 * red + 150 * green + 29 * blue) ushr 8).toByte()
         }
-
-        val mask = IntArray(argb.size)
         for (y in 1 until height - 1) {
             val row = y * width
             for (x in 1 until width - 1) {
                 val index = row + x
-                val horizontal = abs(luminance[index + 1] - luminance[index - 1])
-                val vertical = abs(luminance[index + width] - luminance[index - width])
+                val horizontal = abs((luminance[index + 1].toInt() and 0xff) - (luminance[index - 1].toInt() and 0xff))
+                val vertical = abs((luminance[index + width].toInt() and 0xff) - (luminance[index - width].toInt() and 0xff))
                 if (horizontal + vertical >= threshold) {
                     mask[index] = peakColorArgb
                 }

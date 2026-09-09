@@ -265,6 +265,36 @@ def capture_screen(destination: Path) -> None:
         return
 
 
+def open_update_page_in_english(evidence_dir: Path, timeout: int = 30) -> str:
+    """Navigate the unchanged baseline through either production settings layout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        nodes = [node for node in dump_ui(evidence_dir) if node.get("package") == PACKAGE_NAME]
+        # V3 moved language and updates into separate pages behind Settings.
+        # Match accessibility descriptions as well as visible text; its icon has
+        # no text node. Prefer this entry over a Body label elsewhere on screen.
+        for label, language in (("设置", "语言"), ("Settings", "Language")):
+            entry = find_text_node(nodes, label)
+            if entry is not None:
+                tap_node(entry)
+                scroll_until_tap(language, evidence_dir)
+                scroll_until_tap("English", evidence_dir)
+                # The trailing Settings title is not clickable. Close returns
+                # from the language subpage to the settings summary.
+                tap_text("Close", evidence_dir)
+                scroll_until_tap("Check for updates", evidence_dir)
+                wait_for_text("App update", evidence_dir, timeout=30)
+                return "settings_subpages"
+        for label in ("机身", "Body"):
+            entry = find_text_node(nodes, label)
+            if entry is not None:
+                tap_node(entry)
+                scroll_until_tap("English", evidence_dir)
+                return "legacy_body"
+        time.sleep(1)
+    raise AcceptanceError("Timed out waiting for the baseline app Settings or Body entry")
+
+
 def node_has_label(node: dict[str, str], label: str) -> bool:
     return node.get("text") == label or node.get("content-desc") == label
 
@@ -569,10 +599,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, object]:
             timeout=30,
         )
 
-        # Production baselines default their own in-app locale to Chinese. Switch it
-        # through the app UI so this contract is independent of the host locale.
-        tap_text("\u673a\u8eab", evidence_dir, timeout=30)
-        scroll_until_tap("English", evidence_dir)
+        # Use the baseline's production UI for both the locale and update page.
+        open_update_page_in_english(evidence_dir)
         scroll_until_tap("Check for updates", evidence_dir)
         wait_for_text(
             f"{args.expected_version_name}+{args.expected_version_code}",

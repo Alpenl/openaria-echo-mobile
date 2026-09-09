@@ -120,6 +120,66 @@ class DumpUiTest(unittest.TestCase):
                 )
 
 
+class UpdatePageNavigationTest(unittest.TestCase):
+    def navigate(self, nodes: list[dict[str, str]]):
+        evidence_dir = Path("/tmp/android-upgrade-navigation-test")
+        with mock.patch.object(acceptance, "dump_ui", return_value=nodes), mock.patch.object(
+            acceptance, "tap_node"
+        ) as tap, mock.patch.object(acceptance, "scroll_until_tap") as scroll, mock.patch.object(
+            acceptance, "tap_text"
+        ) as tap_text, mock.patch.object(acceptance, "wait_for_text") as wait:
+            layout = acceptance.open_update_page_in_english(evidence_dir)
+        return layout, tap, scroll, tap_text, wait
+
+    def test_v3_home_uses_settings_accessibility_icon_then_separate_pages(self) -> None:
+        # Shape observed in the failed v0.1.10 production APK hierarchy: Settings
+        # is a content description on a child of the clickable Compose button.
+        settings = {"text": "", "content-desc": "设置", "clickable": "false",
+                    "package": acceptance.PACKAGE_NAME, "bounds": "[743,76][869,202]"}
+        nodes = [
+            {"text": "未连接机身", "package": acceptance.PACKAGE_NAME},
+            {"text": "机身", "package": acceptance.PACKAGE_NAME},
+            settings,
+        ]
+        layout, tap, scroll, tap_text, wait = self.navigate(nodes)
+        self.assertEqual("settings_subpages", layout)
+        tap.assert_called_once_with(settings)
+        self.assertEqual(["语言", "English", "Check for updates"],
+                         [call.args[0] for call in scroll.call_args_list])
+        self.assertEqual("Close", tap_text.call_args.args[0])
+        self.assertEqual("App update", wait.call_args.args[0])
+
+    def test_v3_english_locale_uses_language_page(self) -> None:
+        layout, _tap, scroll, _tap_text, _wait = self.navigate([
+            {"content-desc": "Settings", "package": acceptance.PACKAGE_NAME}
+        ])
+        self.assertEqual("settings_subpages", layout)
+        self.assertEqual("Language", scroll.call_args_list[0].args[0])
+
+    def test_legacy_chinese_and_english_body_tabs_keep_inline_language_and_update(self) -> None:
+        for label in ("机身", "Body"):
+            with self.subTest(label=label):
+                layout, tap, scroll, tap_text, wait = self.navigate([
+                    {"text": label, "package": acceptance.PACKAGE_NAME},
+                    {"content-desc": "Settings", "package": "com.android.settings"},
+                ])
+                self.assertEqual("legacy_body", layout)
+                self.assertEqual(label, tap.call_args.args[0]["text"])
+                self.assertEqual(["English"], [call.args[0] for call in scroll.call_args_list])
+                tap_text.assert_not_called()
+                wait.assert_not_called()
+
+    def test_unrelated_settings_label_does_not_pass_navigation_gate(self) -> None:
+        with mock.patch.object(acceptance, "dump_ui", return_value=[
+            {"content-desc": "Settings", "package": "com.android.settings"}
+        ]), mock.patch.object(acceptance.time, "monotonic", side_effect=[0, 1, 31]), mock.patch.object(
+            acceptance.time, "sleep"
+        ), mock.patch.object(acceptance, "tap_node") as tap:
+            with self.assertRaisesRegex(acceptance.AcceptanceError, "baseline app Settings or Body"):
+                acceptance.open_update_page_in_english(Path("/tmp/navigation"))
+            tap.assert_not_called()
+
+
 class UnknownSourcesPageTest(unittest.TestCase):
     def run_enable(
         self,
